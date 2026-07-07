@@ -19,6 +19,8 @@ export interface SolarSample {
   batteryW: number;
   /** Derived house consumption (W): pv + gridSigned - batterySigned. */
   houseW: number;
+  /** Battery state of charge (%), or null when no battery is present. */
+  batterySoc: number | null;
 }
 
 /**
@@ -39,6 +41,9 @@ export class SolarFeed extends EventEmitter {
   private values: Record<Role, number> = { inverter: 0, meter: 0, battery: 0 };
 
   private present: Record<Role, boolean> = { inverter: false, meter: false, battery: false };
+
+  /** Battery state of charge (%) from the battery device's measure_battery. */
+  private batterySoc: number | null = null;
 
   private log: (...a: unknown[]) => void;
 
@@ -76,6 +81,23 @@ export class SolarFeed extends EventEmitter {
       } catch (err) {
         this.log('SolarFeed: could not subscribe to', role, (err as Error).message);
       }
+
+      // Battery state of charge (SoC %) from the same battery device.
+      if (role === 'battery' && (device.capabilities || []).includes('measure_battery')) {
+        const soc = device.capabilitiesObj?.measure_battery?.value;
+        if (typeof soc === 'number') this.batterySoc = soc;
+        try {
+          const inst = device.makeCapabilityInstance('measure_battery', (value: number) => {
+            if (typeof value === 'number') {
+              this.batterySoc = value;
+              this.emitSample();
+            }
+          });
+          this.instances.push(inst);
+        } catch (err) {
+          this.log('SolarFeed: could not subscribe to battery SoC', (err as Error).message);
+        }
+      }
     }
     this.log(`SolarFeed discovered: ${Object.entries(this.present).filter(([, v]) => v).map(([k]) => k).join(', ') || 'none'}`);
     if (this.present.meter) this.emitSample();
@@ -95,7 +117,8 @@ export class SolarFeed extends EventEmitter {
     const gridSignedW = this.values.meter;
     const batteryW = this.values.battery;
     const houseW = pvW + gridSignedW - batteryW;
-    return { pvW, gridSignedW, batteryW, houseW };
+    const batterySoc = this.present.battery ? this.batterySoc : null;
+    return { pvW, gridSignedW, batteryW, houseW, batterySoc };
   }
 
   private emitSample(): void {

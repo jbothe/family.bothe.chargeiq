@@ -83,6 +83,9 @@
             border: 1px solid var(--tile-border); background: var(--tile); }
     .node .val { font-size: 14px; font-weight: 700; margin-top: 6px; font-variant-numeric: tabular-nums; letter-spacing: -0.01em; }
     .node .name { font-size: 10.5px; color: var(--muted); margin-top: 1px; text-transform: uppercase; letter-spacing: 0.05em; }
+    .node .soc { font-size: 10.5px; font-weight: 700; margin-top: 3px; color: var(--battery);
+                 background: color-mix(in srgb, var(--battery) 15%, transparent); border-radius: 999px; padding: 1px 7px; line-height: 1.5; }
+    .node .soc:empty { display: none; }
     .tile svg, .badge-icon svg, .arrow svg { display: block; }
   </style>
 </head>
@@ -153,6 +156,7 @@
           '<div class="tile" style="color:' + ACCENT[k] + '">' + ICONS[k] + '</div>' +
           '<div class="val" data-role="val">–</div>' +
           '<div class="name">' + NAMES[k] + '</div>' +
+          '<div class="soc" data-role="soc"></div>' +
         '</div>';
       }).join('');
       document.getElementById('charger-tile').innerHTML = ICONS.charger;
@@ -179,6 +183,10 @@
         var a = node.querySelector('[data-role="arrow"]');
         a.className = 'arrow' + (f.dir ? ' show ' + f.dir : '');
         a.style.color = ACCENT[k];
+        if (k === 'battery') {
+          node.querySelector('[data-role="soc"]').textContent =
+            (s.batterySoc != null && !isNaN(s.batterySoc)) ? Math.round(s.batterySoc) + '%' : '';
+        }
       });
     }
 

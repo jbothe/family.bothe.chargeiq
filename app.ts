@@ -74,7 +74,8 @@ module.exports = class ChargeIQApp extends Homey.App {
 
   /** Merged state for the power-flow widget. App owns all four data points. */
   getWidgetState() {
-    const solar = this.solarFeed?.getSample() ?? { pvW: 0, gridSignedW: 0, batteryW: 0, houseW: 0 };
+    const solar = this.solarFeed?.getSample()
+      ?? { pvW: 0, gridSignedW: 0, batteryW: 0, houseW: 0, batterySoc: null };
     const dev = this.getChargerDevice();
     const cap = (id: string) => (dev && dev.hasCapability(id) ? dev.getCapabilityValue(id) : null);
     const diag = dev?.getDiagnostics?.();
@@ -85,6 +86,7 @@ module.exports = class ChargeIQApp extends Homey.App {
       houseW: solar.houseW,
       gridW: solar.gridSignedW, // import + / export -
       batteryW: solar.batteryW,
+      batterySoc: solar.batterySoc,
       surplusW,
       charger: {
         available: !!dev,
