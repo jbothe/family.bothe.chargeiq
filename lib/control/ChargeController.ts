@@ -15,6 +15,14 @@ import { BelowMinBehavior, SolarLoop, SolarLoopConfig } from './SolarLoop';
 
 export type ChargeMode = 'off' | 'scheduled' | 'solar' | 'manual';
 
+/** Live power inputs from the solar feed (all in W; grid import + / export -). */
+export interface SolarSampleInput {
+  gridSignedW: number;
+  pvW?: number;
+  batteryW?: number;
+  houseW?: number;
+}
+
 /**
  * Minimal surface the controller needs from its host (the Homey device).
  * Kept small so the controller stays unit-testable without the Homey runtime.
@@ -393,24 +401,31 @@ export class ChargeController {
    * solar device. Runs the surplus loop against the current charger draw and
    * updates the solar target. Called by SolarFeed on every capability change.
    */
-  onSolarSample(gridSignedW: number, now: number = Date.now()): void {
+  onSolarSample(sample: SolarSampleInput, now: number = Date.now()): void {
     this.lastSolarSampleAt = now;
     this.solarStaleWarned = false;
+    const gridSignedW = sample.gridSignedW;
     this.lastGridSignedW = gridSignedW;
     if (!this.solarLoop) return;
     const chargerPowerW = this.isCharging() ? this.lastPowerW : 0;
     const res = this.solarLoop.evaluate({ gridSignedW, chargerPowerW, now });
-    this.lastAvailableW = res.availableW;
+    // Excess is floored at 0 for display/metrics (negative = net import, no surplus).
+    this.lastAvailableW = Math.max(0, res.availableW);
     this.solarTargetAmps = res.target;
-    // Surface excess solar as a device metric (>=0; 0 when importing).
-    this.host.setCapability('measure_solar_surplus', Math.max(0, Math.round(res.availableW)));
+    this.host.setCapability('measure_solar_surplus', Math.round(this.lastAvailableW));
 
-    // Log solar decisions when the outcome changes (avoids per-sample spam).
-    const line = `grid=${Math.round(gridSignedW)}W excess=${Math.round(res.availableW)}W -> `
-      + `${res.target === null ? 'stop' : res.target === 0 ? 'pause' : res.target + 'A'} (${res.state})`;
-    if (line !== this.loggedSolar) {
-      this.loggedSolar = line;
-      this.host.log(`[solar] ${line}`);
+    // Diagnostics: full breakdown of the surplus calc, logged when something moves
+    // (deduped on values rounded to 50W plus the decision, to limit spam).
+    const tgt = res.target === null ? 'stop' : (res.target === 0 ? 'pause' : res.target + 'A');
+    const r50 = (w?: number) => (w == null ? 'na' : String(Math.round(w / 50) * 50));
+    const key = [r50(sample.pvW), r50(sample.batteryW), r50(sample.houseW),
+      r50(gridSignedW), r50(chargerPowerW), tgt, res.state].join('|');
+    if (key !== this.loggedSolar) {
+      this.loggedSolar = key;
+      const f = (w?: number) => (w == null ? '?' : Math.round(w) + 'W');
+      this.host.log(`[solar] solar=${f(sample.pvW)} battery=${f(sample.batteryW)} house=${f(sample.houseW)} `
+        + `grid=${f(gridSignedW)} charger=${f(chargerPowerW)} excess=${Math.round(this.lastAvailableW)}W`
+        + ` -> ${tgt} (${res.state})`);
     }
 
     // Tick in every mode so the household grid cap tracks live grid power.

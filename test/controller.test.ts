@@ -76,11 +76,11 @@ test('household grid cap throttles the charger in any mode', async () => {
   await c.startManual(31); // manual request for full 31A
 
   // High non-charger grid load: 11,700W import. Cap = (14000-11700)/230 = 10A.
-  c.onSolarSample(11700, Date.now());
+  c.onSolarSample({ gridSignedW: 11700 }, Date.now());
   assert.equal(caps.charge_current_limit, 10, 'capped to 10A under household ceiling');
 
   // Plenty of headroom (exporting): cap no longer constrains -> full 31A.
-  c.onSolarSample(-2000, Date.now());
+  c.onSolarSample({ gridSignedW: -2000 }, Date.now());
   assert.equal(caps.charge_current_limit, 31, 'uncapped when grid has headroom');
   // Excess solar surfaced as a metric (2000W export, not charging -> 2000W surplus).
   assert.equal(caps.measure_solar_surplus, 2000, 'excess solar metric set');
@@ -90,7 +90,21 @@ test('household cap pauses charging when even the minimum would breach the limit
   const { c, logs } = makeController([]);
   await c.startManual(16);
   // Non-charger load 13,900W: max charger = 100W -> below 6A minimum -> pause.
-  c.onSolarSample(13900, Date.now());
+  c.onSolarSample({ gridSignedW: 13900 }, Date.now());
   assert.ok(logs.some((l) => l.includes('[cap]') && l.includes('paused')),
     'logs a household-cap pause');
+});
+
+test('excess is floored at 0 and logged with all components', async () => {
+  const { c, caps, logs } = makeController([]);
+  await c.setMode('solar');
+  // Importing 40W, not charging -> available = -40W -> floored to 0.
+  c.onSolarSample({ gridSignedW: 40, pvW: 100, batteryW: -50, houseW: 190 }, Date.now());
+  assert.equal(caps.measure_solar_surplus, 0, 'excess floored at 0 (no negative)');
+  const line = logs.find((l) => l.includes('[solar]')) || '';
+  assert.ok(line.includes('solar=100W'), 'logs solar power');
+  assert.ok(line.includes('battery=-50W'), 'logs battery power (signed)');
+  assert.ok(line.includes('house=190W'), 'logs house power');
+  assert.ok(line.includes('grid=40W'), 'logs grid power');
+  assert.ok(line.includes('excess=0W'), 'logs floored excess');
 });

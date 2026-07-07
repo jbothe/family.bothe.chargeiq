@@ -48,7 +48,7 @@ module.exports = class ChargerDevice extends Homey.Device {
     const feed = app.getSolarFeed();
     this.onSolarSample = (s: SolarSample) => {
       this.lastSolarSample = s;
-      this.controller.onSolarSample(s.gridSignedW);
+      this.controller.onSolarSample(s);
     };
     feed?.on('sample', this.onSolarSample);
     this.lastSolarSample = feed?.getSample() ?? null;
