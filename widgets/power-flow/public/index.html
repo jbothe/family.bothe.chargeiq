@@ -108,7 +108,6 @@
     <div class="nodes" id="nodes"></div>
   </div>
 
-  <script src="flow.js"></script>
   <script type="text/javascript">
     var ICONS = {
       charger: '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="3" width="10" height="18" rx="2"/><line x1="7" y1="7" x2="11" y2="7"/><path d="M10 10.5 L8.3 14 H10 L9 17.5 L11.7 13.3 H9.9 Z" fill="currentColor" stroke="none"/><path d="M14 9 h2.5 a2 2 0 0 1 2 2 v3.5 a2 2 0 0 1 -2 2 h-.5"/></svg>',
@@ -123,8 +122,37 @@
     var NAMES = { solar: 'Solar', battery: 'Battery', house: 'House', grid: 'Grid' };
     var ORDER = ['solar', 'battery', 'house', 'grid'];
 
-    // Presentation logic is shared with the test suite (flow.js -> PowerFlow).
-    var PF = window.PowerFlow;
+    // === POWERFLOW-LOGIC-START (inlined so the widget is self-contained; the test
+    // suite extracts this exact block via these markers — keep it dependency-free) ===
+    var PF = {
+      fmtW: function (w) {
+        if (w == null || isNaN(w)) return '–';
+        var a = Math.abs(w);
+        return a >= 1000 ? (w / 1000).toFixed(a >= 10000 ? 0 : 1) + ' kW' : Math.round(w) + ' W';
+      },
+      cap: function (s) { return s ? String(s).charAt(0).toUpperCase() + String(s).slice(1) : ''; },
+      // { mag, dir: 'up'|'down'|null } — up = energy into the home/bus.
+      flow: function (kind, s) {
+        s = s || {};
+        var w;
+        if (kind === 'solar') { w = s.solarW || 0; return { mag: w, dir: w > 10 ? 'up' : null }; }
+        if (kind === 'house') { w = s.houseW || 0; return { mag: w, dir: w > 10 ? 'down' : null }; }
+        if (kind === 'battery') { w = s.batteryW || 0; return { mag: Math.abs(w), dir: w > 10 ? 'down' : (w < -10 ? 'up' : null) }; }
+        if (kind === 'grid') { w = s.gridW || 0; return { mag: Math.abs(w), dir: w > 10 ? 'up' : (w < -10 ? 'down' : null) }; }
+        return { mag: 0, dir: null };
+      },
+      busImporting: function (s) { return ((s && s.gridW) || 0) > 10; },
+      socLabel: function (s) { var v = s && s.batterySoc; return (v != null && !isNaN(v)) ? Math.round(v) + '%' : ''; },
+      statusLabel: function (c) {
+        if (!c || !c.available) return 'No charger paired';
+        var map = { Charging: 'Charging', SuspendedEV: 'Paused (vehicle)', SuspendedEVSE: 'Paused',
+          Preparing: 'Plugged in', Finishing: 'Finishing', Available: 'Unplugged', Faulted: 'Fault',
+          Reserved: 'Reserved', Unavailable: 'Unavailable' };
+        var s = map[c.status] || PF.cap(c.status) || 'Idle';
+        return c.mode ? s + ' · ' + PF.cap(c.mode) : s;
+      },
+    };
+    // === POWERFLOW-LOGIC-END ===
 
     function buildNodes() {
       var root = document.getElementById('nodes');
