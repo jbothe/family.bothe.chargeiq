@@ -17,5 +17,27 @@
       { "id": "meterSampleIntervalSec", "type": "number", "label": { "en": "MeterValues interval (s)" }, "value": 10, "min": 2, "max": 300 },
       { "id": "writeThrottleMs", "type": "number", "label": { "en": "Min ms between profile writes" }, "value": 15000, "min": 1000, "max": 120000 }
     ]
+  },
+  {
+    "type": "group",
+    "label": { "en": "Solar surplus" },
+    "children": [
+      { "id": "marginW", "type": "number", "label": { "en": "Grid reserve margin (W)" }, "hint": { "en": "Positive reserves headroom (charge less); negative allows some import." }, "value": 0, "min": -3000, "max": 3000 },
+      { "id": "deadbandA", "type": "number", "label": { "en": "Deadband (A)" }, "value": 1, "min": 0, "max": 10 },
+      { "id": "rampA", "type": "number", "label": { "en": "Max ramp per step (A)" }, "value": 3, "min": 1, "max": 32 },
+      { "id": "minOnSec", "type": "number", "label": { "en": "Minimum on time (s)" }, "value": 180, "min": 0, "max": 3600 },
+      { "id": "minOffSec", "type": "number", "label": { "en": "Minimum off time (s)" }, "value": 180, "min": 0, "max": 3600 },
+      { "id": "solarStaleSec", "type": "number", "label": { "en": "Solar feed stale timeout (s)" }, "value": 60, "min": 10, "max": 600 },
+      {
+        "id": "belowMin",
+        "type": "dropdown",
+        "label": { "en": "When surplus below minimum" },
+        "value": "pause",
+        "values": [
+          { "id": "pause", "label": { "en": "Pause at 0A (keep session)" } },
+          { "id": "stop", "label": { "en": "Stop the transaction" } }
+        ]
+      }
+    ]
   }
 ]

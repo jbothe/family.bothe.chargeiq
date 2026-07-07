@@ -5,10 +5,12 @@ import { CentralSystem } from '../../lib/ocpp/CentralSystem';
 import { ChargePoint } from '../../lib/ocpp/ChargePoint';
 import { ChargeController, ChargeMode, ControllerHost } from '../../lib/control/ChargeController';
 import { ScheduleWindow } from '../../lib/control/Scheduler';
+import { SolarFeed, SolarSample } from '../../lib/solar/SolarFeed';
 
 interface ChargeIQApp extends Homey.App {
   getCentralSystem(): CentralSystem;
   getChargePoint(identity: string): ChargePoint | undefined;
+  getSolarFeed(): SolarFeed;
 }
 
 const CAPABILITIES = [
@@ -26,6 +28,10 @@ module.exports = class ChargerDevice extends Homey.Device {
 
   private modeTrigger!: Homey.FlowCardTriggerDevice;
 
+  private onSolarSample?: (s: SolarSample) => void;
+
+  private lastSolarSample: SolarSample | null = null;
+
   async onInit() {
     await this.ensureCapabilities();
 
@@ -36,6 +42,15 @@ module.exports = class ChargerDevice extends Homey.Device {
     const app = this.homey.app as ChargeIQApp;
     this.controller = new ChargeController(this.buildHost(), app.getCentralSystem());
     this.controller.init();
+
+    // Feed grid power into the solar loop; keep the latest sample for the widget.
+    const feed = app.getSolarFeed();
+    this.onSolarSample = (s: SolarSample) => {
+      this.lastSolarSample = s;
+      this.controller.onSolarSample(s.gridSignedW);
+    };
+    feed?.on('sample', this.onSolarSample);
+    this.lastSolarSample = feed?.getSample() ?? null;
 
     this.registerCapabilityListener('evcharger_charging', async (value: boolean) => {
       if (value) {
@@ -63,6 +78,14 @@ module.exports = class ChargerDevice extends Homey.Device {
 
   async onDeleted() {
     this.controller?.destroy();
+    if (this.onSolarSample) {
+      (this.homey.app as ChargeIQApp).getSolarFeed()?.removeListener('sample', this.onSolarSample);
+    }
+  }
+
+  /** Latest merged solar sample (for the widget). */
+  getSolarSample(): SolarSample | null {
+    return this.lastSolarSample;
   }
 
   // --- Flow card entry points -------------------------------------------------

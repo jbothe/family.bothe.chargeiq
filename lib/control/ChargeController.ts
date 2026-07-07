@@ -11,6 +11,7 @@ import {
   StopTransactionReq,
 } from '../ocpp/types';
 import { Scheduler, ScheduleWindow } from './Scheduler';
+import { BelowMinBehavior, SolarLoop, SolarLoopConfig } from './SolarLoop';
 
 export type ChargeMode = 'off' | 'scheduled' | 'solar' | 'manual';
 
@@ -42,6 +43,15 @@ interface ControllerConfig {
   idTag: string;
   meterSampleIntervalSec: number;
   writeThrottleMs: number;
+  // Solar loop tunables
+  deadbandA: number;
+  rampA: number;
+  minOnMs: number;
+  minOffMs: number;
+  marginW: number;
+  belowMin: BelowMinBehavior;
+  /** Solar feed stale timeout (ms) after which the loop fails safe. */
+  solarStaleMs: number;
 }
 
 const DEFAULTS: ControllerConfig = {
@@ -52,6 +62,13 @@ const DEFAULTS: ControllerConfig = {
   idTag: 'CHARGEIQ',
   meterSampleIntervalSec: 10,
   writeThrottleMs: 15000,
+  deadbandA: 1,
+  rampA: 3,
+  minOnMs: 3 * 60000,
+  minOffMs: 3 * 60000,
+  marginW: 0,
+  belowMin: 'pause',
+  solarStaleMs: 60000,
 };
 
 const PROFILE_ID = 1;
@@ -112,8 +129,17 @@ export class ChargeController {
 
   private override: ManualOverride | null = null;
 
-  /** Solar target current (A) or null when no surplus decision available. Fed by SolarFeed (M4). */
+  /** Solar target (A): null = stop, 0 = pause, >=minAmps = charge. Fed by SolarFeed (M4). */
   private solarTargetAmps: number | null = null;
+
+  private solarLoop: SolarLoop | null = null;
+
+  private lastSolarSampleAt = 0;
+
+  private solarStaleWarned = false;
+
+  /** Latest charger draw from MeterValues (W), used by the solar loop. */
+  private lastPowerW = 0;
 
   private transactionId: number | null = null;
 
@@ -140,6 +166,7 @@ export class ChargeController {
 
   init(): void {
     this.refreshConfig();
+    this.solarLoop = new SolarLoop(this.solarLoopConfig());
     this.mode = this.host.getStore<ChargeMode>('mode') ?? 'off';
     this.transactionId = this.host.getStore<number>('transactionId') ?? null;
     this.scheduler.setWindows(this.host.getStore<ScheduleWindow[]>('schedule') ?? []);
@@ -178,6 +205,23 @@ export class ChargeController {
       idTag: g('idTag', DEFAULTS.idTag),
       meterSampleIntervalSec: g('meterSampleIntervalSec', DEFAULTS.meterSampleIntervalSec),
       writeThrottleMs: g('writeThrottleMs', DEFAULTS.writeThrottleMs),
+      deadbandA: g('deadbandA', DEFAULTS.deadbandA),
+      rampA: g('rampA', DEFAULTS.rampA),
+      minOnMs: g('minOnSec', DEFAULTS.minOnMs / 1000) * 1000,
+      minOffMs: g('minOffSec', DEFAULTS.minOffMs / 1000) * 1000,
+      marginW: g('marginW', DEFAULTS.marginW),
+      belowMin: g('belowMin', DEFAULTS.belowMin),
+      solarStaleMs: g('solarStaleSec', DEFAULTS.solarStaleMs / 1000) * 1000,
+    };
+    this.solarLoop?.setConfig(this.solarLoopConfig());
+  }
+
+  private solarLoopConfig(): SolarLoopConfig {
+    const c = this.cfg;
+    return {
+      voltage: c.voltage, phases: c.phases, minAmps: c.minAmps, maxAmps: c.maxAmps,
+      deadbandA: c.deadbandA, rampA: c.rampA, minOnMs: c.minOnMs, minOffMs: c.minOffMs,
+      marginW: c.marginW, belowMin: c.belowMin,
     };
   }
 
@@ -221,7 +265,7 @@ export class ChargeController {
   }
 
   private onMeterValues(r: Readings): void {
-    if (r.power !== undefined) this.host.setCapability('measure_power', r.power);
+    if (r.power !== undefined) { this.lastPowerW = r.power; this.host.setCapability('measure_power', r.power); }
     if (r.current !== undefined) this.host.setCapability('measure_current', r.current);
     if (r.voltage !== undefined) this.host.setCapability('measure_voltage', r.voltage);
     if (r.energyKwh !== undefined) this.host.setCapability('meter_power', r.energyKwh);
@@ -279,12 +323,28 @@ export class ChargeController {
     return this.scheduler.getWindows();
   }
 
-  /** Feed the latest solar surplus target (A), or null when unavailable. Set by SolarFeed (M4). */
+  /** Directly set the solar target (A): null = stop, 0 = pause, >=min = charge. Test/manual use. */
   setSolarTarget(amps: number | null): void {
     this.solarTargetAmps = amps;
-    if (this.mode === 'solar' && (this.override == null || Date.now() >= this.override.expiresAt)) {
-      this.tick();
-    }
+    if (this.mode === 'solar') this.tick();
+  }
+
+  /**
+   * Feed a fresh grid-power sample (import positive / export negative) from the
+   * solar device. Runs the surplus loop against the current charger draw and
+   * updates the solar target. Called by SolarFeed on every capability change.
+   */
+  onSolarSample(gridSignedW: number, now: number = Date.now()): void {
+    this.lastSolarSampleAt = now;
+    this.solarStaleWarned = false;
+    if (!this.solarLoop) return;
+    const res = this.solarLoop.evaluate({
+      gridSignedW,
+      chargerPowerW: this.isCharging() ? this.lastPowerW : 0,
+      now,
+    });
+    this.solarTargetAmps = res.target;
+    if (this.mode === 'solar') this.tick(new Date(now));
   }
 
   /** Manual start: overrides the base mode until the next schedule boundary. */
@@ -332,9 +392,9 @@ export class ChargeController {
     }
 
     if (this.mode === 'solar') {
-      return this.solarTargetAmps != null && this.solarTargetAmps >= this.cfg.minAmps
-        ? { charge: true, amps: this.clampAmps(this.solarTargetAmps) }
-        : { charge: false };
+      if (this.solarTargetAmps == null) return { charge: false };
+      if (this.solarTargetAmps === 0) return { charge: true, amps: 0 }; // pause (hold 0A if a tx exists)
+      return { charge: true, amps: this.clampAmps(this.solarTargetAmps) };
     }
 
     // 'scheduled' outside a window, or 'manual' with no active override -> idle.
@@ -348,6 +408,17 @@ export class ChargeController {
   tick(now: Date = new Date()): void {
     if (this.override && now.getTime() >= this.override.expiresAt) this.override = null;
 
+    // Solar fail-safe: if the feed goes stale, stop increasing/charging on solar.
+    if (this.mode === 'solar' && this.lastSolarSampleAt > 0
+      && now.getTime() - this.lastSolarSampleAt > this.cfg.solarStaleMs) {
+      if (!this.solarStaleWarned) {
+        this.host.log('Solar feed stale; failing safe (stopping solar charging)');
+        this.solarStaleWarned = true;
+      }
+      this.solarTargetAmps = null;
+      this.solarLoop?.reset();
+    }
+
     const decision = this.resolve(now);
     if (decision.charge) {
       this.ensureCharging(decision.amps ?? this.cfg.maxAmps);
@@ -356,14 +427,16 @@ export class ChargeController {
     }
   }
 
+  /** amps: 0 = pause (hold 0A, keep the transaction), >0 = charge at that current. */
   private ensureCharging(amps: number): void {
-    const target = this.clampAmps(amps);
+    const target = amps <= 0 ? 0 : this.clampAmps(amps);
     if (this.desiredAmps !== target) {
       this.desiredAmps = target;
-      this.host.setCapability('charge_current_limit', target);
+      if (target > 0) this.host.setCapability('charge_current_limit', target);
       if (this.transactionId != null) this.scheduleWrite();
     }
-    if (this.transactionId == null && !this.awaitingStart && this.cp?.connected) {
+    // Only start a transaction to actually charge (never just to pause at 0A).
+    if (target > 0 && this.transactionId == null && !this.awaitingStart && this.cp?.connected) {
       this.awaitingStart = true;
       this.cp.remoteStartTransaction(this.cfg.idTag, CONNECTOR_ID)
         .catch((e) => { this.awaitingStart = false; this.host.error('remoteStart', e); });

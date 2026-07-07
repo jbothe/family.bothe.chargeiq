@@ -3,6 +3,7 @@
 import Homey from 'homey';
 import { CentralSystem } from './lib/ocpp/CentralSystem';
 import { ChargePoint } from './lib/ocpp/ChargePoint';
+import { SolarFeed } from './lib/solar/SolarFeed';
 
 const DEFAULT_PORT = 9000;
 
@@ -15,6 +16,8 @@ const DEFAULT_PORT = 9000;
 module.exports = class ChargeIQApp extends Homey.App {
 
   private centralSystem!: CentralSystem;
+
+  private solarFeed!: SolarFeed;
 
   async onInit() {
     const port = (this.homey.settings.get('ocppPort') as number) || DEFAULT_PORT;
@@ -33,11 +36,17 @@ module.exports = class ChargeIQApp extends Homey.App {
       throw err;
     }
 
+    // Solar feed is best-effort: the charger still works (manual/scheduled) if
+    // the SolarEdge app is absent or the HomeyAPI is unavailable.
+    this.solarFeed = new SolarFeed(this.homey, (msg, ...args) => this.log(msg, ...args));
+    this.solarFeed.start().catch((err) => this.error('SolarFeed failed to start:', err));
+
     this.log(`ChargeIQ initialised; OCPP CS on port ${port}`);
   }
 
   async onUninit() {
     await this.centralSystem?.stop();
+    await this.solarFeed?.stop();
   }
 
   /** Expose the Central System to drivers/devices. */
@@ -47,6 +56,10 @@ module.exports = class ChargeIQApp extends Homey.App {
 
   getChargePoint(identity: string): ChargePoint | undefined {
     return this.centralSystem.getChargePoint(identity);
+  }
+
+  getSolarFeed(): SolarFeed {
+    return this.solarFeed;
   }
 
   /** Authorize policy: accept-all, or an idTag whitelist from settings. */
