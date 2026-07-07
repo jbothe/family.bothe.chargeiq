@@ -186,6 +186,8 @@ export class ChargeController {
     });
 
     this.tickTimer = setInterval(() => this.tick(), TICK_MS);
+    // Do not keep the process alive solely for the tick (matters for tests/CLI).
+    this.tickTimer.unref?.();
   }
 
   destroy(): void {
@@ -262,6 +264,14 @@ export class ChargeController {
     this.host.setCapability('evcharger_charging_state', toChargingState(info.status));
     this.host.setCapability('evcharger_charging', info.status === 'Charging');
     this.host.setWarning(info.status === 'Faulted' ? `Charger fault: ${info.errorCode}` : null);
+
+    // Reconcile a stale transaction id after a restart/reconnect: if the charger
+    // reports it is idle, no session is active regardless of what we persisted.
+    if (info.status === 'Available' && this.transactionId != null) {
+      this.transactionId = null;
+      this.awaitingStart = false;
+      this.host.setStore('transactionId', null).catch(this.host.error);
+    }
   }
 
   private onMeterValues(r: Readings): void {
