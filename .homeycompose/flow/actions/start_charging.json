@@ -1,0 +1,19 @@
+{
+  "title": { "en": "Start charging" },
+  "hint": { "en": "Manual start until the next schedule boundary" },
+  "titleFormatted": { "en": "Start charging at [[current]] A" },
+  "args": [
+    { "type": "device", "name": "device", "filter": "driver_id=charger" },
+    {
+      "type": "range",
+      "name": "current",
+      "title": { "en": "Current (A)" },
+      "min": 6,
+      "max": 31,
+      "step": 1,
+      "value": 16,
+      "label": " A",
+      "labelDecimals": 0
+    }
+  ]
+}

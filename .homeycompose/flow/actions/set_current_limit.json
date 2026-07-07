@@ -1,0 +1,18 @@
+{
+  "title": { "en": "Set current limit" },
+  "titleFormatted": { "en": "Set current limit to [[current]] A" },
+  "args": [
+    { "type": "device", "name": "device", "filter": "driver_id=charger" },
+    {
+      "type": "range",
+      "name": "current",
+      "title": { "en": "Current (A)" },
+      "min": 6,
+      "max": 31,
+      "step": 1,
+      "value": 16,
+      "label": " A",
+      "labelDecimals": 0
+    }
+  ]
+}

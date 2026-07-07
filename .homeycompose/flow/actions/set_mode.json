@@ -1,0 +1,17 @@
+{
+  "title": { "en": "Set charge mode" },
+  "titleFormatted": { "en": "Set charge mode to [[mode]]" },
+  "args": [
+    { "type": "device", "name": "device", "filter": "driver_id=charger" },
+    {
+      "type": "dropdown",
+      "name": "mode",
+      "values": [
+        { "id": "off", "label": { "en": "Off" } },
+        { "id": "scheduled", "label": { "en": "Scheduled" } },
+        { "id": "solar", "label": { "en": "Solar surplus" } },
+        { "id": "manual", "label": { "en": "Manual" } }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,6 @@
+{
+  "title": { "en": "!{{Is|Is not}} within a schedule window" },
+  "args": [
+    { "type": "device", "name": "device", "filter": "driver_id=charger" }
+  ]
+}

@@ -10,6 +10,7 @@ import {
   StatusNotificationReq,
   StopTransactionReq,
 } from '../ocpp/types';
+import { Scheduler, ScheduleWindow } from './Scheduler';
 
 export type ChargeMode = 'off' | 'scheduled' | 'solar' | 'manual';
 
@@ -28,6 +29,9 @@ export interface ControllerHost {
   setWarning(msg: string | null): void;
   log(...args: unknown[]): void;
   error(...args: unknown[]): void;
+  /** Fired when charging starts/stops so the device can trigger Flow cards. */
+  onChargingChanged?(charging: boolean): void;
+  onModeChanged?(mode: ChargeMode): void;
 }
 
 interface ControllerConfig {
@@ -37,7 +41,6 @@ interface ControllerConfig {
   voltage: number;
   idTag: string;
   meterSampleIntervalSec: number;
-  /** Minimum ms between SetChargingProfile writes. */
   writeThrottleMs: number;
 }
 
@@ -54,6 +57,19 @@ const DEFAULTS: ControllerConfig = {
 const PROFILE_ID = 1;
 const STACK_LEVEL = 1;
 const CONNECTOR_ID = 1;
+const TICK_MS = 30000;
+
+interface ManualOverride {
+  action: 'start' | 'stop';
+  amps?: number;
+  /** Epoch ms at which the override expires (Infinity = until cleared). */
+  expiresAt: number;
+}
+
+interface Decision {
+  charge: boolean;
+  amps?: number;
+}
 
 /** Map raw OCPP status to Homey's standard evcharger_charging_state enum. */
 export function toChargingState(status: OcppStatus): string {
@@ -75,11 +91,10 @@ export function toChargingState(status: OcppStatus): string {
 }
 
 /**
- * Owns charging behaviour for one charge point: binds to its {@link ChargePoint},
- * reflects OCPP state onto Homey capabilities, and applies charging decisions.
- *
- * M2 implements manual control (start/stop/set current) and boot-time MeterValues
- * configuration. Scheduled and solar modes extend {@link resolve} in later milestones.
+ * Owns charging behaviour for one charge point. Binds to its {@link ChargePoint},
+ * reflects OCPP state onto capabilities, and resolves a desired charging action
+ * each tick from mode + schedule + manual override (precedence: manual override
+ * -> active schedule window -> solar -> idle). Solar is added in M4.
  */
 export class ChargeController {
 
@@ -93,17 +108,25 @@ export class ChargeController {
 
   private mode: ChargeMode = 'off';
 
-  /** Live transaction id, mirrored to the device store for restart recovery. */
+  private scheduler = new Scheduler();
+
+  private override: ManualOverride | null = null;
+
+  /** Solar target current (A) or null when no surplus decision available. Fed by SolarFeed (M4). */
+  private solarTargetAmps: number | null = null;
+
   private transactionId: number | null = null;
 
-  /** Desired current to apply once a transaction is running (A); null = don't charge. */
+  /** Currently-applied/desired current (A); null = not charging. */
   private desiredAmps: number | null = null;
+
+  private awaitingStart = false;
 
   private lastWriteAt = 0;
 
   private pendingWrite: NodeJS.Timeout | null = null;
 
-  private lastStatus: OcppStatus | null = null;
+  private tickTimer: NodeJS.Timeout | null = null;
 
   constructor(host: ControllerHost, cs: CentralSystem) {
     this.host = host;
@@ -117,8 +140,9 @@ export class ChargeController {
 
   init(): void {
     this.refreshConfig();
-    this.mode = (this.host.getStore<ChargeMode>('mode')) ?? (this.host.getSetting<ChargeMode>('defaultMode')) ?? 'off';
+    this.mode = this.host.getStore<ChargeMode>('mode') ?? 'off';
     this.transactionId = this.host.getStore<number>('transactionId') ?? null;
+    this.scheduler.setWindows(this.host.getStore<ScheduleWindow[]>('schedule') ?? []);
     this.host.setCapability('charge_mode', this.mode);
 
     const existing = this.cs.getChargePoint(this.host.identity);
@@ -133,9 +157,17 @@ export class ChargeController {
         this.host.setUnavailable('Charger offline');
       }
     });
+
+    this.tickTimer = setInterval(() => this.tick(), TICK_MS);
   }
 
-  /** Re-read tunables from device settings. */
+  destroy(): void {
+    if (this.tickTimer) clearInterval(this.tickTimer);
+    if (this.pendingWrite) clearTimeout(this.pendingWrite);
+    this.tickTimer = null;
+    this.pendingWrite = null;
+  }
+
   refreshConfig(): void {
     const g = <T>(k: string, d: T): T => (this.host.getSetting<T>(k) ?? d);
     this.cfg = {
@@ -160,14 +192,10 @@ export class ChargeController {
     cp.on('startTransaction', (id: number, req: StartTransactionReq) => this.onStartTransaction(id, req));
     cp.on('stopTransaction', (req: StopTransactionReq) => this.onStopTransaction(req));
 
-    // If a transaction was live before restart, resume applying the target.
-    if (this.transactionId != null && this.desiredAmps != null) {
-      this.scheduleWrite();
-    }
     this.host.log(`Controller bound to ${cp.identity}`);
+    this.tick();
   }
 
-  /** Push MeterValues sampling config so the loop and widget stay responsive. */
   private async configureCharger(): Promise<void> {
     if (!this.cp) return;
     try {
@@ -186,7 +214,6 @@ export class ChargeController {
   // ---------------------------------------------------------------------------
 
   private onStatus(info: StatusNotificationReq): void {
-    this.lastStatus = info.status;
     this.host.setCapability('charger_status', info.status);
     this.host.setCapability('evcharger_charging_state', toChargingState(info.status));
     this.host.setCapability('evcharger_charging', info.status === 'Charging');
@@ -202,10 +229,11 @@ export class ChargeController {
 
   private onStartTransaction(id: number, req: StartTransactionReq): void {
     this.transactionId = id;
+    this.awaitingStart = false;
     this.host.setStore('transactionId', id).catch(this.host.error);
     this.host.setStore('meterStartWh', req.meterStart).catch(this.host.error);
     this.host.setCapability('evcharger_charging', true);
-    // Apply the desired current now that we have a live transaction.
+    this.host.onChargingChanged?.(true);
     if (this.desiredAmps != null) this.scheduleWrite();
   }
 
@@ -213,52 +241,140 @@ export class ChargeController {
     this.transactionId = null;
     this.host.setStore('transactionId', null).catch(this.host.error);
     this.host.setCapability('evcharger_charging', false);
+    this.host.onChargingChanged?.(false);
   }
 
   // ---------------------------------------------------------------------------
-  // Manual control API (invoked by capability listeners / flow cards)
+  // Public API (capability listeners / flow cards)
   // ---------------------------------------------------------------------------
 
   async setMode(mode: ChargeMode): Promise<void> {
     this.mode = mode;
+    this.override = null; // switching mode clears a lingering override
     await this.host.setStore('mode', mode);
     this.host.setCapability('charge_mode', mode);
-    if (mode === 'off') await this.stop();
+    this.host.onModeChanged?.(mode);
+    this.tick();
   }
 
   getMode(): ChargeMode {
     return this.mode;
   }
 
-  /** Start charging at the given current (defaults to the slider value / min). */
-  async startManual(amps?: number): Promise<void> {
-    const target = this.clampAmps(amps ?? this.cfg.maxAmps);
-    this.desiredAmps = target;
-    this.host.setCapability('charge_current_limit', target);
+  isCharging(): boolean {
+    return this.transactionId != null;
+  }
 
-    if (this.transactionId == null) {
-      if (!this.cp?.connected) throw new Error('Charger not connected');
-      await this.cp.remoteStartTransaction(this.cfg.idTag, CONNECTOR_ID);
-      // SetChargingProfile is applied when StartTransaction arrives.
-    } else {
-      this.scheduleWrite();
+  isWithinSchedule(now: Date = new Date()): boolean {
+    return this.scheduler.isActive(now);
+  }
+
+  async setSchedule(windows: ScheduleWindow[]): Promise<void> {
+    this.scheduler.setWindows(windows);
+    await this.host.setStore('schedule', windows);
+    this.tick();
+  }
+
+  getSchedule(): ScheduleWindow[] {
+    return this.scheduler.getWindows();
+  }
+
+  /** Feed the latest solar surplus target (A), or null when unavailable. Set by SolarFeed (M4). */
+  setSolarTarget(amps: number | null): void {
+    this.solarTargetAmps = amps;
+    if (this.mode === 'solar' && (this.override == null || Date.now() >= this.override.expiresAt)) {
+      this.tick();
     }
   }
 
-  /** Change the target current (applies immediately if charging). */
+  /** Manual start: overrides the base mode until the next schedule boundary. */
+  async startManual(amps?: number): Promise<void> {
+    const target = this.clampAmps(amps ?? this.cfg.maxAmps);
+    this.host.setCapability('charge_current_limit', target);
+    this.override = { action: 'start', amps: target, expiresAt: this.nextBoundaryMs() };
+    this.tick();
+  }
+
   async setCurrentLimit(amps: number): Promise<void> {
     const target = this.clampAmps(amps);
     this.host.setCapability('charge_current_limit', target);
-    if (this.desiredAmps == null) return; // not charging; remember for next start
-    this.desiredAmps = target;
-    this.scheduleWrite();
+    if (this.override?.action === 'start') this.override.amps = target;
+    this.tick();
   }
 
+  /** Manual stop: overrides the base mode until the next schedule boundary. */
   async stop(): Promise<void> {
-    this.desiredAmps = null;
+    this.override = { action: 'stop', expiresAt: this.nextBoundaryMs() };
+    this.tick();
+  }
+
+  private nextBoundaryMs(): number {
+    const b = this.scheduler.nextBoundary(new Date());
+    return b ? b.getTime() : Infinity;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Decision + tick
+  // ---------------------------------------------------------------------------
+
+  /** Resolve the desired charging action from override + mode + schedule + solar. */
+  resolve(now: Date): Decision {
+    if (this.override && now.getTime() < this.override.expiresAt) {
+      if (this.override.action === 'stop') return { charge: false };
+      return { charge: true, amps: this.override.amps ?? this.scheduleOrMax(now) };
+    }
+
+    if (this.mode === 'off') return { charge: false };
+
+    // Schedule beats solar.
+    if (this.scheduler.isActive(now)) {
+      return { charge: true, amps: this.scheduleOrMax(now) };
+    }
+
+    if (this.mode === 'solar') {
+      return this.solarTargetAmps != null && this.solarTargetAmps >= this.cfg.minAmps
+        ? { charge: true, amps: this.clampAmps(this.solarTargetAmps) }
+        : { charge: false };
+    }
+
+    // 'scheduled' outside a window, or 'manual' with no active override -> idle.
+    return { charge: false };
+  }
+
+  private scheduleOrMax(now: Date): number {
+    return this.clampAmps(this.scheduler.activeCurrent(now) ?? this.cfg.maxAmps);
+  }
+
+  tick(now: Date = new Date()): void {
+    if (this.override && now.getTime() >= this.override.expiresAt) this.override = null;
+
+    const decision = this.resolve(now);
+    if (decision.charge) {
+      this.ensureCharging(decision.amps ?? this.cfg.maxAmps);
+    } else {
+      this.ensureStopped();
+    }
+  }
+
+  private ensureCharging(amps: number): void {
+    const target = this.clampAmps(amps);
+    if (this.desiredAmps !== target) {
+      this.desiredAmps = target;
+      this.host.setCapability('charge_current_limit', target);
+      if (this.transactionId != null) this.scheduleWrite();
+    }
+    if (this.transactionId == null && !this.awaitingStart && this.cp?.connected) {
+      this.awaitingStart = true;
+      this.cp.remoteStartTransaction(this.cfg.idTag, CONNECTOR_ID)
+        .catch((e) => { this.awaitingStart = false; this.host.error('remoteStart', e); });
+    }
+  }
+
+  private ensureStopped(): void {
     if (this.pendingWrite) { clearTimeout(this.pendingWrite); this.pendingWrite = null; }
+    this.desiredAmps = null;
     if (this.transactionId != null && this.cp?.connected) {
-      await this.cp.remoteStopTransaction(this.transactionId).catch((e) => this.host.error('stop', e));
+      this.cp.remoteStopTransaction(this.transactionId).catch((e) => this.host.error('remoteStop', e));
     }
   }
 
@@ -270,7 +386,6 @@ export class ChargeController {
     return Math.max(this.cfg.minAmps, Math.min(this.cfg.maxAmps, Math.round(amps)));
   }
 
-  /** Throttle SetChargingProfile writes; coalesce rapid changes into a trailing write. */
   private scheduleWrite(): void {
     if (this.pendingWrite) return;
     const wait = Math.max(0, this.cfg.writeThrottleMs - (Date.now() - this.lastWriteAt));

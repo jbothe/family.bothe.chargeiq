@@ -1,0 +1,6 @@
+{
+  "title": { "en": "!{{Is|Is not}} charging" },
+  "args": [
+    { "type": "device", "name": "device", "filter": "driver_id=charger" }
+  ]
+}

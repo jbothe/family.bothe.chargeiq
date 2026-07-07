@@ -4,6 +4,7 @@ import Homey from 'homey';
 import { CentralSystem } from '../../lib/ocpp/CentralSystem';
 import { ChargePoint } from '../../lib/ocpp/ChargePoint';
 import { ChargeController, ChargeMode, ControllerHost } from '../../lib/control/ChargeController';
+import { ScheduleWindow } from '../../lib/control/Scheduler';
 
 interface ChargeIQApp extends Homey.App {
   getCentralSystem(): CentralSystem;
@@ -19,8 +20,18 @@ module.exports = class ChargerDevice extends Homey.Device {
 
   private controller!: ChargeController;
 
+  private startedTrigger!: Homey.FlowCardTriggerDevice;
+
+  private stoppedTrigger!: Homey.FlowCardTriggerDevice;
+
+  private modeTrigger!: Homey.FlowCardTriggerDevice;
+
   async onInit() {
     await this.ensureCapabilities();
+
+    this.startedTrigger = this.homey.flow.getDeviceTriggerCard('charging_started');
+    this.stoppedTrigger = this.homey.flow.getDeviceTriggerCard('charging_stopped');
+    this.modeTrigger = this.homey.flow.getDeviceTriggerCard('mode_changed');
 
     const app = this.homey.app as ChargeIQApp;
     this.controller = new ChargeController(this.buildHost(), app.getCentralSystem());
@@ -50,6 +61,31 @@ module.exports = class ChargerDevice extends Homey.Device {
     this.controller?.refreshConfig();
   }
 
+  async onDeleted() {
+    this.controller?.destroy();
+  }
+
+  // --- Flow card entry points -------------------------------------------------
+
+  flowSetMode(mode: ChargeMode) { return this.controller.setMode(mode); }
+
+  flowStart(current?: number) { return this.controller.startManual(current); }
+
+  flowStop() { return this.controller.stop(); }
+
+  flowSetCurrent(current: number) { return this.controller.setCurrentLimit(current); }
+
+  flowIsCharging() { return this.controller.isCharging(); }
+
+  flowModeIs(mode: ChargeMode) { return this.controller.getMode() === mode; }
+
+  flowWithinSchedule() { return this.controller.isWithinSchedule(); }
+
+  /** Used by the settings/widget editor to persist weekly windows. */
+  setSchedule(windows: ScheduleWindow[]) { return this.controller.setSchedule(windows); }
+
+  getSchedule() { return this.controller.getSchedule(); }
+
   private async ensureCapabilities() {
     for (const cap of CAPABILITIES) {
       if (!this.hasCapability(cap)) await this.addCapability(cap).catch(this.error);
@@ -76,6 +112,13 @@ module.exports = class ChargerDevice extends Homey.Device {
       },
       log: (...args) => this.log(...args),
       error: (...args) => this.error(...args),
+      onChargingChanged: (charging) => {
+        const card = charging ? this.startedTrigger : this.stoppedTrigger;
+        card.trigger(this, {}, {}).catch(this.error);
+      },
+      onModeChanged: (mode) => {
+        this.modeTrigger.trigger(this, { mode }, {}).catch(this.error);
+      },
     };
   }
 
