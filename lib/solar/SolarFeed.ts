@@ -82,10 +82,10 @@ export class SolarFeed extends EventEmitter {
   }
 
   private roleOf(device: any): Role | null {
-    const uri: string = device.driverUri ?? device.driverId ?? '';
-    if (!uri.includes(SOLAREDGE_APP)) return null;
-    const id: string = device.driverId ?? '';
-    const key = id.includes(':') ? id.split(':').pop() : id;
+    // driverId is the canonical URI, e.g. "homey:app:bothe.family.solaredge:meter".
+    const driverId: string = device.driverId ?? '';
+    if (!driverId.includes(SOLAREDGE_APP)) return null;
+    const key = driverId.includes(':') ? driverId.split(':').pop() : driverId;
     if (key === 'inverter' || key === 'meter' || key === 'battery') return key;
     return null;
   }
