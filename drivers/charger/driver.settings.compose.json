@@ -1,0 +1,21 @@
+[
+  {
+    "type": "group",
+    "label": { "en": "Electrical" },
+    "children": [
+      { "id": "phases", "type": "number", "label": { "en": "Phases" }, "value": 1, "min": 1, "max": 3, "step": 1 },
+      { "id": "voltage", "type": "number", "label": { "en": "Nominal voltage (V)" }, "value": 230, "min": 100, "max": 480 },
+      { "id": "minAmps", "type": "number", "label": { "en": "Minimum current (A)" }, "value": 6, "min": 1, "max": 32 },
+      { "id": "maxAmps", "type": "number", "label": { "en": "Maximum current (A)" }, "value": 31, "min": 6, "max": 80 }
+    ]
+  },
+  {
+    "type": "group",
+    "label": { "en": "OCPP" },
+    "children": [
+      { "id": "idTag", "type": "text", "label": { "en": "Default idTag (RemoteStart)" }, "value": "CHARGEIQ" },
+      { "id": "meterSampleIntervalSec", "type": "number", "label": { "en": "MeterValues interval (s)" }, "value": 10, "min": 2, "max": 300 },
+      { "id": "writeThrottleMs", "type": "number", "label": { "en": "Min ms between profile writes" }, "value": 15000, "min": 1000, "max": 120000 }
+    ]
+  }
+]
