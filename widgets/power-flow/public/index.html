@@ -44,7 +44,9 @@
     html, body { margin: 0; padding: 0; background: transparent; }
     body { font-family: -apple-system, "Segoe UI", Roboto, Helvetica, sans-serif; color: var(--text);
            -webkit-font-smoothing: antialiased; }
-    .card { padding: 14px 16px 12px; }
+    .card { padding: 14px 16px 12px; transition: opacity .5s ease, filter .5s ease; }
+    /* Stale: data hasn't refreshed recently (network/wifi blip). Dim, keep last values, auto-recover. */
+    .card.stale { opacity: 0.4; filter: grayscale(0.85); }
 
     /* Header */
     .head { display: flex; align-items: center; gap: 12px; }
@@ -195,18 +197,44 @@
       });
     }
 
-    function onHomeyReady(Homey) {
-      Homey.ready();
-      buildNodes();
-      async function refresh() {
-        try { render(await Homey.api('GET', '/getState')); } catch (e) { /* keep last */ }
-      }
-      refresh();
-      setInterval(refresh, 3000);
+    var POLL_MS = 10000;   // auto-update cadence
+    var STALE_MS = 25000;  // dim after ~2 missed updates, then auto-recover
+    var H = null;
+    var lastOkAt = 0;
+    var hadData = false;
+
+    function applyStale() {
+      var stale = hadData && (Date.now() - lastOkAt > STALE_MS);
+      document.querySelector('.card').className = 'card' + (stale ? ' stale' : '');
     }
 
-    // Allow standalone preview (no Homey injection) to render mock data.
-    if (typeof Homey === 'undefined') { window.__standalone = true; }
+    // Fetch state resiliently, working whether Homey.api is promise- or callback-based.
+    function fetchState() {
+      if (!H) return;
+      var done = false;
+      function ok(result) {
+        if (done) return; done = true;
+        if (result && typeof result === 'object') { lastOkAt = Date.now(); hadData = true; render(result); }
+        applyStale();
+      }
+      function fail(err) {
+        if (done) return; done = true;
+        if (window.console && console.warn) console.warn('power-flow: getState failed', err);
+        applyStale();
+      }
+      try {
+        var p = H.api('GET', '/getState', null, function (err, result) { if (err) fail(err); else ok(result); });
+        if (p && typeof p.then === 'function') p.then(ok, fail);
+      } catch (e) { fail(e); }
+    }
+
+    function onHomeyReady(Homey) {
+      H = Homey;
+      Homey.ready();
+      buildNodes();
+      fetchState();
+      setInterval(function () { fetchState(); applyStale(); }, POLL_MS);
+    }
   </script>
 </body>
 </html>
