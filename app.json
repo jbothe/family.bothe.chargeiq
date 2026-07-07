@@ -310,7 +310,8 @@
         "measure_current",
         "measure_voltage",
         "meter_power",
-        "charge_current_limit"
+        "charge_current_limit",
+        "measure_solar_surplus"
       ],
       "platforms": [
         "local"
@@ -681,6 +682,22 @@
           }
         }
       ]
+    },
+    "measure_solar_surplus": {
+      "type": "number",
+      "title": {
+        "en": "Solar surplus"
+      },
+      "desc": {
+        "en": "Excess solar power available to the charger"
+      },
+      "units": {
+        "en": "W"
+      },
+      "decimals": 0,
+      "getable": true,
+      "setable": false,
+      "uiComponent": "sensor"
     }
   }
 }

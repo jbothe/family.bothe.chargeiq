@@ -15,10 +15,13 @@ function at(day: number, hh: number, mm: number): Date {
 
 const SCHED: ScheduleWindow[] = [{ days: [1, 2, 3, 4, 5], start: '09:00', end: '17:00', currentA: 20 }];
 
-function makeController(schedule: ScheduleWindow[]): { c: ChargeController; caps: Record<string, unknown> } {
+function makeController(schedule: ScheduleWindow[]): {
+  c: ChargeController; caps: Record<string, unknown>; logs: string[];
+} {
   const store: Record<string, unknown> = { schedule, mode: 'off' };
   const settings: Record<string, unknown> = { minAmps: 6, maxAmps: 31, phases: 1, voltage: 230, maxHouseholdW: 14000 };
   const caps: Record<string, unknown> = {};
+  const logs: string[] = [];
   const host: ControllerHost = {
     identity: 'X',
     setCapability: (k, v) => { caps[k] = v; },
@@ -26,13 +29,13 @@ function makeController(schedule: ScheduleWindow[]): { c: ChargeController; caps
     getStore: <T>(k: string) => store[k] as T,
     setStore: async (k, v) => { store[k] = v; },
     setAvailable: () => {}, setUnavailable: () => {}, setWarning: () => {},
-    log: () => {}, error: () => {},
+    log: (...a) => { logs.push(a.join(' ')); }, error: () => {},
   };
   // Fake CentralSystem: no charge point present.
   const cs = { getChargePoint: () => undefined, on: () => {} } as unknown as CentralSystem;
   const c = new ChargeController(host, cs);
   c.init();
-  return { c, caps };
+  return { c, caps, logs };
 }
 
 test('scheduled mode charges only within a window', async () => {
@@ -79,4 +82,15 @@ test('household grid cap throttles the charger in any mode', async () => {
   // Plenty of headroom (exporting): cap no longer constrains -> full 31A.
   c.onSolarSample(-2000, Date.now());
   assert.equal(caps.charge_current_limit, 31, 'uncapped when grid has headroom');
+  // Excess solar surfaced as a metric (2000W export, not charging -> 2000W surplus).
+  assert.equal(caps.measure_solar_surplus, 2000, 'excess solar metric set');
+});
+
+test('household cap pauses charging when even the minimum would breach the limit', async () => {
+  const { c, logs } = makeController([]);
+  await c.startManual(16);
+  // Non-charger load 13,900W: max charger = 100W -> below 6A minimum -> pause.
+  c.onSolarSample(13900, Date.now());
+  assert.ok(logs.some((l) => l.includes('[cap]') && l.includes('paused')),
+    'logs a household-cap pause');
 });

@@ -78,7 +78,7 @@ const DEFAULTS: ControllerConfig = {
 const PROFILE_ID = 1;
 const STACK_LEVEL = 1;
 const CONNECTOR_ID = 1;
-const TICK_MS = 30000;
+const TICK_MS = 10000;
 
 interface ManualOverride {
   action: 'start' | 'stop';
@@ -402,6 +402,8 @@ export class ChargeController {
     const res = this.solarLoop.evaluate({ gridSignedW, chargerPowerW, now });
     this.lastAvailableW = res.availableW;
     this.solarTargetAmps = res.target;
+    // Surface excess solar as a device metric (>=0; 0 when importing).
+    this.host.setCapability('measure_solar_surplus', Math.max(0, Math.round(res.availableW)));
 
     // Log solar decisions when the outcome changes (avoids per-sample spam).
     const line = `grid=${Math.round(gridSignedW)}W excess=${Math.round(res.availableW)}W -> `

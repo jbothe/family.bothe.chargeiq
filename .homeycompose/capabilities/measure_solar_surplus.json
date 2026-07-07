@@ -1,0 +1,10 @@
+{
+  "type": "number",
+  "title": { "en": "Solar surplus" },
+  "desc": { "en": "Excess solar power available to the charger" },
+  "units": { "en": "W" },
+  "decimals": 0,
+  "getable": true,
+  "setable": false,
+  "uiComponent": "sensor"
+}

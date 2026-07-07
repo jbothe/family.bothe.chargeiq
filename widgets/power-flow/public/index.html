@@ -108,6 +108,7 @@
     <div class="nodes" id="nodes"></div>
   </div>
 
+  <script src="flow.js"></script>
   <script type="text/javascript">
     var ICONS = {
       charger: '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="3" width="10" height="18" rx="2"/><line x1="7" y1="7" x2="11" y2="7"/><path d="M10 10.5 L8.3 14 H10 L9 17.5 L11.7 13.3 H9.9 Z" fill="currentColor" stroke="none"/><path d="M14 9 h2.5 a2 2 0 0 1 2 2 v3.5 a2 2 0 0 1 -2 2 h-.5"/></svg>',
@@ -122,31 +123,8 @@
     var NAMES = { solar: 'Solar', battery: 'Battery', house: 'House', grid: 'Grid' };
     var ORDER = ['solar', 'battery', 'house', 'grid'];
 
-    function fmtW(w) {
-      if (w == null || isNaN(w)) return '–';
-      var a = Math.abs(w);
-      return a >= 1000 ? (w / 1000).toFixed(a >= 10000 ? 0 : 1) + ' kW' : Math.round(w) + ' W';
-    }
-    function cap(s) { return s ? String(s).charAt(0).toUpperCase() + String(s).slice(1) : ''; }
-
-    // Returns { mag, dir: 'up'|'down'|null } — up = energy into the home/bus.
-    function flow(kind, s) {
-      var w = 0;
-      if (kind === 'solar') { w = s.solarW || 0; return { mag: w, dir: w > 10 ? 'up' : null }; }
-      if (kind === 'house') { w = s.houseW || 0; return { mag: w, dir: w > 10 ? 'down' : null }; }
-      if (kind === 'battery') { w = s.batteryW || 0; return { mag: Math.abs(w), dir: w > 10 ? 'down' : (w < -10 ? 'up' : null) }; }
-      if (kind === 'grid') { w = s.gridW || 0; return { mag: Math.abs(w), dir: w > 10 ? 'up' : (w < -10 ? 'down' : null) }; }
-      return { mag: 0, dir: null };
-    }
-
-    function statusLabel(c) {
-      if (!c || !c.available) return 'No charger paired';
-      var map = { Charging: 'Charging', SuspendedEV: 'Paused (vehicle)', SuspendedEVSE: 'Paused',
-        Preparing: 'Plugged in', Finishing: 'Finishing', Available: 'Unplugged', Faulted: 'Fault',
-        Reserved: 'Reserved', Unavailable: 'Unavailable' };
-      var s = map[c.status] || cap(c.status) || 'Idle';
-      return c.mode ? s + ' · ' + cap(c.mode) : s;
-    }
+    // Presentation logic is shared with the test suite (flow.js -> PowerFlow).
+    var PF = window.PowerFlow;
 
     function buildNodes() {
       var root = document.getElementById('nodes');
@@ -166,26 +144,25 @@
       s = s || {};
       var c = s.charger || {};
 
-      document.getElementById('charger-power').textContent = c.available ? fmtW(c.powerW) : '–';
+      document.getElementById('charger-power').textContent = c.available ? PF.fmtW(c.powerW) : '–';
       document.getElementById('charger-amp').textContent =
         (c.available && c.charging && c.currentA) ? (c.currentA + ' A' + (c.limitA ? ' / ' + c.limitA : '')) : '';
-      document.getElementById('status').textContent = statusLabel(c);
+      document.getElementById('status').textContent = PF.statusLabel(c);
       var sdot = document.getElementById('sdot');
       sdot.className = 'sdot' + (c.status === 'Faulted' ? ' fault' : (c.charging ? ' on' : ''));
 
       // Bus reflects net grid: importing = red, exporting/neutral = green.
-      document.getElementById('bus').className = 'bus' + ((s.gridW || 0) > 10 ? ' importing' : '');
+      document.getElementById('bus').className = 'bus' + (PF.busImporting(s) ? ' importing' : '');
 
       ORDER.forEach(function (k) {
         var node = document.querySelector('.node[data-k="' + k + '"]');
-        var f = flow(k, s);
-        node.querySelector('[data-role="val"]').textContent = fmtW(f.mag);
+        var f = PF.flow(k, s);
+        node.querySelector('[data-role="val"]').textContent = PF.fmtW(f.mag);
         var a = node.querySelector('[data-role="arrow"]');
         a.className = 'arrow' + (f.dir ? ' show ' + f.dir : '');
         a.style.color = ACCENT[k];
         if (k === 'battery') {
-          node.querySelector('[data-role="soc"]').textContent =
-            (s.batterySoc != null && !isNaN(s.batterySoc)) ? Math.round(s.batterySoc) + '%' : '';
+          node.querySelector('[data-role="soc"]').textContent = PF.socLabel(s);
         }
       });
     }

@@ -24,6 +24,28 @@ export interface SolarSample {
 }
 
 /**
+ * Merge raw device values into a sample. House load is derived because the
+ * SolarEdge app does not expose it: house = pv + gridSigned - batterySigned.
+ * SoC is only reported when a battery device is present. Pure/testable.
+ */
+export function mergeSample(
+  values: { inverter: number; meter: number; battery: number },
+  batteryPresent: boolean,
+  batterySoc: number | null,
+): SolarSample {
+  const pvW = values.inverter;
+  const gridSignedW = values.meter;
+  const batteryW = values.battery;
+  return {
+    pvW,
+    gridSignedW,
+    batteryW,
+    houseW: pvW + gridSignedW - batteryW,
+    batterySoc: batteryPresent ? batterySoc : null,
+  };
+}
+
+/**
  * Reads live power from the user's forked SolarEdge app over the HomeyAPI and
  * emits a merged {@link SolarSample} whenever any input changes. House load is
  * derived because the SolarEdge app does not expose it directly.
@@ -113,12 +135,7 @@ export class SolarFeed extends EventEmitter {
   }
 
   private sample(): SolarSample {
-    const pvW = this.values.inverter;
-    const gridSignedW = this.values.meter;
-    const batteryW = this.values.battery;
-    const houseW = pvW + gridSignedW - batteryW;
-    const batterySoc = this.present.battery ? this.batterySoc : null;
-    return { pvW, gridSignedW, batteryW, houseW, batterySoc };
+    return mergeSample(this.values, this.present.battery, this.batterySoc);
   }
 
   private emitSample(): void {

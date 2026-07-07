@@ -10,7 +10,8 @@
     "measure_current",
     "measure_voltage",
     "meter_power",
-    "charge_current_limit"
+    "charge_current_limit",
+    "measure_solar_surplus"
   ],
   "platforms": ["local"],
   "connectivity": ["lan"],

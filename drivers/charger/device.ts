@@ -16,6 +16,7 @@ interface ChargeIQApp extends Homey.App {
 const CAPABILITIES = [
   'charge_mode', 'evcharger_charging', 'evcharger_charging_state', 'charger_status',
   'measure_power', 'measure_current', 'measure_voltage', 'meter_power', 'charge_current_limit',
+  'measure_solar_surplus',
 ];
 
 module.exports = class ChargerDevice extends Homey.Device {
