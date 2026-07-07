@@ -20,6 +20,13 @@
   },
   {
     "type": "group",
+    "label": { "en": "Load management" },
+    "children": [
+      { "id": "maxHouseholdW", "type": "number", "label": { "en": "Max household grid draw (W)" }, "hint": { "en": "Charging is throttled in any mode so total grid import never exceeds this. Set 0 to disable." }, "value": 14000, "min": 0, "max": 100000 }
+    ]
+  },
+  {
+    "type": "group",
     "label": { "en": "Solar surplus" },
     "children": [
       { "id": "marginW", "type": "number", "label": { "en": "Grid reserve margin (W)" }, "hint": { "en": "Positive reserves headroom (charge less); negative allows some import." }, "value": 0, "min": -3000, "max": 3000 },

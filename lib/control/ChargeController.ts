@@ -52,6 +52,9 @@ interface ControllerConfig {
   belowMin: BelowMinBehavior;
   /** Solar feed stale timeout (ms) after which the loop fails safe. */
   solarStaleMs: number;
+  /** Global grid-import ceiling (W). Charging is throttled so total grid import
+   *  never exceeds this in any mode. <=0 disables the cap. */
+  maxHouseholdW: number;
 }
 
 const DEFAULTS: ControllerConfig = {
@@ -69,6 +72,7 @@ const DEFAULTS: ControllerConfig = {
   marginW: 0,
   belowMin: 'pause',
   solarStaleMs: 60000,
+  maxHouseholdW: 14000,
 };
 
 const PROFILE_ID = 1;
@@ -143,6 +147,11 @@ export class ChargeController {
 
   /** Latest computed surplus available to the car (W) — the "excess solar". */
   private lastAvailableW = 0;
+
+  /** Latest signed grid power (import + / export -), used for the household cap. */
+  private lastGridSignedW = 0;
+
+  private loggedCapAmps: number | null = null;
 
   // Diagnostics: remember last-logged values to log only on meaningful change.
   private prevStatus: string | null = null;
@@ -224,6 +233,7 @@ export class ChargeController {
       marginW: g('marginW', DEFAULTS.marginW),
       belowMin: g('belowMin', DEFAULTS.belowMin),
       solarStaleMs: g('solarStaleSec', DEFAULTS.solarStaleMs / 1000) * 1000,
+      maxHouseholdW: g('maxHouseholdW', DEFAULTS.maxHouseholdW),
     };
     this.solarLoop?.setConfig(this.solarLoopConfig());
   }
@@ -386,6 +396,7 @@ export class ChargeController {
   onSolarSample(gridSignedW: number, now: number = Date.now()): void {
     this.lastSolarSampleAt = now;
     this.solarStaleWarned = false;
+    this.lastGridSignedW = gridSignedW;
     if (!this.solarLoop) return;
     const chargerPowerW = this.isCharging() ? this.lastPowerW : 0;
     const res = this.solarLoop.evaluate({ gridSignedW, chargerPowerW, now });
@@ -400,7 +411,24 @@ export class ChargeController {
       this.host.log(`[solar] ${line}`);
     }
 
-    if (this.mode === 'solar') this.tick(new Date(now));
+    // Tick in every mode so the household grid cap tracks live grid power.
+    this.tick(new Date(now));
+  }
+
+  /**
+   * Max charge current (A) allowed so total grid import stays under the household
+   * ceiling, given the present non-charger grid load. Returns null when the cap is
+   * disabled or grid data is stale (then it cannot be enforced).
+   */
+  private householdCapAmps(): number | null {
+    if (this.cfg.maxHouseholdW <= 0) return null;
+    const stale = this.lastSolarSampleAt === 0
+      || (Date.now() - this.lastSolarSampleAt) > this.cfg.solarStaleMs;
+    if (stale) return null;
+    const chargerW = this.isCharging() ? this.lastPowerW : 0;
+    const baseLoadW = this.lastGridSignedW - chargerW; // grid import excluding the charger
+    const maxChargerW = this.cfg.maxHouseholdW - baseLoadW;
+    return Math.floor(maxChargerW / (this.cfg.voltage * this.cfg.phases));
   }
 
   /** Diagnostics for the widget / metrics: excess solar (W), solar loop state, target. */
@@ -486,11 +514,30 @@ export class ChargeController {
     }
 
     const decision = this.resolve(now);
-    if (decision.charge) {
-      this.ensureCharging(decision.amps ?? this.cfg.maxAmps);
-    } else {
+    if (!decision.charge) {
       this.ensureStopped();
+      return;
     }
+
+    let amps = decision.amps ?? this.cfg.maxAmps;
+    // Global household grid-import cap: applies in every mode.
+    if (amps > 0) {
+      const cap = this.householdCapAmps();
+      if (cap != null && cap < amps) {
+        const capped = cap < this.cfg.minAmps ? 0 : cap; // can't stay under ceiling -> pause
+        if (this.loggedCapAmps !== capped) {
+          this.host.log(`[cap] household limit ${this.cfg.maxHouseholdW}W -> charger `
+            + `${capped === 0 ? 'paused' : capped + 'A'} (requested ${amps}A)`);
+          this.loggedCapAmps = capped;
+        }
+        amps = capped;
+      } else if (cap != null && this.loggedCapAmps !== null) {
+        this.host.log('[cap] household limit no longer constraining');
+        this.loggedCapAmps = null;
+      }
+    }
+
+    this.ensureCharging(amps);
   }
 
   /** amps: 0 = pause (hold 0A, keep the transaction), >0 = charge at that current. */

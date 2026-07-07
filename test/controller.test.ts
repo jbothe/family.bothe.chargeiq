@@ -15,12 +15,13 @@ function at(day: number, hh: number, mm: number): Date {
 
 const SCHED: ScheduleWindow[] = [{ days: [1, 2, 3, 4, 5], start: '09:00', end: '17:00', currentA: 20 }];
 
-function makeController(schedule: ScheduleWindow[]): ChargeController {
+function makeController(schedule: ScheduleWindow[]): { c: ChargeController; caps: Record<string, unknown> } {
   const store: Record<string, unknown> = { schedule, mode: 'off' };
-  const settings: Record<string, unknown> = { minAmps: 6, maxAmps: 31, phases: 1, voltage: 230 };
+  const settings: Record<string, unknown> = { minAmps: 6, maxAmps: 31, phases: 1, voltage: 230, maxHouseholdW: 14000 };
+  const caps: Record<string, unknown> = {};
   const host: ControllerHost = {
     identity: 'X',
-    setCapability: () => { /* noop */ },
+    setCapability: (k, v) => { caps[k] = v; },
     getSetting: <T>(k: string) => settings[k] as T,
     getStore: <T>(k: string) => store[k] as T,
     setStore: async (k, v) => { store[k] = v; },
@@ -31,18 +32,18 @@ function makeController(schedule: ScheduleWindow[]): ChargeController {
   const cs = { getChargePoint: () => undefined, on: () => {} } as unknown as CentralSystem;
   const c = new ChargeController(host, cs);
   c.init();
-  return c;
+  return { c, caps };
 }
 
 test('scheduled mode charges only within a window', async () => {
-  const c = makeController(SCHED);
+  const { c } = makeController(SCHED);
   await c.setMode('scheduled');
   assert.deepEqual(c.resolve(at(1, 10, 0)), { charge: true, amps: 20 });
   assert.equal(c.resolve(at(1, 20, 0)).charge, false);
 });
 
 test('schedule beats solar; solar follows outside a window', async () => {
-  const c = makeController(SCHED);
+  const { c } = makeController(SCHED);
   await c.setMode('solar');
   c.setSolarTarget(10);
   assert.deepEqual(c.resolve(at(1, 10, 0)), { charge: true, amps: 20 }, 'schedule wins');
@@ -52,7 +53,7 @@ test('schedule beats solar; solar follows outside a window', async () => {
 });
 
 test('manual override starts when mode is off, cleared by mode change', async () => {
-  const c = makeController([]); // no schedule -> override persists
+  const { c } = makeController([]); // no schedule -> override persists
   await c.setMode('off');
   await c.startManual(16);
   assert.deepEqual(c.resolve(new Date()), { charge: true, amps: 16 });
@@ -61,8 +62,21 @@ test('manual override starts when mode is off, cleared by mode change', async ()
 });
 
 test('manual stop overrides an active schedule window', async () => {
-  const c = makeController(SCHED);
+  const { c } = makeController(SCHED);
   await c.setMode('scheduled');
   await c.stop();
   assert.equal(c.resolve(new Date()).charge, false);
+});
+
+test('household grid cap throttles the charger in any mode', async () => {
+  const { c, caps } = makeController([]);
+  await c.startManual(31); // manual request for full 31A
+
+  // High non-charger grid load: 11,700W import. Cap = (14000-11700)/230 = 10A.
+  c.onSolarSample(11700, Date.now());
+  assert.equal(caps.charge_current_limit, 10, 'capped to 10A under household ceiling');
+
+  // Plenty of headroom (exporting): cap no longer constrains -> full 31A.
+  c.onSolarSample(-2000, Date.now());
+  assert.equal(caps.charge_current_limit, 31, 'uncapped when grid has headroom');
 });
