@@ -505,6 +505,16 @@
       ]
     }
   ],
+  "widgets": {
+    "power-flow": {
+      "name": {
+        "en": "Power Flow"
+      },
+      "height": 240,
+      "settings": [],
+      "id": "power-flow"
+    }
+  },
   "capabilities": {
     "charge_current_limit": {
       "type": "number",

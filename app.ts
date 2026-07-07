@@ -62,6 +62,49 @@ module.exports = class ChargeIQApp extends Homey.App {
     return this.solarFeed;
   }
 
+  /** The (single) charger device, if paired. */
+  private getChargerDevice(): any | null {
+    try {
+      const devices = this.homey.drivers.getDriver('charger').getDevices();
+      return devices[0] ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Merged state for the power-flow widget. App owns all four data points. */
+  getWidgetState() {
+    const solar = this.solarFeed?.getSample() ?? { pvW: 0, gridSignedW: 0, batteryW: 0, houseW: 0 };
+    const dev = this.getChargerDevice();
+    const cap = (id: string) => (dev && dev.hasCapability(id) ? dev.getCapabilityValue(id) : null);
+    return {
+      solarW: solar.pvW,
+      houseW: solar.houseW,
+      gridW: solar.gridSignedW, // import + / export -
+      batteryW: solar.batteryW,
+      charger: {
+        available: !!dev,
+        powerW: (cap('measure_power') as number) ?? 0,
+        currentA: (cap('measure_current') as number) ?? 0,
+        limitA: (cap('charge_current_limit') as number) ?? null,
+        mode: cap('charge_mode'),
+        status: cap('charger_status'),
+        charging: !!cap('evcharger_charging'),
+      },
+    };
+  }
+
+  /** Weekly schedule get/set, proxied to the charger device (used by settings UI). */
+  getSchedule(): unknown[] {
+    const dev = this.getChargerDevice();
+    return dev?.getSchedule?.() ?? [];
+  }
+
+  async setSchedule(windows: unknown[]): Promise<void> {
+    const dev = this.getChargerDevice();
+    if (dev?.setSchedule) await dev.setSchedule(windows);
+  }
+
   /** Authorize policy: accept-all, or an idTag whitelist from settings. */
   private authorize(idTag: string): boolean {
     const mode = this.homey.settings.get('authorizeMode') as string | undefined;

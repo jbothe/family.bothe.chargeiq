@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root {
+      --bg: transparent;
+      --card: rgba(0,0,0,0.04);
+      --text: #1a1a1a;
+      --muted: #6b7280;
+      --solar: #f5a623;
+      --house: #4a90d9;
+      --grid-import: #e0533d;
+      --grid-export: #16a34a;
+      --charger: #16a34a;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root { --card: rgba(255,255,255,0.06); --text: #f2f2f2; --muted: #9aa0a6; }
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; }
+    body { font-family: -apple-system, "Segoe UI", Roboto, sans-serif; color: var(--text); background: var(--bg); }
+    .wrap { padding: 10px 12px; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .tile { background: var(--card); border-radius: 12px; padding: 10px 12px; }
+    .tile .label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; display: flex; align-items: center; gap: 6px; }
+    .tile .value { font-size: 20px; font-weight: 650; margin-top: 2px; }
+    .tile .sub { font-size: 11px; color: var(--muted); margin-top: 1px; }
+    .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+    .charger { margin-top: 8px; background: var(--card); border-radius: 12px; padding: 10px 12px; display: flex; justify-content: space-between; align-items: center; }
+    .charger .left .value { font-size: 18px; font-weight: 650; }
+    .badge { font-size: 11px; padding: 3px 8px; border-radius: 999px; background: rgba(22,163,74,.15); color: var(--charger); font-weight: 600; }
+    .badge.idle { background: rgba(107,114,128,.15); color: var(--muted); }
+    .muted { color: var(--muted); }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="grid">
+      <div class="tile">
+        <div class="label"><span class="dot" style="background:var(--solar)"></span>Solar</div>
+        <div class="value" id="solar">–</div>
+      </div>
+      <div class="tile">
+        <div class="label"><span class="dot" style="background:var(--house)"></span>House</div>
+        <div class="value" id="house">–</div>
+      </div>
+      <div class="tile">
+        <div class="label"><span class="dot" id="grid-dot" style="background:var(--grid-import)"></span>Grid</div>
+        <div class="value" id="grid">–</div>
+        <div class="sub" id="grid-sub"></div>
+      </div>
+      <div class="tile">
+        <div class="label"><span class="dot" style="background:var(--charger)"></span>Charger</div>
+        <div class="value" id="charger-power">–</div>
+        <div class="sub" id="charger-current"></div>
+      </div>
+    </div>
+    <div class="charger">
+      <div class="left">
+        <div class="muted" style="font-size:11px" id="charger-mode">—</div>
+        <div class="value" id="charger-status">—</div>
+      </div>
+      <div class="badge idle" id="charger-badge">Idle</div>
+    </div>
+  </div>
+
+  <script type="text/javascript">
+    function fmtW(w) {
+      if (w == null || isNaN(w)) return '–';
+      const a = Math.abs(w);
+      return a >= 1000 ? (w / 1000).toFixed(2) + ' kW' : Math.round(w) + ' W';
+    }
+    function cap(s) { return s ? String(s).charAt(0).toUpperCase() + String(s).slice(1) : '—'; }
+
+    function render(s) {
+      document.getElementById('solar').textContent = fmtW(s.solarW);
+      document.getElementById('house').textContent = fmtW(s.houseW);
+
+      const grid = s.gridW || 0;
+      const importing = grid >= 0;
+      document.getElementById('grid').textContent = fmtW(Math.abs(grid));
+      document.getElementById('grid-sub').textContent = importing ? 'Importing' : 'Exporting';
+      document.getElementById('grid-dot').style.background = importing ? 'var(--grid-import)' : 'var(--grid-export)';
+
+      const c = s.charger || {};
+      document.getElementById('charger-power').textContent = fmtW(c.powerW);
+      document.getElementById('charger-current').textContent =
+        (c.currentA ? c.currentA + ' A' : '') + (c.limitA ? ' / ' + c.limitA + ' A limit' : '');
+      document.getElementById('charger-mode').textContent = c.available ? 'Mode: ' + cap(c.mode) : 'No charger paired';
+      document.getElementById('charger-status').textContent = c.available ? cap(c.status) : '—';
+      const badge = document.getElementById('charger-badge');
+      badge.textContent = c.charging ? 'Charging' : 'Idle';
+      badge.className = 'badge' + (c.charging ? '' : ' idle');
+    }
+
+    function onHomeyReady(Homey) {
+      Homey.ready();
+      async function refresh() {
+        try { render(await Homey.api('GET', '/state')); } catch (e) { /* keep last */ }
+      }
+      refresh();
+      setInterval(refresh, 3000);
+    }
+  </script>
+</body>
+</html>

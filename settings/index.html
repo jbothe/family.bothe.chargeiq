@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body { font-family: -apple-system, "Segoe UI", Roboto, sans-serif; margin: 0; padding: 16px; color: #1a1a1a; }
+    h1 { font-size: 18px; margin: 0 0 4px; }
+    p.hint { color: #6b7280; font-size: 13px; margin: 0 0 16px; }
+    .window { border: 1px solid #e5e7eb; border-radius: 10px; padding: 12px; margin-bottom: 12px; }
+    .days { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }
+    .day { border: 1px solid #d1d5db; border-radius: 8px; padding: 6px 10px; cursor: pointer; user-select: none; font-size: 13px; }
+    .day.on { background: #16a34a; color: #fff; border-color: #16a34a; }
+    .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+    .row label { font-size: 12px; color: #6b7280; display: block; }
+    input[type=time], input[type=number] { padding: 6px; border: 1px solid #d1d5db; border-radius: 8px; font-size: 14px; }
+    input[type=number] { width: 80px; }
+    button { font-size: 14px; padding: 8px 14px; border-radius: 8px; border: 0; cursor: pointer; }
+    .add { background: #eef2ff; color: #3730a3; }
+    .remove { background: transparent; color: #e0533d; padding: 4px 8px; }
+    .save { background: #16a34a; color: #fff; }
+    .bar { display: flex; justify-content: space-between; align-items: center; margin-top: 8px; }
+    .status { font-size: 13px; color: #6b7280; }
+  </style>
+</head>
+<body>
+  <h1 data-i18n="settings.title">Charging schedule</h1>
+  <p class="hint">Define weekly windows. In Scheduled mode the charger runs during these windows; schedules take priority over solar surplus.</p>
+
+  <div id="windows"></div>
+  <button class="add" id="add">+ Add window</button>
+
+  <div class="bar">
+    <span class="status" id="status"></span>
+    <button class="save" id="save">Save</button>
+  </div>
+
+  <script type="text/javascript">
+    var DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+    var DAY_NUM = [1, 2, 3, 4, 5, 6, 0]; // map UI index -> JS getDay()
+    var windows = [];
+    var homeyRef = null;
+
+    function render() {
+      var root = document.getElementById('windows');
+      root.innerHTML = '';
+      windows.forEach(function (w, i) {
+        var el = document.createElement('div');
+        el.className = 'window';
+        var days = DAYS.map(function (d, di) {
+          var on = w.days.indexOf(DAY_NUM[di]) !== -1;
+          return '<span class="day ' + (on ? 'on' : '') + '" data-w="' + i + '" data-d="' + DAY_NUM[di] + '">' + d + '</span>';
+        }).join('');
+        el.innerHTML =
+          '<div class="days">' + days + '</div>' +
+          '<div class="row">' +
+          '<div><label>Start</label><input type="time" data-w="' + i + '" data-f="start" value="' + w.start + '"></div>' +
+          '<div><label>End</label><input type="time" data-w="' + i + '" data-f="end" value="' + w.end + '"></div>' +
+          '<div><label>Current (A, optional)</label><input type="number" min="6" max="80" data-w="' + i + '" data-f="currentA" value="' + (w.currentA || '') + '"></div>' +
+          '<button class="remove" data-w="' + i + '">Remove</button>' +
+          '</div>';
+        root.appendChild(el);
+      });
+
+      root.querySelectorAll('.day').forEach(function (d) {
+        d.onclick = function () {
+          var wi = +d.getAttribute('data-w'); var dn = +d.getAttribute('data-d');
+          var idx = windows[wi].days.indexOf(dn);
+          if (idx === -1) windows[wi].days.push(dn); else windows[wi].days.splice(idx, 1);
+          render();
+        };
+      });
+      root.querySelectorAll('input').forEach(function (inp) {
+        inp.onchange = function () {
+          var wi = +inp.getAttribute('data-w'); var f = inp.getAttribute('data-f');
+          windows[wi][f] = f === 'currentA' ? (inp.value ? +inp.value : undefined) : inp.value;
+        };
+      });
+      root.querySelectorAll('.remove').forEach(function (b) {
+        b.onclick = function () { windows.splice(+b.getAttribute('data-w'), 1); render(); };
+      });
+    }
+
+    function setStatus(t) { document.getElementById('status').textContent = t; }
+
+    function onHomeyReady(Homey) {
+      homeyRef = Homey;
+      Homey.ready();
+      Homey.api('GET', '/getSchedule', null, function (err, result) {
+        windows = (!err && Array.isArray(result)) ? result.map(function (w) {
+          return { days: w.days || [], start: w.start || '22:00', end: w.end || '06:00', currentA: w.currentA };
+        }) : [];
+        render();
+      });
+
+      document.getElementById('add').onclick = function () {
+        windows.push({ days: [1, 2, 3, 4, 5], start: '22:00', end: '06:00' });
+        render();
+      };
+      document.getElementById('save').onclick = function () {
+        setStatus('Saving…');
+        Homey.api('POST', '/setSchedule', { windows: windows }, function (err) {
+          setStatus(err ? ('Error: ' + err) : 'Saved.');
+        });
+      };
+    }
+  </script>
+</body>
+</html>
