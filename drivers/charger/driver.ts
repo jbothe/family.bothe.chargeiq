@@ -31,17 +31,28 @@ module.exports = class ChargerDriver extends Homey.Driver {
     this.log('ChargerDriver initialised');
   }
 
-  /**
-   * List charge points that have connected to the Central System this session.
-   * The charger must be pointed at ws://<homey-ip>:<port>/<identity> before pairing.
-   */
-  async onPairListDevices() {
-    const app = this.homey.app as ChargeIQApp;
-    const cs = app.getCentralSystem();
-    return cs.listIdentities().map((identity) => ({
-      name: `EV Charger (${identity})`,
-      data: { id: identity },
-    }));
+  async onPair(session: Homey.Driver.PairSession) {
+    // Instructions view: tell the user where to point the charger.
+    session.setHandler('getConnectionInfo', async () => {
+      let ip = '<homey-ip>';
+      try {
+        const address = await this.homey.cloud.getLocalAddress();
+        ip = String(address).split(':')[0];
+      } catch (err) {
+        this.error('Could not resolve Homey LAN address:', err);
+      }
+      const port = (this.homey.settings.get('ocppPort') as number) || 9000;
+      return { ip, port };
+    });
+
+    // List charge points that have connected to the Central System this session.
+    session.setHandler('list_devices', async () => {
+      const cs = (this.homey.app as ChargeIQApp).getCentralSystem();
+      return cs.listIdentities().map((identity) => ({
+        name: `EV Charger (${identity})`,
+        data: { id: identity },
+      }));
+    });
   }
 
 };

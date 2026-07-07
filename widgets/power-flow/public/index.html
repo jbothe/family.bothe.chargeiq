@@ -41,6 +41,7 @@
       <div class="tile">
         <div class="label"><span class="dot" style="background:var(--solar)"></span>Solar</div>
         <div class="value" id="solar">–</div>
+        <div class="sub" id="surplus"></div>
       </div>
       <div class="tile">
         <div class="label"><span class="dot" style="background:var(--house)"></span>House</div>
@@ -76,6 +77,7 @@
 
     function render(s) {
       document.getElementById('solar').textContent = fmtW(s.solarW);
+      document.getElementById('surplus').textContent = 'Excess ' + fmtW(Math.max(0, s.surplusW || 0));
       document.getElementById('house').textContent = fmtW(s.houseW);
 
       const grid = s.gridW || 0;
@@ -98,7 +100,7 @@
     function onHomeyReady(Homey) {
       Homey.ready();
       async function refresh() {
-        try { render(await Homey.api('GET', '/state')); } catch (e) { /* keep last */ }
+        try { render(await Homey.api('GET', '/getState')); } catch (e) { /* keep last */ }
       }
       refresh();
       setInterval(refresh, 3000);

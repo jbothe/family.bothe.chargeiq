@@ -56,6 +56,11 @@ export class ChargePoint extends EventEmitter {
 
   private heartbeatIntervalSec: number;
 
+  /** Last StatusNotification / parsed readings, so a late-binding device can catch up. */
+  private lastStatus: StatusNotificationReq | null = null;
+
+  private lastReadings: Readings | null = null;
+
   constructor(opts: {
     identity: string;
     authorize: AuthorizePolicy;
@@ -72,6 +77,16 @@ export class ChargePoint extends EventEmitter {
   /** Is the charge point currently connected? */
   get connected(): boolean {
     return this.client !== null;
+  }
+
+  /** Last known StatusNotification (for a device that binds after connect). */
+  getLastStatus(): StatusNotificationReq | null {
+    return this.lastStatus;
+  }
+
+  /** Last known parsed readings (for a device that binds after connect). */
+  getLastReadings(): Readings | null {
+    return this.lastReadings;
   }
 
   /** Update the authorize policy at runtime (e.g. settings change). */
@@ -101,6 +116,7 @@ export class ChargePoint extends EventEmitter {
     });
 
     client.handle('StatusNotification', ({ params }) => {
+      this.lastStatus = params as StatusNotificationReq;
       this.emit('status', params as StatusNotificationReq);
       return {};
     });
@@ -129,7 +145,9 @@ export class ChargePoint extends EventEmitter {
 
     client.handle('MeterValues', ({ params }) => {
       const req = params as MeterValuesReq;
-      this.emit('meterValues', parseMeterValues(req.meterValue), req);
+      const readings = parseMeterValues(req.meterValue);
+      this.lastReadings = readings;
+      this.emit('meterValues', readings, req);
       return {};
     });
 

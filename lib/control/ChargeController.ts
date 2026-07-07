@@ -141,6 +141,16 @@ export class ChargeController {
   /** Latest charger draw from MeterValues (W), used by the solar loop. */
   private lastPowerW = 0;
 
+  /** Latest computed surplus available to the car (W) — the "excess solar". */
+  private lastAvailableW = 0;
+
+  // Diagnostics: remember last-logged values to log only on meaningful change.
+  private prevStatus: string | null = null;
+
+  private loggedPowerW = 0;
+
+  private loggedSolar = '';
+
   private transactionId: number | null = null;
 
   /** Currently-applied/desired current (A); null = not charging. */
@@ -238,8 +248,24 @@ export class ChargeController {
     cp.on('startTransaction', (id: number, req: StartTransactionReq) => this.onStartTransaction(id, req));
     cp.on('stopTransaction', (req: StopTransactionReq) => this.onStopTransaction(req));
 
+    // Catch up from cached state if the charger connected before we bound.
+    const cachedStatus = cp.getLastStatus();
+    if (cachedStatus) this.onStatus(cachedStatus);
+    const cachedReadings = cp.getLastReadings();
+    if (cachedReadings) this.onMeterValues(cachedReadings);
+
+    // And request fresh values so nothing stays blank if the charger was quiet.
+    this.requestFreshState();
+
     this.host.log(`Controller bound to ${cp.identity}`);
     this.tick();
+  }
+
+  /** Ask the charger to (re)send its current status and meter values. Best-effort. */
+  private requestFreshState(): void {
+    if (!this.cp?.connected) return;
+    this.cp.triggerMessage('StatusNotification', CONNECTOR_ID).catch(() => { /* optional */ });
+    this.cp.triggerMessage('MeterValues', CONNECTOR_ID).catch(() => { /* optional */ });
   }
 
   private async configureCharger(): Promise<void> {
@@ -260,6 +286,11 @@ export class ChargeController {
   // ---------------------------------------------------------------------------
 
   private onStatus(info: StatusNotificationReq): void {
+    if (info.status !== this.prevStatus) {
+      this.host.log(`[charger] status ${this.prevStatus ?? '?'} -> ${info.status}`
+        + (info.errorCode && info.errorCode !== 'NoError' ? ` (${info.errorCode})` : ''));
+      this.prevStatus = info.status;
+    }
     this.host.setCapability('charger_status', info.status);
     this.host.setCapability('evcharger_charging_state', toChargingState(info.status));
     this.host.setCapability('evcharger_charging', info.status === 'Charging');
@@ -279,9 +310,16 @@ export class ChargeController {
     if (r.current !== undefined) this.host.setCapability('measure_current', r.current);
     if (r.voltage !== undefined) this.host.setCapability('measure_voltage', r.voltage);
     if (r.energyKwh !== undefined) this.host.setCapability('meter_power', r.energyKwh);
+
+    // Log only on a meaningful power change (>=100W) to avoid flooding.
+    if (r.power !== undefined && Math.abs(r.power - this.loggedPowerW) >= 100) {
+      this.loggedPowerW = r.power;
+      this.host.log(`[charger] power=${Math.round(r.power)}W current=${r.current ?? '?'}A voltage=${r.voltage ?? '?'}V`);
+    }
   }
 
   private onStartTransaction(id: number, req: StartTransactionReq): void {
+    this.host.log(`[charger] transaction ${id} started (idTag ${req.idTag}, meterStart ${req.meterStart}Wh)`);
     this.transactionId = id;
     this.awaitingStart = false;
     this.host.setStore('transactionId', id).catch(this.host.error);
@@ -291,7 +329,8 @@ export class ChargeController {
     if (this.desiredAmps != null) this.scheduleWrite();
   }
 
-  private onStopTransaction(_req: StopTransactionReq): void {
+  private onStopTransaction(req: StopTransactionReq): void {
+    this.host.log(`[charger] transaction ${req.transactionId} stopped (${req.reason ?? 'n/a'}, meterStop ${req.meterStop}Wh)`);
     this.transactionId = null;
     this.host.setStore('transactionId', null).catch(this.host.error);
     this.host.setCapability('evcharger_charging', false);
@@ -348,13 +387,30 @@ export class ChargeController {
     this.lastSolarSampleAt = now;
     this.solarStaleWarned = false;
     if (!this.solarLoop) return;
-    const res = this.solarLoop.evaluate({
-      gridSignedW,
-      chargerPowerW: this.isCharging() ? this.lastPowerW : 0,
-      now,
-    });
+    const chargerPowerW = this.isCharging() ? this.lastPowerW : 0;
+    const res = this.solarLoop.evaluate({ gridSignedW, chargerPowerW, now });
+    this.lastAvailableW = res.availableW;
     this.solarTargetAmps = res.target;
+
+    // Log solar decisions when the outcome changes (avoids per-sample spam).
+    const line = `grid=${Math.round(gridSignedW)}W excess=${Math.round(res.availableW)}W -> `
+      + `${res.target === null ? 'stop' : res.target === 0 ? 'pause' : res.target + 'A'} (${res.state})`;
+    if (line !== this.loggedSolar) {
+      this.loggedSolar = line;
+      this.host.log(`[solar] ${line}`);
+    }
+
     if (this.mode === 'solar') this.tick(new Date(now));
+  }
+
+  /** Diagnostics for the widget / metrics: excess solar (W), solar loop state, target. */
+  getDiagnostics(): { availableW: number; solarState: string; targetA: number | null; mode: ChargeMode } {
+    return {
+      availableW: this.lastAvailableW,
+      solarState: this.solarLoop?.getState() ?? 'off',
+      targetA: this.solarTargetAmps,
+      mode: this.mode,
+    };
   }
 
   /** Manual start: overrides the base mode until the next schedule boundary. */

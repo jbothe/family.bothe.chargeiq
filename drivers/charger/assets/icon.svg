@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <!-- EV charging station silhouette with a lightning bolt cut-out -->
+  <path fill="#000000" fill-rule="evenodd" d="
+    M28 10
+    h30
+    a10 10 0 0 1 10 10
+    v60
+    a10 10 0 0 1 -10 10
+    h-30
+    a10 10 0 0 1 -10 -10
+    v-60
+    a10 10 0 0 1 10 -10
+    z
+    M46 30
+    L33 54
+    h9
+    l-3 16
+    17-24
+    h-10
+    z
+  "/>
+  <!-- charging cable/nozzle -->
+  <path fill="#000000" d="M68 34 h8 a6 6 0 0 1 6 6 v18 a8 8 0 0 1 -8 8 h-2 v-8 h2 v-16 h-6 z"/>
+</svg>

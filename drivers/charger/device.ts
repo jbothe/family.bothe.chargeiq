@@ -88,6 +88,11 @@ module.exports = class ChargerDevice extends Homey.Device {
     return this.lastSolarSample;
   }
 
+  /** Excess-solar / loop diagnostics (for the widget + metrics). */
+  getDiagnostics() {
+    return this.controller.getDiagnostics();
+  }
+
   // --- Flow card entry points -------------------------------------------------
 
   flowSetMode(mode: ChargeMode) { return this.controller.setMode(mode); }

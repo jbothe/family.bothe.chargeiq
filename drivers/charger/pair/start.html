@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <style>
+    body { font-family: -apple-system, "Segoe UI", Roboto, sans-serif; padding: 20px; color: #1a1a1a; }
+    h2 { font-size: 18px; margin: 0 0 8px; }
+    p { font-size: 14px; line-height: 1.5; color: #374151; }
+    ol { font-size: 14px; line-height: 1.6; padding-left: 20px; }
+    .url { margin: 14px 0; padding: 12px 14px; background: #0f172a; color: #e2e8f0; border-radius: 8px;
+           font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 14px; word-break: break-all; }
+    .url b { color: #fbbf24; }
+    .note { font-size: 13px; color: #6b7280; }
+    button { margin-top: 18px; width: 100%; font-size: 15px; padding: 12px; border: 0; border-radius: 10px;
+             background: #16a34a; color: #fff; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <h2>Connect your charger</h2>
+  <p>ChargeIQ is the OCPP 1.6J Central System for your charger. Point the charger's OCPP client at this Homey:</p>
+
+  <ol>
+    <li>Open your charger's OCPP settings (e.g. Wallbox installer app).</li>
+    <li>Set the Central System / OCPP URL to the address below.</li>
+    <li>Use OCPP <b>1.6J</b> over WebSocket. Leave the charge point identity as-is.</li>
+    <li>Save &amp; let the charger connect, then continue.</li>
+  </ol>
+
+  <div class="url" id="url">ws://…</div>
+  <p class="note">The last path segment is your charger's own identity (Charge Point ID). Once it connects it will appear on the next screen.</p>
+
+  <button id="continue">My charger is connected →</button>
+
+  <script type="text/javascript">
+    function onHomeyReady(Homey) {
+      Homey.ready();
+      Homey.emit('getConnectionInfo', null, function (err, info) {
+        var ip = (info && info.ip) || '<homey-ip>';
+        var port = (info && info.port) || 9000;
+        document.getElementById('url').innerHTML =
+          'ws://' + ip + ':' + port + '/<b>&lt;charge-point-id&gt;</b>';
+      });
+      document.getElementById('continue').addEventListener('click', function () {
+        Homey.showView('list_devices');
+      });
+    }
+  </script>
+</body>
+</html>
