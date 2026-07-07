@@ -1,0 +1,19 @@
+{
+  "type": "enum",
+  "title": { "en": "Charger Status" },
+  "desc": { "en": "Raw OCPP StatusNotification state" },
+  "getable": true,
+  "setable": false,
+  "uiComponent": "sensor",
+  "values": [
+    { "id": "Available", "title": { "en": "Available" } },
+    { "id": "Preparing", "title": { "en": "Preparing" } },
+    { "id": "Charging", "title": { "en": "Charging" } },
+    { "id": "SuspendedEVSE", "title": { "en": "Suspended (EVSE)" } },
+    { "id": "SuspendedEV", "title": { "en": "Suspended (EV)" } },
+    { "id": "Finishing", "title": { "en": "Finishing" } },
+    { "id": "Reserved", "title": { "en": "Reserved" } },
+    { "id": "Unavailable", "title": { "en": "Unavailable" } },
+    { "id": "Faulted", "title": { "en": "Faulted" } }
+  ]
+}

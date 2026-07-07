@@ -1,0 +1,203 @@
+{
+  "_comment": "This file is generated. Please edit .homeycompose/app.json instead.",
+  "id": "family.bothe.chargeiq",
+  "version": "1.0.0",
+  "compatibility": ">=12.4.5",
+  "sdk": 3,
+  "runtime": "nodejs",
+  "platforms": [
+    "local"
+  ],
+  "name": {
+    "en": "Charge IQ"
+  },
+  "description": {
+    "en": "EV charging orchestration using OCPP."
+  },
+  "category": [
+    "energy"
+  ],
+  "permissions": [
+    "homey:manager:api"
+  ],
+  "images": {
+    "small": "/assets/images/small.png",
+    "large": "/assets/images/large.png",
+    "xlarge": "/assets/images/xlarge.png"
+  },
+  "author": {
+    "name": "John Bothe",
+    "email": "jbothe@gmail.com"
+  },
+  "drivers": [
+    {
+      "name": {
+        "en": "EV Charger"
+      },
+      "class": "evcharger",
+      "capabilities": [
+        "charge_mode",
+        "evcharger_charging",
+        "evcharger_charging_state",
+        "charger_status",
+        "measure_power",
+        "measure_current",
+        "measure_voltage",
+        "meter_power",
+        "charge_current_limit"
+      ],
+      "platforms": [
+        "local"
+      ],
+      "connectivity": [
+        "lan"
+      ],
+      "images": {
+        "small": "/drivers/charger/assets/images/small.png",
+        "large": "/drivers/charger/assets/images/large.png",
+        "xlarge": "/drivers/charger/assets/images/xlarge.png"
+      },
+      "pair": [
+        {
+          "id": "list_devices",
+          "template": "list_devices",
+          "navigation": {
+            "next": "add_devices"
+          }
+        },
+        {
+          "id": "add_devices",
+          "template": "add_devices"
+        }
+      ],
+      "id": "charger"
+    }
+  ],
+  "capabilities": {
+    "charge_current_limit": {
+      "type": "number",
+      "title": {
+        "en": "Current Limit"
+      },
+      "desc": {
+        "en": "Target charging current"
+      },
+      "units": {
+        "en": "A"
+      },
+      "min": 6,
+      "max": 31,
+      "step": 1,
+      "decimals": 0,
+      "getable": true,
+      "setable": true,
+      "uiComponent": "slider"
+    },
+    "charge_mode": {
+      "type": "enum",
+      "title": {
+        "en": "Charge Mode"
+      },
+      "desc": {
+        "en": "Off, Scheduled, Solar surplus or Manual"
+      },
+      "getable": true,
+      "setable": true,
+      "uiComponent": "picker",
+      "values": [
+        {
+          "id": "off",
+          "title": {
+            "en": "Off"
+          }
+        },
+        {
+          "id": "scheduled",
+          "title": {
+            "en": "Scheduled"
+          }
+        },
+        {
+          "id": "solar",
+          "title": {
+            "en": "Solar surplus"
+          }
+        },
+        {
+          "id": "manual",
+          "title": {
+            "en": "Manual"
+          }
+        }
+      ]
+    },
+    "charger_status": {
+      "type": "enum",
+      "title": {
+        "en": "Charger Status"
+      },
+      "desc": {
+        "en": "Raw OCPP StatusNotification state"
+      },
+      "getable": true,
+      "setable": false,
+      "uiComponent": "sensor",
+      "values": [
+        {
+          "id": "Available",
+          "title": {
+            "en": "Available"
+          }
+        },
+        {
+          "id": "Preparing",
+          "title": {
+            "en": "Preparing"
+          }
+        },
+        {
+          "id": "Charging",
+          "title": {
+            "en": "Charging"
+          }
+        },
+        {
+          "id": "SuspendedEVSE",
+          "title": {
+            "en": "Suspended (EVSE)"
+          }
+        },
+        {
+          "id": "SuspendedEV",
+          "title": {
+            "en": "Suspended (EV)"
+          }
+        },
+        {
+          "id": "Finishing",
+          "title": {
+            "en": "Finishing"
+          }
+        },
+        {
+          "id": "Reserved",
+          "title": {
+            "en": "Reserved"
+          }
+        },
+        {
+          "id": "Unavailable",
+          "title": {
+            "en": "Unavailable"
+          }
+        },
+        {
+          "id": "Faulted",
+          "title": {
+            "en": "Faulted"
+          }
+        }
+      ]
+    }
+  }
+}

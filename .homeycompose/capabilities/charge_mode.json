@@ -1,0 +1,14 @@
+{
+  "type": "enum",
+  "title": { "en": "Charge Mode" },
+  "desc": { "en": "Off, Scheduled, Solar surplus or Manual" },
+  "getable": true,
+  "setable": true,
+  "uiComponent": "picker",
+  "values": [
+    { "id": "off", "title": { "en": "Off" } },
+    { "id": "scheduled", "title": { "en": "Scheduled" } },
+    { "id": "solar", "title": { "en": "Solar surplus" } },
+    { "id": "manual", "title": { "en": "Manual" } }
+  ]
+}

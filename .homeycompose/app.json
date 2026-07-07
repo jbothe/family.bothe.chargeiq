@@ -1,0 +1,32 @@
+{
+  "id": "family.bothe.chargeiq",
+  "version": "1.0.0",
+  "compatibility": ">=12.4.5",
+  "sdk": 3,
+  "runtime": "nodejs",
+  "platforms": [
+    "local"
+  ],
+  "name": {
+    "en": "Charge IQ"
+  },
+  "description": {
+    "en": "EV charging orchestration using OCPP."
+  },
+  "category": [
+    "energy"
+  ],
+  "brandColor": "#16A34A",
+  "permissions": [
+    "homey:manager:api"
+  ],
+  "images": {
+    "small": "/assets/images/small.png",
+    "large": "/assets/images/large.png",
+    "xlarge": "/assets/images/xlarge.png"
+  },
+  "author": {
+    "name": "John Bothe",
+    "email": "jbothe@gmail.com"
+  }
+}

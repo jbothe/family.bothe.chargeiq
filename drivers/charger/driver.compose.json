@@ -1,0 +1,33 @@
+{
+  "name": { "en": "EV Charger" },
+  "class": "evcharger",
+  "capabilities": [
+    "charge_mode",
+    "evcharger_charging",
+    "evcharger_charging_state",
+    "charger_status",
+    "measure_power",
+    "measure_current",
+    "measure_voltage",
+    "meter_power",
+    "charge_current_limit"
+  ],
+  "platforms": ["local"],
+  "connectivity": ["lan"],
+  "images": {
+    "small": "/drivers/charger/assets/images/small.png",
+    "large": "/drivers/charger/assets/images/large.png",
+    "xlarge": "/drivers/charger/assets/images/xlarge.png"
+  },
+  "pair": [
+    {
+      "id": "list_devices",
+      "template": "list_devices",
+      "navigation": { "next": "add_devices" }
+    },
+    {
+      "id": "add_devices",
+      "template": "add_devices"
+    }
+  ]
+}

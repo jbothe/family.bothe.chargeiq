@@ -1,0 +1,13 @@
+{
+  "type": "number",
+  "title": { "en": "Current Limit" },
+  "desc": { "en": "Target charging current" },
+  "units": { "en": "A" },
+  "min": 6,
+  "max": 31,
+  "step": 1,
+  "decimals": 0,
+  "getable": true,
+  "setable": true,
+  "uiComponent": "slider"
+}

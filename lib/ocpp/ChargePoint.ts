@@ -1,0 +1,230 @@
+'use strict';
+
+import { EventEmitter } from 'events';
+import {
+  BootNotificationReq,
+  ChargingProfileOptions,
+  IdTagInfo,
+  MeterValuesReq,
+  parseMeterValues,
+  Readings,
+  StartTransactionReq,
+  StatusNotificationReq,
+  StopTransactionReq,
+} from './types';
+
+/** Minimal shape of an ocpp-rpc server-side client we rely on. */
+export interface RpcClient {
+  identity: string;
+  handle(method: string, handler: (ctx: { params: any }) => any): void;
+  handle(handler: (ctx: { method: string; params: any }) => any): void;
+  call(method: string, params?: any): Promise<any>;
+  close(opts?: { code?: number; reason?: string }): Promise<void> | void;
+  on(event: string, listener: (...args: any[]) => void): void;
+}
+
+/** How the app decides whether to authorise an idTag. */
+export type AuthorizePolicy = (idTag: string) => boolean;
+
+export interface ChargePointEvents {
+  boot: (info: BootNotificationReq) => void;
+  status: (info: StatusNotificationReq) => void;
+  heartbeat: () => void;
+  meterValues: (readings: Readings, raw: MeterValuesReq) => void;
+  startTransaction: (transactionId: number, req: StartTransactionReq) => void;
+  stopTransaction: (req: StopTransactionReq) => void;
+  connect: () => void;
+  disconnect: () => void;
+}
+
+/**
+ * Represents a single physical charge point (one OCPP identity). It survives
+ * reconnects: the underlying RPC client is swapped via {@link attach} while the
+ * ChargePoint instance (and its listeners) persist. Encapsulates both inbound
+ * handlers and the outbound command wrappers.
+ */
+export class ChargePoint extends EventEmitter {
+
+  readonly identity: string;
+
+  private client: RpcClient | null = null;
+
+  private authorize: AuthorizePolicy;
+
+  /** Monotonic transaction id source, seeded from persistence on the device. */
+  private nextTransactionId: () => number;
+
+  private heartbeatIntervalSec: number;
+
+  constructor(opts: {
+    identity: string;
+    authorize: AuthorizePolicy;
+    nextTransactionId: () => number;
+    heartbeatIntervalSec?: number;
+  }) {
+    super();
+    this.identity = opts.identity;
+    this.authorize = opts.authorize;
+    this.nextTransactionId = opts.nextTransactionId;
+    this.heartbeatIntervalSec = opts.heartbeatIntervalSec ?? 60;
+  }
+
+  /** Is the charge point currently connected? */
+  get connected(): boolean {
+    return this.client !== null;
+  }
+
+  /** Update the authorize policy at runtime (e.g. settings change). */
+  setAuthorizePolicy(policy: AuthorizePolicy): void {
+    this.authorize = policy;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Inbound: attach handlers to a (re)connected client
+  // ---------------------------------------------------------------------------
+
+  attach(client: RpcClient): void {
+    this.client = client;
+
+    client.handle('BootNotification', ({ params }) => {
+      this.emit('boot', params as BootNotificationReq);
+      return {
+        currentTime: new Date().toISOString(),
+        interval: this.heartbeatIntervalSec,
+        status: 'Accepted',
+      };
+    });
+
+    client.handle('Heartbeat', () => {
+      this.emit('heartbeat');
+      return { currentTime: new Date().toISOString() };
+    });
+
+    client.handle('StatusNotification', ({ params }) => {
+      this.emit('status', params as StatusNotificationReq);
+      return {};
+    });
+
+    client.handle('Authorize', ({ params }) => {
+      const idTagInfo: IdTagInfo = {
+        status: this.authorize(params.idTag) ? 'Accepted' : 'Invalid',
+      };
+      return { idTagInfo };
+    });
+
+    client.handle('StartTransaction', ({ params }) => {
+      const req = params as StartTransactionReq;
+      const accepted = this.authorize(req.idTag);
+      const transactionId = this.nextTransactionId();
+      const idTagInfo: IdTagInfo = { status: accepted ? 'Accepted' : 'Invalid' };
+      if (accepted) this.emit('startTransaction', transactionId, req);
+      return { transactionId, idTagInfo };
+    });
+
+    client.handle('StopTransaction', ({ params }) => {
+      const req = params as StopTransactionReq;
+      this.emit('stopTransaction', req);
+      return { idTagInfo: { status: 'Accepted' } as IdTagInfo };
+    });
+
+    client.handle('MeterValues', ({ params }) => {
+      const req = params as MeterValuesReq;
+      this.emit('meterValues', parseMeterValues(req.meterValue), req);
+      return {};
+    });
+
+    // Accept the optional messages so strictMode does not reject them.
+    client.handle('DataTransfer', () => ({ status: 'Accepted' }));
+    client.handle('FirmwareStatusNotification', () => ({}));
+    client.handle('DiagnosticsStatusNotification', () => ({}));
+
+    client.on('close', () => {
+      if (this.client === client) {
+        this.client = null;
+        this.emit('disconnect');
+      }
+    });
+
+    this.emit('connect');
+  }
+
+  /** Called when the underlying client disconnects outside a 'close' we tracked. */
+  detach(): void {
+    this.client = null;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Outbound command wrappers
+  // ---------------------------------------------------------------------------
+
+  private requireClient(): RpcClient {
+    if (!this.client) {
+      throw new Error(`Charge point ${this.identity} is not connected`);
+    }
+    return this.client;
+  }
+
+  async remoteStartTransaction(idTag: string, connectorId = 1): Promise<boolean> {
+    const res = await this.requireClient().call('RemoteStartTransaction', { idTag, connectorId });
+    return res?.status === 'Accepted';
+  }
+
+  async remoteStopTransaction(transactionId: number): Promise<boolean> {
+    const res = await this.requireClient().call('RemoteStopTransaction', { transactionId });
+    return res?.status === 'Accepted';
+  }
+
+  /**
+   * Apply a single-period charging profile with a stable id/stackLevel so each
+   * call replaces the previous profile rather than stacking. limitAmps = 0 pauses.
+   */
+  async setChargingProfile(opts: ChargingProfileOptions): Promise<boolean> {
+    const isTx = typeof opts.transactionId === 'number';
+    const csChargingProfiles: any = {
+      chargingProfileId: opts.chargingProfileId,
+      stackLevel: opts.stackLevel,
+      chargingProfilePurpose: isTx ? 'TxProfile' : 'TxDefaultProfile',
+      chargingProfileKind: 'Absolute',
+      chargingSchedule: {
+        chargingRateUnit: 'A',
+        chargingSchedulePeriod: [
+          {
+            startPeriod: 0,
+            limit: opts.limitAmps,
+            numberPhases: opts.numberPhases,
+          },
+        ],
+      },
+    };
+    if (isTx) csChargingProfiles.transactionId = opts.transactionId;
+
+    const res = await this.requireClient().call('SetChargingProfile', {
+      connectorId: opts.connectorId,
+      csChargingProfiles,
+    });
+    return res?.status === 'Accepted';
+  }
+
+  async clearChargingProfile(chargingProfileId?: number): Promise<boolean> {
+    const payload = chargingProfileId !== undefined ? { id: chargingProfileId } : {};
+    const res = await this.requireClient().call('ClearChargingProfile', payload);
+    return res?.status === 'Accepted';
+  }
+
+  async getConfiguration(keys?: string[]): Promise<any> {
+    return this.requireClient().call('GetConfiguration', keys ? { key: keys } : {});
+  }
+
+  async changeConfiguration(key: string, value: string): Promise<string> {
+    const res = await this.requireClient().call('ChangeConfiguration', { key, value });
+    return res?.status ?? 'Unknown';
+  }
+
+  async triggerMessage(requestedMessage: string, connectorId?: number): Promise<boolean> {
+    const payload: any = { requestedMessage };
+    if (connectorId !== undefined) payload.connectorId = connectorId;
+    const res = await this.requireClient().call('TriggerMessage', payload);
+    return res?.status === 'Accepted';
+  }
+
+}
