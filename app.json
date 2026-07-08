@@ -22,10 +22,6 @@
     "homey:manager:api"
   ],
   "api": {
-    "getState": {
-      "method": "GET",
-      "path": "/state"
-    },
     "getSchedule": {
       "method": "GET",
       "path": "/getSchedule"

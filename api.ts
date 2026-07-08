@@ -7,15 +7,6 @@
  */
 module.exports = {
 
-  async getState({ homey }: any) {
-    try {
-      return homey.app.getWidgetState();
-    } catch (err) {
-      homey.app?.error?.('[api] getState failed:', err);
-      throw err;
-    }
-  },
-
   async getSchedule({ homey }: any) {
     return homey.app.getSchedule();
   },

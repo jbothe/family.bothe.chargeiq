@@ -197,24 +197,14 @@
       });
     }
 
-    var POLL_MS = 10000;   // auto-update cadence
-    var STALE_MS = 25000;  // dim after ~2 missed updates, then auto-recover
-    // Widget-scoped api.js exposes '/getState'; the app api manifest exposes '/state'.
-    // We don't assume which one Homey.api routes to — try both, then lock onto the winner.
-    var ENDPOINTS = ['/getState', '/state'];
-    var H = null;
+    var CHECK_MS = 5000;   // how often we re-check staleness
+    var STALE_MS = 25000;  // dim after ~5 missed pushes (app broadcasts every 5s), then auto-recover
     var lastOkAt = 0;
     var hadData = false;
-    var workingEndpoint = null;
 
     function applyStale() {
       var stale = hadData && (Date.now() - lastOkAt > STALE_MS);
       document.querySelector('.card').className = 'card' + (stale ? ' stale' : '');
-    }
-
-    function call(uri) {
-      // Homey widget api is promise-based; wrap defensively.
-      try { return Promise.resolve(H.api('GET', uri)); } catch (e) { return Promise.reject(e); }
     }
 
     function onData(result) {
@@ -223,35 +213,12 @@
       render(result); applyStale();
     }
 
-    // Backup only: if realtime push goes quiet, try the api (either routing).
-    function fetchState() {
-      if (!H) return;
-      var list = workingEndpoint ? [workingEndpoint] : ENDPOINTS;
-      var i = 0;
-      (function attempt() {
-        if (i >= list.length) { applyStale(); return; }
-        var uri = list[i++];
-        call(uri).then(function (result) {
-          if (result && typeof result === 'object') {
-            if (workingEndpoint !== uri && window.console) console.log('power-flow: api using', uri);
-            workingEndpoint = uri; onData(result);
-          } else { attempt(); }
-        }, function () { attempt(); });
-      })();
-    }
-
     function onHomeyReady(Homey) {
-      H = Homey;
       Homey.ready();
       buildNodes();
-      // Primary channel: realtime push from the app (every 5s).
-      try { Homey.on('powerflow', onData); } catch (e) { /* older runtime */ }
-      // Best-effort initial paint + backup poll if realtime is silent.
-      fetchState();
-      setInterval(function () {
-        applyStale();
-        if (Date.now() - lastOkAt > POLL_MS) fetchState();
-      }, POLL_MS);
+      // Live data is pushed from the app via realtime events (see startWidgetBroadcast).
+      Homey.on('powerflow', onData);
+      setInterval(applyStale, CHECK_MS);
     }
   </script>
 </body>
