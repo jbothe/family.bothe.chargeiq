@@ -33,6 +33,10 @@ export interface ChargePointEvents {
   meterValues: (readings: Readings, raw: MeterValuesReq) => void;
   startTransaction: (transactionId: number, req: StartTransactionReq) => void;
   stopTransaction: (req: StopTransactionReq) => void;
+  authorize: (idTag: string, accepted: boolean) => void;
+  dataTransfer: (payload: { vendorId?: string; messageId?: string; data?: string }) => void;
+  firmwareStatus: (status: string) => void;
+  diagnosticsStatus: (status: string) => void;
   connect: () => void;
   disconnect: () => void;
 }
@@ -122,9 +126,9 @@ export class ChargePoint extends EventEmitter {
     });
 
     client.handle('Authorize', ({ params }) => {
-      const idTagInfo: IdTagInfo = {
-        status: this.authorize(params.idTag) ? 'Accepted' : 'Invalid',
-      };
+      const accepted = this.authorize(params.idTag);
+      const idTagInfo: IdTagInfo = { status: accepted ? 'Accepted' : 'Invalid' };
+      this.emit('authorize', params.idTag, accepted);
       return { idTagInfo };
     });
 
@@ -152,9 +156,18 @@ export class ChargePoint extends EventEmitter {
     });
 
     // Accept the optional messages so strictMode does not reject them.
-    client.handle('DataTransfer', () => ({ status: 'Accepted' }));
-    client.handle('FirmwareStatusNotification', () => ({}));
-    client.handle('DiagnosticsStatusNotification', () => ({}));
+    client.handle('DataTransfer', ({ params }) => {
+      this.emit('dataTransfer', params ?? {});
+      return { status: 'Accepted' };
+    });
+    client.handle('FirmwareStatusNotification', ({ params }) => {
+      this.emit('firmwareStatus', params?.status ?? 'Unknown');
+      return {};
+    });
+    client.handle('DiagnosticsStatusNotification', ({ params }) => {
+      this.emit('diagnosticsStatus', params?.status ?? 'Unknown');
+      return {};
+    });
 
     client.on('close', () => {
       if (this.client === client) {
