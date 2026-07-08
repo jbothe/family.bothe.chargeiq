@@ -1,7 +1,5 @@
 'use strict';
 
-export type BelowMinBehavior = 'pause' | 'stop';
-
 export interface SolarLoopConfig {
   voltage: number;
   phases: number;
@@ -11,14 +9,12 @@ export interface SolarLoopConfig {
   deadbandA: number;
   /** Max change per evaluation (A). */
   rampA: number;
-  /** Minimum time charging before it may pause/stop (ms). */
+  /** Minimum time charging before it may pause (ms). */
   minOnMs: number;
   /** Minimum time off/paused before it may (re)start (ms). */
   minOffMs: number;
   /** Bias watts: positive reserves headroom (charge less), negative allows some import. */
   marginW: number;
-  /** What to do when surplus falls below the minimum start current. */
-  belowMin: BelowMinBehavior;
 }
 
 export type SolarState = 'off' | 'charging' | 'paused';
@@ -32,7 +28,9 @@ export interface SolarInput {
 }
 
 export interface SolarResult {
-  /** null = stop transaction, 0 = pause (hold 0A), >=minAmps = charge at that current. */
+  /** null = no session desired yet (never started), 0 = pause (hold 0A, keep any
+   *  existing session alive), >=minAmps = charge at that current. Callers should
+   *  treat null the same as 0 - never a reason to end a live transaction. */
   target: number | null;
   state: SolarState;
   /** Computed surplus available to the car (W), for diagnostics/widget. */
@@ -79,7 +77,7 @@ export class SolarLoop {
   }
 
   evaluate(input: SolarInput): SolarResult {
-    const { voltage, phases, minAmps, deadbandA, rampA, minOnMs, minOffMs, marginW, belowMin } = this.cfg;
+    const { voltage, phases, minAmps, deadbandA, rampA, minOnMs, minOffMs, marginW } = this.cfg;
     // Power available to the car = what it already draws, minus the net grid flow
     // (export is negative grid so it adds capacity; import is positive so it subtracts),
     // minus a reserve margin. This works whether the meter is importing or exporting.
@@ -110,12 +108,8 @@ export class SolarLoop {
         if (since >= minOnMs) {
           this.currentA = 0;
           this.lastChangeAt = input.now;
-          if (belowMin === 'pause') {
-            this.state = 'paused';
-            return this.result(0, availableW);
-          }
-          this.state = 'off';
-          return this.result(null, availableW);
+          this.state = 'paused';
+          return this.result(0, availableW);
         }
         // Hold during minimum-on dwell.
         return this.result(this.currentA, availableW);

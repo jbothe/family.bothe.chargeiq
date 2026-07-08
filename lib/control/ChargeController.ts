@@ -3,6 +3,7 @@
 import { CentralSystem } from '../ocpp/CentralSystem';
 import { ChargePoint } from '../ocpp/ChargePoint';
 import {
+  BootNotificationReq,
   MeterValuesReq,
   OcppStatus,
   Readings,
@@ -10,8 +11,8 @@ import {
   StatusNotificationReq,
   StopTransactionReq,
 } from '../ocpp/types';
-import { Scheduler, ScheduleWindow } from './Scheduler';
-import { BelowMinBehavior, SolarLoop, SolarLoopConfig } from './SolarLoop';
+import { Scheduler, ScheduleWindow, findScheduleConflicts } from './Scheduler';
+import { SolarLoop, SolarLoopConfig } from './SolarLoop';
 
 /** Derived charging mode (not user-selected). */
 export type ChargeMode = 'manual' | 'scheduled' | 'solar';
@@ -51,6 +52,13 @@ export interface ControllerHost {
   /** Fired when charging starts/stops so the device can trigger Flow cards. */
   onChargingChanged?(charging: boolean): void;
   onModeChanged?(mode: ChargeMode): void;
+  /**
+   * IANA timezone Homey is configured for (e.g. "Europe/Amsterdam"), via
+   * `this.homey.clock.getTimezone()`. The underlying OS clock runs in UTC
+   * regardless of this setting, so schedule windows must be evaluated against
+   * it explicitly rather than trusting `Date`'s own local getters.
+   */
+  getTimezone?(): string | undefined;
 }
 
 interface ControllerConfig {
@@ -67,14 +75,13 @@ interface ControllerConfig {
   minOnMs: number;
   minOffMs: number;
   marginW: number;
-  belowMin: BelowMinBehavior;
   solarStaleMs: number;
   maxHouseholdW: number;
 }
 
 const DEFAULTS: ControllerConfig = {
   minAmps: 6,
-  maxAmps: 31,
+  maxAmps: 32,
   phases: 1,
   voltage: 230,
   idTag: 'CHARGEIQ',
@@ -85,7 +92,6 @@ const DEFAULTS: ControllerConfig = {
   minOnMs: 3 * 60000,
   minOffMs: 3 * 60000,
   marginW: 0,
-  belowMin: 'pause',
   solarStaleMs: 60000,
   maxHouseholdW: 14000,
 };
@@ -98,10 +104,10 @@ const TICK_MS = 10000;
 /** OCPP statuses that mean a vehicle is connected. */
 const PLUGGED = ['Preparing', 'Charging', 'SuspendedEV', 'SuspendedEVSE', 'Finishing'];
 
+/** amps: 0 = pause (hold 0A, keep any live session alive), >0 = charge at that current. */
 interface Decision {
   mode: ChargeMode;
-  charge: boolean;
-  amps?: number;
+  amps: number;
 }
 
 /** Map raw OCPP status to Homey's standard evcharger_charging_state enum. */
@@ -123,8 +129,8 @@ export function toChargingState(status: OcppStatus): string {
   }
 }
 
-function fmtTime(d: Date): string {
-  return d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+function fmtTime(d: Date, timezone?: string): string {
+  return d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: timezone });
 }
 
 /**
@@ -146,6 +152,9 @@ export class ChargeController {
 
   private scheduler = new Scheduler();
 
+  /** IANA timezone Homey is configured for (see ControllerHost.getTimezone). */
+  private timezone?: string;
+
   /** Sticky manual intent, or null when running automatically. */
   private manualLatch: ManualLatch | null = null;
 
@@ -155,7 +164,7 @@ export class ChargeController {
   /** Tracks schedule active-state to detect the rising edge (window start). */
   private wasInSchedule = false;
 
-  /** Tracks plug state to detect a replug (unplugged -> plugged) edge. */
+  /** Tracks plug state to detect a fresh plug-in (unplugged -> plugged) edge. */
   private prevPlugged: boolean | null = null;
 
   /** Solar target (A): null = stop, 0 = pause, >=minAmps = charge. */
@@ -177,9 +186,10 @@ export class ChargeController {
 
   private prevStatus: string | null = null;
 
-  private loggedPowerW = 0;
+  /** Raw last-seen OCPP status, used to gate a new RemoteStartTransaction. */
+  private lastStatusValue: OcppStatus | null = null;
 
-  private loggedSolar = '';
+  private loggedPowerW = 0;
 
   private transactionId: number | null = null;
 
@@ -220,6 +230,7 @@ export class ChargeController {
     this.cs.on('disconnect', (cp: ChargePoint) => {
       if (cp.identity === this.host.identity) {
         this.cp = null;
+        this.host.log('[charger] disconnected');
         this.host.setUnavailable('Charger offline');
       }
     });
@@ -251,11 +262,12 @@ export class ChargeController {
       minOnMs: g('minOnSec', DEFAULTS.minOnMs / 1000) * 1000,
       minOffMs: g('minOffSec', DEFAULTS.minOffMs / 1000) * 1000,
       marginW: g('marginW', DEFAULTS.marginW),
-      belowMin: g('belowMin', DEFAULTS.belowMin),
       solarStaleMs: g('solarStaleSec', DEFAULTS.solarStaleMs / 1000) * 1000,
       maxHouseholdW: g('maxHouseholdW', DEFAULTS.maxHouseholdW),
     };
     this.solarLoop?.setConfig(this.solarLoopConfig());
+    this.timezone = this.host.getTimezone?.();
+    this.scheduler.setTimezone(this.timezone);
   }
 
   private solarLoopConfig(): SolarLoopConfig {
@@ -263,20 +275,42 @@ export class ChargeController {
     return {
       voltage: c.voltage, phases: c.phases, minAmps: c.minAmps, maxAmps: c.maxAmps,
       deadbandA: c.deadbandA, rampA: c.rampA, minOnMs: c.minOnMs, minOffMs: c.minOffMs,
-      marginW: c.marginW, belowMin: c.belowMin,
+      marginW: c.marginW,
     };
   }
 
   private bind(cp: ChargePoint): void {
     this.host.setAvailable();
-    if (this.cp === cp) return;
+    if (this.cp === cp) {
+      // Same ChargePoint reconnected (its client was swapped) - not a fresh
+      // bind, but still worth a fresh status to reconcile any staleness.
+      this.host.log(`[charger] reconnected (${cp.identity})`);
+      this.requestFreshState();
+      return;
+    }
     this.cp = cp;
 
-    cp.on('boot', () => this.configureCharger().catch((e) => this.host.error('configureCharger', e)));
+    cp.on('boot', (info: BootNotificationReq) => {
+      this.host.log(`[charger] boot ${info.chargePointVendor} ${info.chargePointModel}`
+        + (info.firmwareVersion ? ` fw=${info.firmwareVersion}` : '')
+        + (info.chargePointSerialNumber ? ` sn=${info.chargePointSerialNumber}` : ''));
+      this.configureCharger().catch((e) => this.host.error('configureCharger', e));
+    });
     cp.on('status', (i: StatusNotificationReq) => this.onStatus(i));
     cp.on('meterValues', (r: Readings, _raw: MeterValuesReq) => this.onMeterValues(r));
     cp.on('startTransaction', (id: number, req: StartTransactionReq) => this.onStartTransaction(id, req));
     cp.on('stopTransaction', (req: StopTransactionReq) => this.onStopTransaction(req));
+    cp.on('heartbeat', () => this.host.log('[charger] heartbeat'));
+    cp.on('authorize', (idTag: string, accepted: boolean) => {
+      this.host.log(`[charger] authorize ${idTag} -> ${accepted ? 'accepted' : 'invalid'}`);
+    });
+    cp.on('dataTransfer', (payload: { vendorId?: string; messageId?: string; data?: string }) => {
+      this.host.log(`[charger] dataTransfer vendor=${payload.vendorId ?? '?'}`
+        + (payload.messageId ? ` msg=${payload.messageId}` : '')
+        + (payload.data ? ` data=${payload.data}` : ''));
+    });
+    cp.on('firmwareStatus', (status: string) => this.host.log(`[charger] firmware status ${status}`));
+    cp.on('diagnosticsStatus', (status: string) => this.host.log(`[charger] diagnostics status ${status}`));
 
     const cachedStatus = cp.getLastStatus();
     if (cachedStatus) this.onStatus(cachedStatus);
@@ -291,8 +325,12 @@ export class ChargeController {
 
   private requestFreshState(): void {
     if (!this.cp?.connected) return;
-    this.cp.triggerMessage('StatusNotification', CONNECTOR_ID).catch(() => { /* optional */ });
-    this.cp.triggerMessage('MeterValues', CONNECTOR_ID).catch(() => { /* optional */ });
+    this.cp.triggerMessage('StatusNotification', CONNECTOR_ID)
+      .then((ok) => { if (!ok) this.host.log('[charger] TriggerMessage(StatusNotification) not accepted'); })
+      .catch((e) => this.host.log(`[charger] TriggerMessage(StatusNotification) failed: ${(e as Error).message}`));
+    this.cp.triggerMessage('MeterValues', CONNECTOR_ID)
+      .then((ok) => { if (!ok) this.host.log('[charger] TriggerMessage(MeterValues) not accepted'); })
+      .catch((e) => this.host.log(`[charger] TriggerMessage(MeterValues) failed: ${(e as Error).message}`));
   }
 
   private async configureCharger(): Promise<void> {
@@ -323,8 +361,11 @@ export class ChargeController {
     this.host.setCapability('evcharger_charging', info.status === 'Charging');
     this.host.setWarning(info.status === 'Faulted' ? `Charger fault: ${info.errorCode}` : null);
 
-    // Detect unplug -> replug: clear the manual latch so charging reverts to
-    // automatic (schedule/solar). Ignore the first observation and Faulted/etc.
+    // A fresh plug-in always clears the manual latch, so a newly-connected car
+    // resolves to Scheduled (in a window) or Solar (otherwise) - never Manual.
+    // `prevPlugged === false` (not null) means we've actually observed the
+    // charger idle before, so this doesn't fire on a transactionId restored
+    // from the store at boot with no real status seen yet.
     if (info.status === 'Available') {
       this.prevPlugged = false;
       // Idle charger: reconcile any stale transaction id from before a restart.
@@ -335,10 +376,25 @@ export class ChargeController {
       }
     } else if (PLUGGED.includes(info.status)) {
       if (this.prevPlugged === false && this.manualLatch) {
-        this.clearManualLatch('charger replugged');
+        this.clearManualLatch('fresh plug-in');
       }
       this.prevPlugged = true;
     }
+
+    // Finishing means the EV ended the session; some chargers (Wallbox Pulsar
+    // included) hold Finishing without sending StopTransaction until the cable
+    // is physically removed and reinserted. Treat it as authoritative here
+    // rather than waiting indefinitely for StopTransaction/Available, so the
+    // controller doesn't believe a dead transaction is still live.
+    if (info.status === 'Finishing' && this.transactionId != null) {
+      this.transactionId = null;
+      this.desiredAmps = null;
+      this.awaitingStart = false;
+      this.host.setStore('transactionId', null).catch(this.host.error);
+      this.host.setCapability('evcharger_charging', false);
+      this.host.onChargingChanged?.(false);
+    }
+    this.lastStatusValue = info.status;
     this.tick();
   }
 
@@ -424,6 +480,11 @@ export class ChargeController {
   }
 
   async setSchedule(windows: ScheduleWindow[]): Promise<void> {
+    const conflicts = findScheduleConflicts(windows);
+    if (conflicts.length > 0) {
+      const [{ a, b }] = conflicts;
+      throw new Error(`Schedule windows ${a + 1} and ${b + 1} overlap`);
+    }
     this.scheduler.setWindows(windows);
     await this.host.setStore('schedule', windows);
     this.tick();
@@ -452,16 +513,12 @@ export class ChargeController {
     this.host.setCapability('measure_solar_surplus', Math.round(this.lastAvailableW));
 
     const tgt = res.target === null ? 'stop' : (res.target === 0 ? 'pause' : res.target + 'A');
-    const r50 = (w?: number) => (w == null ? 'na' : String(Math.round(w / 50) * 50));
-    const key = [r50(sample.pvW), r50(sample.batteryW), r50(sample.houseW),
-      r50(gridSignedW), r50(chargerPowerW), tgt, res.state].join('|');
-    if (key !== this.loggedSolar) {
-      this.loggedSolar = key;
-      const f = (w?: number) => (w == null ? '?' : Math.round(w) + 'W');
-      this.host.log(`[solar] solar=${f(sample.pvW)} battery=${f(sample.batteryW)} house=${f(sample.houseW)} `
-        + `grid=${f(gridSignedW)} charger=${f(chargerPowerW)} excess=${Math.round(this.lastAvailableW)}W`
-        + ` -> ${tgt} (${res.state})`);
-    }
+    // TEMP debugging: log every sample, unthrottled (normally deduped on a
+    // rounded-to-50W fingerprint change - see git history to restore that).
+    const f = (w?: number) => (w == null ? '?' : Math.round(w) + 'W');
+    this.host.log(`[solar] solar=${f(sample.pvW)} battery=${f(sample.batteryW)} house=${f(sample.houseW)} `
+      + `grid=${f(gridSignedW)} charger=${f(chargerPowerW)} excess=${Math.round(this.lastAvailableW)}W`
+      + ` -> ${tgt} (${res.state})`);
 
     this.tick(new Date(now));
   }
@@ -493,10 +550,10 @@ export class ChargeController {
     if (mode === 'manual') {
       const base = this.manualLatch?.intent === 'off' ? 'stopped' : 'charging';
       const ns = this.scheduler.nextStart(now);
-      detail = base + (ns ? ` · schedule ${fmtTime(ns)}` : '');
+      detail = base + (ns ? ` · schedule ${fmtTime(ns, this.timezone)}` : '');
     } else if (mode === 'scheduled') {
       const end = this.scheduler.currentEnd(now);
-      detail = end ? `until ${fmtTime(end)}` : 'charging';
+      detail = end ? `until ${fmtTime(end, this.timezone)}` : 'charging';
     } else { // solar
       const t = this.solarTargetAmps;
       detail = (t != null && t >= this.cfg.minAmps) ? `charging ${t}A`
@@ -518,19 +575,25 @@ export class ChargeController {
   // Decision + tick
   // ---------------------------------------------------------------------------
 
-  /** Resolve derived mode + desired charging action. Manual > Schedule > Solar. */
+  /**
+   * Resolve derived mode + desired charging current. Manual > Schedule > Solar.
+   * amps is always 0 (pause, keep any live session alive) or a real target -
+   * nothing here ever calls for a hard stop. The Wallbox holds Finishing until
+   * a physical unplug/replug once a transaction is actually ended, so ending
+   * one is never worth the risk of stranding the charger.
+   */
   resolve(now: Date): Decision {
     if (this.manualLatch) {
-      if (this.manualLatch.intent === 'off') return { mode: 'manual', charge: false };
-      return { mode: 'manual', charge: true, amps: this.manualLatch.amps ?? this.cfg.maxAmps };
+      if (this.manualLatch.intent === 'off') return { mode: 'manual', amps: 0 };
+      return { mode: 'manual', amps: this.manualLatch.amps ?? this.cfg.maxAmps };
     }
     if (this.scheduler.isActive(now)) {
-      return { mode: 'scheduled', charge: true, amps: this.scheduleOrMax(now) };
+      return { mode: 'scheduled', amps: this.scheduleOrMax(now) };
     }
-    // Solar is the default outside a schedule.
-    if (this.solarTargetAmps == null) return { mode: 'solar', charge: false };
-    if (this.solarTargetAmps === 0) return { mode: 'solar', charge: true, amps: 0 };
-    return { mode: 'solar', charge: true, amps: this.clampAmps(this.solarTargetAmps) };
+    // Solar is the default outside a schedule. null (never started) and 0
+    // (paused after charging) both just mean "hold at 0A".
+    if (!this.solarTargetAmps) return { mode: 'solar', amps: 0 };
+    return { mode: 'solar', amps: this.clampAmps(this.solarTargetAmps) };
   }
 
   private scheduleOrMax(now: Date): number {
@@ -549,7 +612,7 @@ export class ChargeController {
     if (!this.manualLatch && !inSchedule && this.lastSolarSampleAt > 0
       && now.getTime() - this.lastSolarSampleAt > this.cfg.solarStaleMs) {
       if (!this.solarStaleWarned) {
-        this.host.log('Solar feed stale; failing safe (stopping solar charging)');
+        this.host.log('Solar feed stale; failing safe (pausing solar charging)');
         this.solarStaleWarned = true;
       }
       this.solarTargetAmps = null;
@@ -559,12 +622,7 @@ export class ChargeController {
     const decision = this.resolve(now);
     this.updateMode(decision.mode);
 
-    if (!decision.charge) {
-      this.ensureStopped();
-      return;
-    }
-
-    let amps = decision.amps ?? this.cfg.maxAmps;
+    let amps = decision.amps;
     if (amps > 0) {
       const cap = this.householdCapAmps();
       if (cap != null && cap < amps) {
@@ -603,18 +661,17 @@ export class ChargeController {
       if (target > 0) this.host.setCapability('charge_current_limit', target);
       if (this.transactionId != null) this.scheduleWrite();
     }
-    if (target > 0 && this.transactionId == null && !this.awaitingStart && this.cp?.connected) {
+    // Don't attempt a new session while the charger is still winding down a
+    // finished one (Finishing) - the EV won't accept it until unplug/replug.
+    // Also wait for a real status before acting, so a transactionId restored
+    // from the store at boot can't drive commands before it's confirmed live.
+    if (target > 0 && this.transactionId == null && !this.awaitingStart
+      && this.lastStatusValue != null && this.lastStatusValue !== 'Finishing' && this.cp?.connected) {
       this.awaitingStart = true;
+      this.host.log(`[charger] requesting start (${target}A)`);
       this.cp.remoteStartTransaction(this.cfg.idTag, CONNECTOR_ID)
+        .then((accepted) => { if (!accepted) this.awaitingStart = false; })
         .catch((e) => { this.awaitingStart = false; this.host.error('remoteStart', e); });
-    }
-  }
-
-  private ensureStopped(): void {
-    if (this.pendingWrite) { clearTimeout(this.pendingWrite); this.pendingWrite = null; }
-    this.desiredAmps = null;
-    if (this.transactionId != null && this.cp?.connected) {
-      this.cp.remoteStopTransaction(this.transactionId).catch((e) => this.host.error('remoteStop', e));
     }
   }
 
@@ -637,6 +694,7 @@ export class ChargeController {
         this.pendingWrite = null;
         void this.writeProfile();
       }, wait);
+      this.pendingWrite.unref?.();
     }
   }
 

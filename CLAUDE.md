@@ -1,7 +1,7 @@
 # ChargeIQ — Homey Pro EV charging app
 
 Self-contained Homey Pro app (SDK v3, TypeScript, CommonJS output) that is the **OCPP 1.6J
-Central System** for one **Wallbox Pulsar Max** (single-phase, 230 V, 6–31 A) and orchestrates
+Central System** for one **Wallbox Pulsar Max** (single-phase, 230 V, 6–32 A) and orchestrates
 charging across three derived modes, plus a live power-flow dashboard widget. App id
 `family.bothe.chargeiq`, compatibility `>=12.4.5`, platform `local`.
 
@@ -56,6 +56,17 @@ drives the widget's `Mode: X · detail` line.
 - `SetChargingProfile` uses a **stable** `chargingProfileId`/`stackLevel` so each write replaces the
   last; writes are throttled (`writeThrottleMs`). `TxProfile` while a transaction is live, else
   `TxDefaultProfile`. `limit: 0` = pause (keep the session).
+- **The controller never issues `RemoteStopTransaction`.** Every "don't charge" decision (manual
+  off, no schedule/solar target, stale solar feed, disconnected latch) resolves to `amps: 0` (pause)
+  in `ChargeController.resolve()`/`tick()`, never a hard stop. The Wallbox holds `Finishing` until a
+  physical unplug/replug once a transaction actually ends, which would strand charging until someone
+  walks out to the car — not worth it for any in-app reason. `SolarLoop`'s `target: null` (never
+  started) and `target: 0` (paused) are both treated identically as "hold at 0A" by the controller.
+- **Homey Pro's underlying OS clock runs in UTC**, independent of the timezone configured in the
+  Homey app/mobile UI. Any wall-clock comparison (schedule windows, displayed times) must go through
+  `this.homey.clock.getTimezone()` (`ControllerHost.getTimezone()` → `Scheduler.setTimezone()` /
+  `fmtTime()`), never `Date`'s own local getters (`getHours()`/`getDay()`/`toLocaleTimeString()`
+  without an explicit `timeZone`) — those reflect UTC on-device, not the user's local time.
 - Grid sign convention: **import positive / export negative**. Surplus = `chargerPower − gridSigned − margin`.
 - Controller diagnostics log via the **app** logger (`this.homey.app.log`) for a short
   `[ChargeIQApp]` prefix; tags are `[charger]`, `[solar]`, `[cap]`, `[mode]`.

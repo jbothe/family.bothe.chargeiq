@@ -34,17 +34,7 @@
       { "id": "rampA", "type": "number", "label": { "en": "Max ramp per step (A)" }, "value": 3, "min": 1, "max": 32 },
       { "id": "minOnSec", "type": "number", "label": { "en": "Minimum on time (s)" }, "value": 180, "min": 0, "max": 3600 },
       { "id": "minOffSec", "type": "number", "label": { "en": "Minimum off time (s)" }, "value": 180, "min": 0, "max": 3600 },
-      { "id": "solarStaleSec", "type": "number", "label": { "en": "Solar feed stale timeout (s)" }, "value": 60, "min": 10, "max": 600 },
-      {
-        "id": "belowMin",
-        "type": "dropdown",
-        "label": { "en": "When surplus below minimum" },
-        "value": "pause",
-        "values": [
-          { "id": "pause", "label": { "en": "Pause at 0A (keep session)" } },
-          { "id": "stop", "label": { "en": "Stop the transaction" } }
-        ]
-      }
+      { "id": "solarStaleSec", "type": "number", "label": { "en": "Solar feed stale timeout (s)" }, "value": 60, "min": 10, "max": 600 }
     ]
   }
 ]

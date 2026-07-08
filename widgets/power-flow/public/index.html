@@ -198,7 +198,7 @@
     }
 
     var CHECK_MS = 5000;   // how often we re-check staleness
-    var STALE_MS = 25000;  // dim after ~5 missed pushes (app broadcasts every 5s), then auto-recover
+    var STALE_MS = 50000;  // dim after ~5 missed pushes (app broadcasts every 10s), then auto-recover
     var lastOkAt = 0;
     var hadData = false;
 

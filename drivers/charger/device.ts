@@ -150,6 +150,9 @@ module.exports = class ChargerDevice extends Homey.Device {
       onModeChanged: (mode) => {
         this.modeTrigger.trigger(this, { mode }, {}).catch(this.error);
       },
+      // Homey's underlying OS clock runs in UTC regardless of the timezone
+      // configured in the Homey app, so schedule windows need this explicitly.
+      getTimezone: () => this.homey.clock.getTimezone(),
     };
   }
 

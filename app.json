@@ -180,7 +180,7 @@
               "en": "Current (A)"
             },
             "min": 6,
-            "max": 31,
+            "max": 32,
             "step": 1,
             "value": 16,
             "label": " A",
@@ -212,7 +212,7 @@
               "en": "Current (A)"
             },
             "min": 6,
-            "max": 31,
+            "max": 32,
             "step": 1,
             "value": 16,
             "label": " A",
@@ -246,17 +246,24 @@
       },
       "class": "evcharger",
       "capabilities": [
-        "charge_mode",
         "evcharger_charging",
+        "charge_current_limit",
+        "charge_mode",
         "evcharger_charging_state",
+        "measure_solar_surplus",
         "charger_status",
         "measure_power",
         "measure_current",
         "measure_voltage",
-        "meter_power",
-        "charge_current_limit",
-        "measure_solar_surplus"
+        "meter_power"
       ],
+      "capabilitiesOptions": {
+        "meter_power": {
+          "title": {
+            "en": "Energy (total)"
+          }
+        }
+      },
       "platforms": [
         "local"
       ],
@@ -332,7 +339,7 @@
               "label": {
                 "en": "Maximum current (A)"
               },
-              "value": 31,
+              "value": 32,
               "min": 6,
               "max": 80
             }
@@ -463,28 +470,6 @@
               "value": 60,
               "min": 10,
               "max": 600
-            },
-            {
-              "id": "belowMin",
-              "type": "dropdown",
-              "label": {
-                "en": "When surplus below minimum"
-              },
-              "value": "pause",
-              "values": [
-                {
-                  "id": "pause",
-                  "label": {
-                    "en": "Pause at 0A (keep session)"
-                  }
-                },
-                {
-                  "id": "stop",
-                  "label": {
-                    "en": "Stop the transaction"
-                  }
-                }
-              ]
             }
           ]
         }
@@ -513,8 +498,9 @@
       "units": {
         "en": "A"
       },
+      "icon": "/assets/capabilities/charge_current_limit.svg",
       "min": 6,
-      "max": 31,
+      "max": 32,
       "step": 1,
       "decimals": 0,
       "getable": true,
@@ -529,6 +515,7 @@
       "desc": {
         "en": "Current mode: Manual, Scheduled or Solar"
       },
+      "icon": "/assets/capabilities/charge_mode.svg",
       "getable": true,
       "setable": false,
       "uiComponent": "sensor",
@@ -561,6 +548,7 @@
       "desc": {
         "en": "Raw OCPP StatusNotification state"
       },
+      "icon": "/assets/capabilities/charger_status.svg",
       "getable": true,
       "setable": false,
       "uiComponent": "sensor",
@@ -624,7 +612,7 @@
     "measure_solar_surplus": {
       "type": "number",
       "title": {
-        "en": "Solar surplus"
+        "en": "Solar Surplus"
       },
       "desc": {
         "en": "Excess solar power available to the charger"
@@ -632,6 +620,7 @@
       "units": {
         "en": "W"
       },
+      "icon": "/assets/capabilities/measure_solar_surplus.svg",
       "decimals": 0,
       "getable": true,
       "setable": false,

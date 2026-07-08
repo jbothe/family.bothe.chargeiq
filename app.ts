@@ -70,7 +70,7 @@ module.exports = class ChargeIQApp extends Homey.App {
       }
     };
     tick();
-    this.widgetBroadcast = setInterval(tick, 5000);
+    this.widgetBroadcast = setInterval(tick, 10000);
   }
 
   /** Expose the Central System to drivers/devices. */
