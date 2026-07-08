@@ -19,6 +19,8 @@ module.exports = class ChargeIQApp extends Homey.App {
 
   private solarFeed!: SolarFeed;
 
+  private widgetBroadcast?: ReturnType<typeof setInterval>;
+
   async onInit() {
     const port = (this.homey.settings.get('ocppPort') as number) || DEFAULT_PORT;
 
@@ -41,12 +43,34 @@ module.exports = class ChargeIQApp extends Homey.App {
     this.solarFeed = new SolarFeed(this.homey, (msg, ...args) => this.log(msg, ...args));
     this.solarFeed.start().catch((err) => this.error('SolarFeed failed to start:', err));
 
+    this.startWidgetBroadcast();
+
     this.log(`ChargeIQ initialised; OCPP CS on port ${port}`);
   }
 
   async onUninit() {
+    if (this.widgetBroadcast) clearInterval(this.widgetBroadcast);
     await this.centralSystem?.stop();
     await this.solarFeed?.stop();
+  }
+
+  /**
+   * Push merged state to the power-flow widget via realtime events every 5s.
+   * This is the primary widget data channel (Homey.on in the widget), avoiding
+   * any dependence on widget/app API routing.
+   */
+  private startWidgetBroadcast() {
+    let firstLogged = false;
+    const tick = () => {
+      try {
+        this.homey.api.realtime('powerflow', this.getWidgetState());
+        if (!firstLogged) { this.log('[widget] broadcasting state via realtime'); firstLogged = true; }
+      } catch (err) {
+        this.error('[widget] realtime broadcast failed:', err);
+      }
+    };
+    tick();
+    this.widgetBroadcast = setInterval(tick, 5000);
   }
 
   /** Expose the Central System to drivers/devices. */

@@ -217,6 +217,13 @@
       try { return Promise.resolve(H.api('GET', uri)); } catch (e) { return Promise.reject(e); }
     }
 
+    function onData(result) {
+      if (!result || typeof result !== 'object') return;
+      lastOkAt = Date.now(); hadData = true;
+      render(result); applyStale();
+    }
+
+    // Backup only: if realtime push goes quiet, try the api (either routing).
     function fetchState() {
       if (!H) return;
       var list = workingEndpoint ? [workingEndpoint] : ENDPOINTS;
@@ -226,14 +233,10 @@
         var uri = list[i++];
         call(uri).then(function (result) {
           if (result && typeof result === 'object') {
-            if (workingEndpoint !== uri && window.console) console.log('power-flow: using', uri);
-            workingEndpoint = uri; lastOkAt = Date.now(); hadData = true;
-            render(result); applyStale();
+            if (workingEndpoint !== uri && window.console) console.log('power-flow: api using', uri);
+            workingEndpoint = uri; onData(result);
           } else { attempt(); }
-        }, function (err) {
-          if (window.console && console.warn) console.warn('power-flow:', uri, 'failed', err && err.message ? err.message : err);
-          attempt();
-        });
+        }, function () { attempt(); });
       })();
     }
 
@@ -241,8 +244,14 @@
       H = Homey;
       Homey.ready();
       buildNodes();
+      // Primary channel: realtime push from the app (every 5s).
+      try { Homey.on('powerflow', onData); } catch (e) { /* older runtime */ }
+      // Best-effort initial paint + backup poll if realtime is silent.
       fetchState();
-      setInterval(function () { fetchState(); applyStale(); }, POLL_MS);
+      setInterval(function () {
+        applyStale();
+        if (Date.now() - lastOkAt > POLL_MS) fetchState();
+      }, POLL_MS);
     }
   </script>
 </body>
