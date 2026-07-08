@@ -199,33 +199,42 @@
 
     var POLL_MS = 10000;   // auto-update cadence
     var STALE_MS = 25000;  // dim after ~2 missed updates, then auto-recover
+    // Widget-scoped api.js exposes '/getState'; the app api manifest exposes '/state'.
+    // We don't assume which one Homey.api routes to — try both, then lock onto the winner.
+    var ENDPOINTS = ['/getState', '/state'];
     var H = null;
     var lastOkAt = 0;
     var hadData = false;
+    var workingEndpoint = null;
 
     function applyStale() {
       var stale = hadData && (Date.now() - lastOkAt > STALE_MS);
       document.querySelector('.card').className = 'card' + (stale ? ' stale' : '');
     }
 
-    // Fetch state resiliently, working whether Homey.api is promise- or callback-based.
+    function call(uri) {
+      // Homey widget api is promise-based; wrap defensively.
+      try { return Promise.resolve(H.api('GET', uri)); } catch (e) { return Promise.reject(e); }
+    }
+
     function fetchState() {
       if (!H) return;
-      var done = false;
-      function ok(result) {
-        if (done) return; done = true;
-        if (result && typeof result === 'object') { lastOkAt = Date.now(); hadData = true; render(result); }
-        applyStale();
-      }
-      function fail(err) {
-        if (done) return; done = true;
-        if (window.console && console.warn) console.warn('power-flow: getState failed', err);
-        applyStale();
-      }
-      try {
-        var p = H.api('GET', '/getState', null, function (err, result) { if (err) fail(err); else ok(result); });
-        if (p && typeof p.then === 'function') p.then(ok, fail);
-      } catch (e) { fail(e); }
+      var list = workingEndpoint ? [workingEndpoint] : ENDPOINTS;
+      var i = 0;
+      (function attempt() {
+        if (i >= list.length) { applyStale(); return; }
+        var uri = list[i++];
+        call(uri).then(function (result) {
+          if (result && typeof result === 'object') {
+            if (workingEndpoint !== uri && window.console) console.log('power-flow: using', uri);
+            workingEndpoint = uri; lastOkAt = Date.now(); hadData = true;
+            render(result); applyStale();
+          } else { attempt(); }
+        }, function (err) {
+          if (window.console && console.warn) console.warn('power-flow:', uri, 'failed', err && err.message ? err.message : err);
+          attempt();
+        });
+      })();
     }
 
     function onHomeyReady(Homey) {
