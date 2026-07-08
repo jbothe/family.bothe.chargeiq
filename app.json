@@ -258,6 +258,11 @@
         "meter_power"
       ],
       "capabilitiesOptions": {
+        "evcharger_charging_state": {
+          "title": {
+            "en": "Charging State"
+          }
+        },
         "meter_power": {
           "title": {
             "en": "Energy (total)"
