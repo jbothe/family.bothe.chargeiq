@@ -113,8 +113,40 @@ export class Scheduler {
       if (delta > 0 && delta < best) best = delta;
     }
     if (!isFinite(best)) return undefined;
+    return this.dateFromDelta(now, best);
+  }
+
+  /** The next Date a window starts (strictly after now), or undefined if none. */
+  nextStart(now: Date): Date | undefined {
+    if (!this.hasWindows()) return undefined;
+    const mow = minuteOfWeek(now);
+    let best = Infinity;
+    for (const iv of this.intervals()) {
+      const s = ((iv.start % MIN_PER_WEEK) + MIN_PER_WEEK) % MIN_PER_WEEK;
+      const delta = s > mow ? s - mow : s + MIN_PER_WEEK - mow;
+      if (delta > 0 && delta < best) best = delta;
+    }
+    return isFinite(best) ? this.dateFromDelta(now, best) : undefined;
+  }
+
+  /** If a window is active at `now`, the Date it ends; otherwise undefined. */
+  currentEnd(now: Date): Date | undefined {
+    const mow = minuteOfWeek(now);
+    let best = Infinity;
+    for (const iv of this.intervals()) {
+      for (const m of [mow, mow + MIN_PER_WEEK]) {
+        if (m >= iv.start && m < iv.end) {
+          const delta = iv.end - m;
+          if (delta > 0 && delta < best) best = delta;
+        }
+      }
+    }
+    return isFinite(best) ? this.dateFromDelta(now, best) : undefined;
+  }
+
+  private dateFromDelta(now: Date, deltaMinutes: number): Date {
     const secondsIntoMinute = now.getSeconds() + now.getMilliseconds() / 1000;
-    const ms = (best * 60 - secondsIntoMinute) * 1000;
+    const ms = (deltaMinutes * 60 - secondsIntoMinute) * 1000;
     return new Date(now.getTime() + ms);
   }
 

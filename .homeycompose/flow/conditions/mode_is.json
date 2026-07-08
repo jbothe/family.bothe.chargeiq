@@ -7,10 +7,9 @@
       "type": "dropdown",
       "name": "mode",
       "values": [
-        { "id": "off", "label": { "en": "Off" } },
+        { "id": "manual", "label": { "en": "Manual" } },
         { "id": "scheduled", "label": { "en": "Scheduled" } },
-        { "id": "solar", "label": { "en": "Solar surplus" } },
-        { "id": "manual", "label": { "en": "Manual" } }
+        { "id": "solar", "label": { "en": "Solar surplus" } }
       ]
     }
   ]

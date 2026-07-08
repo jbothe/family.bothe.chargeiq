@@ -65,10 +65,7 @@ module.exports = class ChargerDevice extends Homey.Device {
     this.registerCapabilityListener('charge_current_limit', async (value: number) => {
       await this.controller.setCurrentLimit(value);
     });
-
-    this.registerCapabilityListener('charge_mode', async (value: ChargeMode) => {
-      await this.controller.setMode(value);
-    });
+    // charge_mode is now a read-only derived metric — no listener.
 
     this.log(`ChargerDevice ${this.getData().id} initialised`);
   }
@@ -94,9 +91,12 @@ module.exports = class ChargerDevice extends Homey.Device {
     return this.controller.getDiagnostics();
   }
 
-  // --- Flow card entry points -------------------------------------------------
+  /** Derived mode + short status detail (for the widget). */
+  getModeInfo() {
+    return this.controller.getModeInfo();
+  }
 
-  flowSetMode(mode: ChargeMode) { return this.controller.setMode(mode); }
+  // --- Flow card entry points -------------------------------------------------
 
   flowStart(current?: number) { return this.controller.startManual(current); }
 

@@ -145,13 +145,13 @@
       },
       busImporting: function (s) { return ((s && s.gridW) || 0) > 10; },
       socLabel: function (s) { var v = s && s.batterySoc; return (v != null && !isNaN(v)) ? Math.round(v) + '%' : ''; },
-      statusLabel: function (c) {
-        if (!c || !c.available) return 'No charger paired';
-        var map = { Charging: 'Charging', SuspendedEV: 'Paused (vehicle)', SuspendedEVSE: 'Paused',
-          Preparing: 'Plugged in', Finishing: 'Finishing', Available: 'Unplugged', Faulted: 'Fault',
-          Reserved: 'Reserved', Unavailable: 'Unavailable' };
-        var s = map[c.status] || PF.cap(c.status) || 'Idle';
-        return c.mode ? s + ' · ' + PF.cap(c.mode) : s;
+      // Header status line, e.g. "Mode: Manual · schedule 9:00 AM" / "Mode: Solar · idle (low excess)".
+      modeText: function (s) {
+        s = s || {};
+        var c = s.charger || {};
+        if (!c.available) return 'No charger paired';
+        if (!s.mode) return 'Idle';
+        return 'Mode: ' + PF.cap(s.mode) + (s.modeDetail ? ' · ' + s.modeDetail : '');
       },
     };
     // === POWERFLOW-LOGIC-END ===
@@ -177,7 +177,7 @@
       document.getElementById('charger-power').textContent = c.available ? PF.fmtW(c.powerW) : '–';
       document.getElementById('charger-amp').textContent =
         (c.available && c.charging && c.currentA) ? (c.currentA + ' A' + (c.limitA ? ' / ' + c.limitA : '')) : '';
-      document.getElementById('status').textContent = PF.statusLabel(c);
+      document.getElementById('status').textContent = PF.modeText(s);
       var sdot = document.getElementById('sdot');
       sdot.className = 'sdot' + (c.status === 'Faulted' ? ' fault' : (c.charging ? ' on' : ''));
 

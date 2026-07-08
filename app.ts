@@ -103,6 +103,7 @@ module.exports = class ChargeIQApp extends Homey.App {
     const dev = this.getChargerDevice();
     const cap = (id: string) => (dev && dev.hasCapability(id) ? dev.getCapabilityValue(id) : null);
     const diag = dev?.getDiagnostics?.();
+    const modeInfo = dev?.getModeInfo?.() ?? { mode: null, detail: '' };
     // Excess solar available to the car: from the loop when present, else grid export.
     const surplusW = diag ? diag.availableW : Math.max(0, -solar.gridSignedW);
     return {
@@ -112,12 +113,14 @@ module.exports = class ChargeIQApp extends Homey.App {
       batteryW: solar.batteryW,
       batterySoc: solar.batterySoc,
       surplusW,
+      mode: modeInfo.mode,
+      modeDetail: modeInfo.detail,
       charger: {
         available: !!dev,
         powerW: (cap('measure_power') as number) ?? 0,
         currentA: (cap('measure_current') as number) ?? 0,
         limitA: (cap('charge_current_limit') as number) ?? null,
-        mode: cap('charge_mode'),
+        mode: modeInfo.mode,
         status: cap('charger_status'),
         charging: !!cap('evcharger_charging'),
       },

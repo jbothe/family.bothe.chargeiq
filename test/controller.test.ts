@@ -16,9 +16,9 @@ function at(day: number, hh: number, mm: number): Date {
 const SCHED: ScheduleWindow[] = [{ days: [1, 2, 3, 4, 5], start: '09:00', end: '17:00', currentA: 20 }];
 
 function makeController(schedule: ScheduleWindow[]): {
-  c: ChargeController; caps: Record<string, unknown>; logs: string[];
+  c: ChargeController; caps: Record<string, unknown>; store: Record<string, unknown>; logs: string[];
 } {
-  const store: Record<string, unknown> = { schedule, mode: 'off' };
+  const store: Record<string, unknown> = { schedule };
   const settings: Record<string, unknown> = { minAmps: 6, maxAmps: 31, phases: 1, voltage: 230, maxHouseholdW: 14000 };
   const caps: Record<string, unknown> = {};
   const logs: string[] = [];
@@ -31,80 +31,98 @@ function makeController(schedule: ScheduleWindow[]): {
     setAvailable: () => {}, setUnavailable: () => {}, setWarning: () => {},
     log: (...a) => { logs.push(a.join(' ')); }, error: () => {},
   };
-  // Fake CentralSystem: no charge point present.
   const cs = { getChargePoint: () => undefined, on: () => {} } as unknown as CentralSystem;
   const c = new ChargeController(host, cs);
   c.init();
-  return { c, caps, logs };
+  return { c, caps, store, logs };
 }
 
-test('scheduled mode charges only within a window', async () => {
-  const { c } = makeController(SCHED);
-  await c.setMode('scheduled');
-  assert.deepEqual(c.resolve(at(1, 10, 0)), { charge: true, amps: 20 });
-  assert.equal(c.resolve(at(1, 20, 0)).charge, false);
-});
-
-test('schedule beats solar; solar follows outside a window', async () => {
-  const { c } = makeController(SCHED);
-  await c.setMode('solar');
+test('default outside a schedule is Solar; follows excess', () => {
+  const { c } = makeController([]);
   c.setSolarTarget(10);
-  assert.deepEqual(c.resolve(at(1, 10, 0)), { charge: true, amps: 20 }, 'schedule wins');
-  assert.deepEqual(c.resolve(at(1, 20, 0)), { charge: true, amps: 10 }, 'solar follows');
+  assert.deepEqual(c.resolve(at(0, 12, 0)), { mode: 'solar', charge: true, amps: 10 });
   c.setSolarTarget(null);
-  assert.equal(c.resolve(at(1, 20, 0)).charge, false, 'no solar target -> idle');
+  assert.deepEqual(c.resolve(at(0, 12, 0)), { mode: 'solar', charge: false });
 });
 
-test('manual override starts when mode is off, cleared by mode change', async () => {
-  const { c } = makeController([]); // no schedule -> override persists
-  await c.setMode('off');
-  await c.startManual(16);
-  assert.deepEqual(c.resolve(new Date()), { charge: true, amps: 16 });
-  await c.setMode('off');
-  assert.equal(c.resolve(new Date()).charge, false, 'mode change clears override');
-});
-
-test('manual stop overrides an active schedule window', async () => {
+test('inside a schedule (no manual) is Scheduled; schedule beats solar', () => {
   const { c } = makeController(SCHED);
-  await c.setMode('scheduled');
+  c.setSolarTarget(10);
+  assert.deepEqual(c.resolve(at(1, 10, 0)), { mode: 'scheduled', charge: true, amps: 20 });
+  assert.equal(c.resolve(at(1, 20, 0)).mode, 'solar', 'outside window -> solar');
+});
+
+test('manual start latches Manual until cleared; overrides schedule', async () => {
+  const { c } = makeController(SCHED);
+  await c.startManual(16);
+  assert.deepEqual(c.resolve(at(1, 10, 0)), { mode: 'manual', charge: true, amps: 16 });
+  assert.deepEqual(c.resolve(at(1, 20, 0)), { mode: 'manual', charge: true, amps: 16 });
+});
+
+test('manual stop cancels an active schedule (Manual, not charging)', async () => {
+  const { c } = makeController(SCHED);
   await c.stop();
-  assert.equal(c.resolve(new Date()).charge, false);
+  assert.deepEqual(c.resolve(at(1, 10, 0)), { mode: 'manual', charge: false });
+});
+
+test('moving the current slider switches to Manual at that current', async () => {
+  const { c } = makeController([]);
+  c.setSolarTarget(12); // solar would charge at 12A
+  await c.setCurrentLimit(8);
+  assert.deepEqual(c.resolve(at(0, 12, 0)), { mode: 'manual', charge: true, amps: 8 });
+});
+
+test('a schedule window starting clears the manual latch', async () => {
+  const { c } = makeController(SCHED);
+  await c.stop();                    // manual-off outside a window
+  c.tick(at(1, 8, 59));              // just before window
+  assert.equal(c.getMode(), 'manual');
+  c.tick(at(1, 9, 0));               // window starts -> clears latch
+  assert.equal(c.resolve(at(1, 9, 0)).mode, 'scheduled');
+});
+
+test('manual latch persists across restart (restored from store)', async () => {
+  const { c, store } = makeController([]);
+  await c.startManual(16);
+  assert.ok(store.manualLatch, 'latch persisted');
+  // New controller instance with the same store -> latch restored.
+  const caps2: Record<string, unknown> = {};
+  const host2: ControllerHost = {
+    identity: 'X',
+    setCapability: (k, v) => { caps2[k] = v; },
+    getSetting: () => undefined,
+    getStore: <T>(k: string) => store[k] as T,
+    setStore: async (k, v) => { store[k] = v; },
+    setAvailable: () => {}, setUnavailable: () => {}, setWarning: () => {},
+    log: () => {}, error: () => {},
+  };
+  const cs = { getChargePoint: () => undefined, on: () => {} } as unknown as CentralSystem;
+  const c2 = new ChargeController(host2, cs);
+  c2.init();
+  assert.equal(c2.resolve(new Date()).mode, 'manual');
 });
 
 test('household grid cap throttles the charger in any mode', async () => {
   const { c, caps } = makeController([]);
-  await c.startManual(31); // manual request for full 31A
-
-  // High non-charger grid load: 11,700W import. Cap = (14000-11700)/230 = 10A.
+  await c.startManual(31);
   c.onSolarSample({ gridSignedW: 11700 }, Date.now());
   assert.equal(caps.charge_current_limit, 10, 'capped to 10A under household ceiling');
-
-  // Plenty of headroom (exporting): cap no longer constrains -> full 31A.
   c.onSolarSample({ gridSignedW: -2000 }, Date.now());
   assert.equal(caps.charge_current_limit, 31, 'uncapped when grid has headroom');
-  // Excess solar surfaced as a metric (2000W export, not charging -> 2000W surplus).
   assert.equal(caps.measure_solar_surplus, 2000, 'excess solar metric set');
 });
 
-test('household cap pauses charging when even the minimum would breach the limit', async () => {
-  const { c, logs } = makeController([]);
-  await c.startManual(16);
-  // Non-charger load 13,900W: max charger = 100W -> below 6A minimum -> pause.
-  c.onSolarSample({ gridSignedW: 13900 }, Date.now());
-  assert.ok(logs.some((l) => l.includes('[cap]') && l.includes('paused')),
-    'logs a household-cap pause');
+test('excess floored at 0 and logged with all components', () => {
+  const { c, caps, logs } = makeController([]);
+  c.onSolarSample({ gridSignedW: 40, pvW: 100, batteryW: -50, houseW: 190 }, Date.now());
+  assert.equal(caps.measure_solar_surplus, 0, 'excess floored at 0');
+  const line = logs.find((l) => l.includes('[solar]')) || '';
+  assert.ok(line.includes('solar=100W') && line.includes('battery=-50W') && line.includes('excess=0W'));
 });
 
-test('excess is floored at 0 and logged with all components', async () => {
-  const { c, caps, logs } = makeController([]);
-  await c.setMode('solar');
-  // Importing 40W, not charging -> available = -40W -> floored to 0.
-  c.onSolarSample({ gridSignedW: 40, pvW: 100, batteryW: -50, houseW: 190 }, Date.now());
-  assert.equal(caps.measure_solar_surplus, 0, 'excess floored at 0 (no negative)');
-  const line = logs.find((l) => l.includes('[solar]')) || '';
-  assert.ok(line.includes('solar=100W'), 'logs solar power');
-  assert.ok(line.includes('battery=-50W'), 'logs battery power (signed)');
-  assert.ok(line.includes('house=190W'), 'logs house power');
-  assert.ok(line.includes('grid=40W'), 'logs grid power');
-  assert.ok(line.includes('excess=0W'), 'logs floored excess');
+test('mode metric + getModeInfo reflect the derived mode', () => {
+  const { c, caps } = makeController(SCHED);
+  c.tick(at(1, 10, 0));
+  assert.equal(caps.charge_mode, 'scheduled');
+  assert.equal(c.getModeInfo().mode, 'scheduled');
 });

@@ -13,7 +13,8 @@ import {
 import { Scheduler, ScheduleWindow } from './Scheduler';
 import { BelowMinBehavior, SolarLoop, SolarLoopConfig } from './SolarLoop';
 
-export type ChargeMode = 'off' | 'scheduled' | 'solar' | 'manual';
+/** Derived charging mode (not user-selected). */
+export type ChargeMode = 'manual' | 'scheduled' | 'solar';
 
 /** Live power inputs from the solar feed (all in W; grid import + / export -). */
 export interface SolarSampleInput {
@@ -21,6 +22,15 @@ export interface SolarSampleInput {
   pvW?: number;
   batteryW?: number;
   houseW?: number;
+}
+
+/**
+ * A sticky manual intent set by any hands-on action (charge on/off, slider).
+ * Cleared only when a schedule window starts or the charger is replugged.
+ */
+interface ManualLatch {
+  intent: 'charge' | 'off';
+  amps?: number;
 }
 
 /**
@@ -58,10 +68,7 @@ interface ControllerConfig {
   minOffMs: number;
   marginW: number;
   belowMin: BelowMinBehavior;
-  /** Solar feed stale timeout (ms) after which the loop fails safe. */
   solarStaleMs: number;
-  /** Global grid-import ceiling (W). Charging is throttled so total grid import
-   *  never exceeds this in any mode. <=0 disables the cap. */
   maxHouseholdW: number;
 }
 
@@ -88,14 +95,11 @@ const STACK_LEVEL = 1;
 const CONNECTOR_ID = 1;
 const TICK_MS = 10000;
 
-interface ManualOverride {
-  action: 'start' | 'stop';
-  amps?: number;
-  /** Epoch ms at which the override expires (Infinity = until cleared). */
-  expiresAt: number;
-}
+/** OCPP statuses that mean a vehicle is connected. */
+const PLUGGED = ['Preparing', 'Charging', 'SuspendedEV', 'SuspendedEVSE', 'Finishing'];
 
 interface Decision {
+  mode: ChargeMode;
   charge: boolean;
   amps?: number;
 }
@@ -119,11 +123,16 @@ export function toChargingState(status: OcppStatus): string {
   }
 }
 
+function fmtTime(d: Date): string {
+  return d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+}
+
 /**
  * Owns charging behaviour for one charge point. Binds to its {@link ChargePoint},
- * reflects OCPP state onto capabilities, and resolves a desired charging action
- * each tick from mode + schedule + manual override (precedence: manual override
- * -> active schedule window -> solar -> idle). Solar is added in M4.
+ * reflects OCPP state onto capabilities, and each tick resolves a derived mode:
+ *   Manual (a manual latch is set) > Scheduled (inside a window) > Solar (default).
+ * The household grid cap is applied on top in every mode. The manual latch is set
+ * by hands-on actions and cleared only by a schedule window starting or a replug.
  */
 export class ChargeController {
 
@@ -135,13 +144,21 @@ export class ChargeController {
 
   private cfg: ControllerConfig;
 
-  private mode: ChargeMode = 'off';
-
   private scheduler = new Scheduler();
 
-  private override: ManualOverride | null = null;
+  /** Sticky manual intent, or null when running automatically. */
+  private manualLatch: ManualLatch | null = null;
 
-  /** Solar target (A): null = stop, 0 = pause, >=minAmps = charge. Fed by SolarFeed (M4). */
+  /** Derived mode last applied (for change detection / triggers). */
+  private currentMode: ChargeMode | null = null;
+
+  /** Tracks schedule active-state to detect the rising edge (window start). */
+  private wasInSchedule = false;
+
+  /** Tracks plug state to detect a replug (unplugged -> plugged) edge. */
+  private prevPlugged: boolean | null = null;
+
+  /** Solar target (A): null = stop, 0 = pause, >=minAmps = charge. */
   private solarTargetAmps: number | null = null;
 
   private solarLoop: SolarLoop | null = null;
@@ -150,18 +167,14 @@ export class ChargeController {
 
   private solarStaleWarned = false;
 
-  /** Latest charger draw from MeterValues (W), used by the solar loop. */
   private lastPowerW = 0;
 
-  /** Latest computed surplus available to the car (W) — the "excess solar". */
   private lastAvailableW = 0;
 
-  /** Latest signed grid power (import + / export -), used for the household cap. */
   private lastGridSignedW = 0;
 
   private loggedCapAmps: number | null = null;
 
-  // Diagnostics: remember last-logged values to log only on meaningful change.
   private prevStatus: string | null = null;
 
   private loggedPowerW = 0;
@@ -170,7 +183,6 @@ export class ChargeController {
 
   private transactionId: number | null = null;
 
-  /** Currently-applied/desired current (A); null = not charging. */
   private desiredAmps: number | null = null;
 
   private awaitingStart = false;
@@ -194,10 +206,10 @@ export class ChargeController {
   init(): void {
     this.refreshConfig();
     this.solarLoop = new SolarLoop(this.solarLoopConfig());
-    this.mode = this.host.getStore<ChargeMode>('mode') ?? 'off';
     this.transactionId = this.host.getStore<number>('transactionId') ?? null;
+    this.manualLatch = this.host.getStore<ManualLatch>('manualLatch') ?? null;
     this.scheduler.setWindows(this.host.getStore<ScheduleWindow[]>('schedule') ?? []);
-    this.host.setCapability('charge_mode', this.mode);
+    this.wasInSchedule = this.scheduler.isActive(new Date());
 
     const existing = this.cs.getChargePoint(this.host.identity);
     if (existing) this.bind(existing);
@@ -213,8 +225,8 @@ export class ChargeController {
     });
 
     this.tickTimer = setInterval(() => this.tick(), TICK_MS);
-    // Do not keep the process alive solely for the tick (matters for tests/CLI).
     this.tickTimer.unref?.();
+    this.tick(); // establish initial mode capability
   }
 
   destroy(): void {
@@ -266,20 +278,17 @@ export class ChargeController {
     cp.on('startTransaction', (id: number, req: StartTransactionReq) => this.onStartTransaction(id, req));
     cp.on('stopTransaction', (req: StopTransactionReq) => this.onStopTransaction(req));
 
-    // Catch up from cached state if the charger connected before we bound.
     const cachedStatus = cp.getLastStatus();
     if (cachedStatus) this.onStatus(cachedStatus);
     const cachedReadings = cp.getLastReadings();
     if (cachedReadings) this.onMeterValues(cachedReadings);
 
-    // And request fresh values so nothing stays blank if the charger was quiet.
     this.requestFreshState();
 
     this.host.log(`Controller bound to ${cp.identity}`);
     this.tick();
   }
 
-  /** Ask the charger to (re)send its current status and meter values. Best-effort. */
   private requestFreshState(): void {
     if (!this.cp?.connected) return;
     this.cp.triggerMessage('StatusNotification', CONNECTOR_ID).catch(() => { /* optional */ });
@@ -314,13 +323,23 @@ export class ChargeController {
     this.host.setCapability('evcharger_charging', info.status === 'Charging');
     this.host.setWarning(info.status === 'Faulted' ? `Charger fault: ${info.errorCode}` : null);
 
-    // Reconcile a stale transaction id after a restart/reconnect: if the charger
-    // reports it is idle, no session is active regardless of what we persisted.
-    if (info.status === 'Available' && this.transactionId != null) {
-      this.transactionId = null;
-      this.awaitingStart = false;
-      this.host.setStore('transactionId', null).catch(this.host.error);
+    // Detect unplug -> replug: clear the manual latch so charging reverts to
+    // automatic (schedule/solar). Ignore the first observation and Faulted/etc.
+    if (info.status === 'Available') {
+      this.prevPlugged = false;
+      // Idle charger: reconcile any stale transaction id from before a restart.
+      if (this.transactionId != null) {
+        this.transactionId = null;
+        this.awaitingStart = false;
+        this.host.setStore('transactionId', null).catch(this.host.error);
+      }
+    } else if (PLUGGED.includes(info.status)) {
+      if (this.prevPlugged === false && this.manualLatch) {
+        this.clearManualLatch('charger replugged');
+      }
+      this.prevPlugged = true;
     }
+    this.tick();
   }
 
   private onMeterValues(r: Readings): void {
@@ -329,7 +348,6 @@ export class ChargeController {
     if (r.voltage !== undefined) this.host.setCapability('measure_voltage', r.voltage);
     if (r.energyKwh !== undefined) this.host.setCapability('meter_power', r.energyKwh);
 
-    // Log only on a meaningful power change (>=100W) to avoid flooding.
     if (r.power !== undefined && Math.abs(r.power - this.loggedPowerW) >= 100) {
       this.loggedPowerW = r.power;
       this.host.log(`[charger] power=${Math.round(r.power)}W current=${r.current ?? '?'}A voltage=${r.voltage ?? '?'}V`);
@@ -356,21 +374,46 @@ export class ChargeController {
   }
 
   // ---------------------------------------------------------------------------
-  // Public API (capability listeners / flow cards)
+  // Manual control (from capability listeners / flow cards) -> sets the latch
   // ---------------------------------------------------------------------------
 
-  async setMode(mode: ChargeMode): Promise<void> {
-    this.mode = mode;
-    this.override = null; // switching mode clears a lingering override
-    await this.host.setStore('mode', mode);
-    this.host.setCapability('charge_mode', mode);
-    this.host.onModeChanged?.(mode);
+  /** Turn charging on (charge at amps / slider) or off — both latch Manual mode. */
+  async setManualCharging(on: boolean, amps?: number): Promise<void> {
+    if (on) {
+      const target = this.clampAmps(amps ?? this.cfg.maxAmps);
+      this.manualLatch = { intent: 'charge', amps: target };
+      this.host.setCapability('charge_current_limit', target);
+    } else {
+      this.manualLatch = { intent: 'off' };
+    }
+    this.host.log(`[mode] manual ${on ? `charge ${this.manualLatch.amps}A` : 'off'} (holds until schedule/replug)`);
+    await this.host.setStore('manualLatch', this.manualLatch);
     this.tick();
   }
 
-  getMode(): ChargeMode {
-    return this.mode;
+  /** Changing the current is a hands-on action: latch Manual at that current. */
+  async setCurrentLimit(amps: number): Promise<void> {
+    const target = this.clampAmps(amps);
+    this.manualLatch = { intent: 'charge', amps: target };
+    this.host.setCapability('charge_current_limit', target);
+    await this.host.setStore('manualLatch', this.manualLatch);
+    this.tick();
   }
+
+  startManual(amps?: number): Promise<void> { return this.setManualCharging(true, amps); }
+
+  stop(): Promise<void> { return this.setManualCharging(false); }
+
+  private clearManualLatch(reason: string): void {
+    if (!this.manualLatch) return;
+    this.manualLatch = null;
+    this.host.setStore('manualLatch', null).catch(this.host.error);
+    this.host.log(`[mode] manual cleared (${reason})`);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Schedule / solar inputs
+  // ---------------------------------------------------------------------------
 
   isCharging(): boolean {
     return this.transactionId != null;
@@ -390,17 +433,12 @@ export class ChargeController {
     return this.scheduler.getWindows();
   }
 
-  /** Directly set the solar target (A): null = stop, 0 = pause, >=min = charge. Test/manual use. */
+  /** Directly set the solar target (A): null = stop, 0 = pause, >=min = charge. Test use. */
   setSolarTarget(amps: number | null): void {
     this.solarTargetAmps = amps;
-    if (this.mode === 'solar') this.tick();
+    this.tick();
   }
 
-  /**
-   * Feed a fresh grid-power sample (import positive / export negative) from the
-   * solar device. Runs the surplus loop against the current charger draw and
-   * updates the solar target. Called by SolarFeed on every capability change.
-   */
   onSolarSample(sample: SolarSampleInput, now: number = Date.now()): void {
     this.lastSolarSampleAt = now;
     this.solarStaleWarned = false;
@@ -409,13 +447,10 @@ export class ChargeController {
     if (!this.solarLoop) return;
     const chargerPowerW = this.isCharging() ? this.lastPowerW : 0;
     const res = this.solarLoop.evaluate({ gridSignedW, chargerPowerW, now });
-    // Excess is floored at 0 for display/metrics (negative = net import, no surplus).
     this.lastAvailableW = Math.max(0, res.availableW);
     this.solarTargetAmps = res.target;
     this.host.setCapability('measure_solar_surplus', Math.round(this.lastAvailableW));
 
-    // Diagnostics: full breakdown of the surplus calc, logged when something moves
-    // (deduped on values rounded to 50W plus the decision, to limit spam).
     const tgt = res.target === null ? 'stop' : (res.target === 0 ? 'pause' : res.target + 'A');
     const r50 = (w?: number) => (w == null ? 'na' : String(Math.round(w / 50) * 50));
     const key = [r50(sample.pvW), r50(sample.batteryW), r50(sample.houseW),
@@ -428,88 +463,74 @@ export class ChargeController {
         + ` -> ${tgt} (${res.state})`);
     }
 
-    // Tick in every mode so the household grid cap tracks live grid power.
     this.tick(new Date(now));
   }
 
-  /**
-   * Max charge current (A) allowed so total grid import stays under the household
-   * ceiling, given the present non-charger grid load. Returns null when the cap is
-   * disabled or grid data is stale (then it cannot be enforced).
-   */
   private householdCapAmps(): number | null {
     if (this.cfg.maxHouseholdW <= 0) return null;
     const stale = this.lastSolarSampleAt === 0
       || (Date.now() - this.lastSolarSampleAt) > this.cfg.solarStaleMs;
     if (stale) return null;
     const chargerW = this.isCharging() ? this.lastPowerW : 0;
-    const baseLoadW = this.lastGridSignedW - chargerW; // grid import excluding the charger
+    const baseLoadW = this.lastGridSignedW - chargerW;
     const maxChargerW = this.cfg.maxHouseholdW - baseLoadW;
     return Math.floor(maxChargerW / (this.cfg.voltage * this.cfg.phases));
   }
 
-  /** Diagnostics for the widget / metrics: excess solar (W), solar loop state, target. */
+  // ---------------------------------------------------------------------------
+  // Mode + status reporting
+  // ---------------------------------------------------------------------------
+
+  getMode(): ChargeMode {
+    return this.currentMode ?? this.resolve(new Date()).mode;
+  }
+
+  /** Mode + a short human status detail for the widget/metrics. */
+  getModeInfo(): { mode: ChargeMode; detail: string } {
+    const now = new Date();
+    const mode = this.currentMode ?? this.resolve(now).mode;
+    let detail = '';
+    if (mode === 'manual') {
+      const base = this.manualLatch?.intent === 'off' ? 'stopped' : 'charging';
+      const ns = this.scheduler.nextStart(now);
+      detail = base + (ns ? ` · schedule ${fmtTime(ns)}` : '');
+    } else if (mode === 'scheduled') {
+      const end = this.scheduler.currentEnd(now);
+      detail = end ? `until ${fmtTime(end)}` : 'charging';
+    } else { // solar
+      const t = this.solarTargetAmps;
+      detail = (t != null && t >= this.cfg.minAmps) ? `charging ${t}A`
+        : (t === 0 ? 'paused (low excess)' : 'idle (low excess)');
+    }
+    return { mode, detail };
+  }
+
   getDiagnostics(): { availableW: number; solarState: string; targetA: number | null; mode: ChargeMode } {
     return {
       availableW: this.lastAvailableW,
       solarState: this.solarLoop?.getState() ?? 'off',
       targetA: this.solarTargetAmps,
-      mode: this.mode,
+      mode: this.getMode(),
     };
-  }
-
-  /** Manual start: overrides the base mode until the next schedule boundary. */
-  async startManual(amps?: number): Promise<void> {
-    const target = this.clampAmps(amps ?? this.cfg.maxAmps);
-    this.host.setCapability('charge_current_limit', target);
-    this.override = { action: 'start', amps: target, expiresAt: this.nextBoundaryMs() };
-    this.tick();
-  }
-
-  async setCurrentLimit(amps: number): Promise<void> {
-    const target = this.clampAmps(amps);
-    this.host.setCapability('charge_current_limit', target);
-    if (this.override?.action === 'start') this.override.amps = target;
-    this.tick();
-  }
-
-  /** Manual stop: overrides the base mode until the next schedule boundary. */
-  async stop(): Promise<void> {
-    this.override = { action: 'stop', expiresAt: this.nextBoundaryMs() };
-    this.tick();
-  }
-
-  private nextBoundaryMs(): number {
-    const b = this.scheduler.nextBoundary(new Date());
-    return b ? b.getTime() : Infinity;
   }
 
   // ---------------------------------------------------------------------------
   // Decision + tick
   // ---------------------------------------------------------------------------
 
-  /** Resolve the desired charging action from override + mode + schedule + solar. */
+  /** Resolve derived mode + desired charging action. Manual > Schedule > Solar. */
   resolve(now: Date): Decision {
-    if (this.override && now.getTime() < this.override.expiresAt) {
-      if (this.override.action === 'stop') return { charge: false };
-      return { charge: true, amps: this.override.amps ?? this.scheduleOrMax(now) };
+    if (this.manualLatch) {
+      if (this.manualLatch.intent === 'off') return { mode: 'manual', charge: false };
+      return { mode: 'manual', charge: true, amps: this.manualLatch.amps ?? this.cfg.maxAmps };
     }
-
-    if (this.mode === 'off') return { charge: false };
-
-    // Schedule beats solar.
     if (this.scheduler.isActive(now)) {
-      return { charge: true, amps: this.scheduleOrMax(now) };
+      return { mode: 'scheduled', charge: true, amps: this.scheduleOrMax(now) };
     }
-
-    if (this.mode === 'solar') {
-      if (this.solarTargetAmps == null) return { charge: false };
-      if (this.solarTargetAmps === 0) return { charge: true, amps: 0 }; // pause (hold 0A if a tx exists)
-      return { charge: true, amps: this.clampAmps(this.solarTargetAmps) };
-    }
-
-    // 'scheduled' outside a window, or 'manual' with no active override -> idle.
-    return { charge: false };
+    // Solar is the default outside a schedule.
+    if (this.solarTargetAmps == null) return { mode: 'solar', charge: false };
+    if (this.solarTargetAmps === 0) return { mode: 'solar', charge: true, amps: 0 };
+    return { mode: 'solar', charge: true, amps: this.clampAmps(this.solarTargetAmps) };
   }
 
   private scheduleOrMax(now: Date): number {
@@ -517,10 +538,15 @@ export class ChargeController {
   }
 
   tick(now: Date = new Date()): void {
-    if (this.override && now.getTime() >= this.override.expiresAt) this.override = null;
+    // Clear the manual latch when a schedule window starts (rising edge).
+    const inSchedule = this.scheduler.isActive(now);
+    if (inSchedule && !this.wasInSchedule && this.manualLatch) {
+      this.clearManualLatch('schedule started');
+    }
+    this.wasInSchedule = inSchedule;
 
-    // Solar fail-safe: if the feed goes stale, stop increasing/charging on solar.
-    if (this.mode === 'solar' && this.lastSolarSampleAt > 0
+    // Solar fail-safe: if the feed goes stale while solar is the effective mode.
+    if (!this.manualLatch && !inSchedule && this.lastSolarSampleAt > 0
       && now.getTime() - this.lastSolarSampleAt > this.cfg.solarStaleMs) {
       if (!this.solarStaleWarned) {
         this.host.log('Solar feed stale; failing safe (stopping solar charging)');
@@ -531,17 +557,18 @@ export class ChargeController {
     }
 
     const decision = this.resolve(now);
+    this.updateMode(decision.mode);
+
     if (!decision.charge) {
       this.ensureStopped();
       return;
     }
 
     let amps = decision.amps ?? this.cfg.maxAmps;
-    // Global household grid-import cap: applies in every mode.
     if (amps > 0) {
       const cap = this.householdCapAmps();
       if (cap != null && cap < amps) {
-        const capped = cap < this.cfg.minAmps ? 0 : cap; // can't stay under ceiling -> pause
+        const capped = cap < this.cfg.minAmps ? 0 : cap;
         if (this.loggedCapAmps !== capped) {
           this.host.log(`[cap] household limit ${this.cfg.maxHouseholdW}W -> charger `
             + `${capped === 0 ? 'paused' : capped + 'A'} (requested ${amps}A)`);
@@ -557,6 +584,17 @@ export class ChargeController {
     this.ensureCharging(amps);
   }
 
+  private updateMode(mode: ChargeMode): void {
+    if (mode === this.currentMode) return;
+    const first = this.currentMode === null;
+    this.currentMode = mode;
+    this.host.setCapability('charge_mode', mode);
+    if (!first) {
+      this.host.log(`[mode] -> ${mode}`);
+      this.host.onModeChanged?.(mode);
+    }
+  }
+
   /** amps: 0 = pause (hold 0A, keep the transaction), >0 = charge at that current. */
   private ensureCharging(amps: number): void {
     const target = amps <= 0 ? 0 : this.clampAmps(amps);
@@ -565,7 +603,6 @@ export class ChargeController {
       if (target > 0) this.host.setCapability('charge_current_limit', target);
       if (this.transactionId != null) this.scheduleWrite();
     }
-    // Only start a transaction to actually charge (never just to pause at 0A).
     if (target > 0 && this.transactionId == null && !this.awaitingStart && this.cp?.connected) {
       this.awaitingStart = true;
       this.cp.remoteStartTransaction(this.cfg.idTag, CONNECTOR_ID)

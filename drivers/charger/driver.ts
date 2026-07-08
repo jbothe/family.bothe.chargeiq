@@ -12,8 +12,6 @@ module.exports = class ChargerDriver extends Homey.Driver {
   async onInit() {
     const flow = this.homey.flow;
 
-    flow.getActionCard('set_mode')
-      .registerRunListener((args: any) => args.device.flowSetMode(args.mode));
     flow.getActionCard('start_charging')
       .registerRunListener((args: any) => args.device.flowStart(args.current));
     flow.getActionCard('stop_charging')

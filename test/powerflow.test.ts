@@ -60,10 +60,15 @@ test('battery SoC label', () => {
   assert.equal(PF.socLabel({}), '');
 });
 
-test('charger status label maps OCPP states and appends mode', () => {
-  assert.equal(PF.statusLabel({ available: true, status: 'Charging', mode: 'solar' }), 'Charging · Solar');
-  assert.equal(PF.statusLabel({ available: true, status: 'Available', mode: 'off' }), 'Unplugged · Off');
-  // Unplugged with data still resolves a friendly label (widget shows flow regardless).
-  assert.equal(PF.statusLabel({ available: true, status: 'Available' }), 'Unplugged');
-  assert.equal(PF.statusLabel({ available: false }), 'No charger paired');
+test('mode line shows derived mode + detail', () => {
+  assert.equal(
+    PF.modeText({ mode: 'manual', modeDetail: 'stopped · schedule 9:00 AM', charger: { available: true } }),
+    'Mode: Manual · stopped · schedule 9:00 AM',
+  );
+  assert.equal(
+    PF.modeText({ mode: 'solar', modeDetail: 'idle (low excess)', charger: { available: true } }),
+    'Mode: Solar · idle (low excess)',
+  );
+  assert.equal(PF.modeText({ mode: 'scheduled', charger: { available: true } }), 'Mode: Scheduled');
+  assert.equal(PF.modeText({ charger: { available: false } }), 'No charger paired');
 });

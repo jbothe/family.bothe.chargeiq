@@ -123,9 +123,9 @@
             "name": "mode",
             "values": [
               {
-                "id": "off",
+                "id": "manual",
                 "label": {
-                  "en": "Off"
+                  "en": "Manual"
                 }
               },
               {
@@ -138,12 +138,6 @@
                 "id": "solar",
                 "label": {
                   "en": "Solar surplus"
-                }
-              },
-              {
-                "id": "manual",
-                "label": {
-                  "en": "Manual"
                 }
               }
             ]
@@ -194,52 +188,6 @@
           }
         ],
         "id": "set_current_limit"
-      },
-      {
-        "title": {
-          "en": "Set charge mode"
-        },
-        "titleFormatted": {
-          "en": "Set charge mode to [[mode]]"
-        },
-        "args": [
-          {
-            "type": "device",
-            "name": "device",
-            "filter": "driver_id=charger"
-          },
-          {
-            "type": "dropdown",
-            "name": "mode",
-            "values": [
-              {
-                "id": "off",
-                "label": {
-                  "en": "Off"
-                }
-              },
-              {
-                "id": "scheduled",
-                "label": {
-                  "en": "Scheduled"
-                }
-              },
-              {
-                "id": "solar",
-                "label": {
-                  "en": "Solar surplus"
-                }
-              },
-              {
-                "id": "manual",
-                "label": {
-                  "en": "Manual"
-                }
-              }
-            ]
-          }
-        ],
-        "id": "set_mode"
       },
       {
         "title": {
@@ -579,16 +527,16 @@
         "en": "Charge Mode"
       },
       "desc": {
-        "en": "Off, Scheduled, Solar surplus or Manual"
+        "en": "Current mode: Manual, Scheduled or Solar"
       },
       "getable": true,
-      "setable": true,
-      "uiComponent": "picker",
+      "setable": false,
+      "uiComponent": "sensor",
       "values": [
         {
-          "id": "off",
+          "id": "manual",
           "title": {
-            "en": "Off"
+            "en": "Manual"
           }
         },
         {
@@ -601,12 +549,6 @@
           "id": "solar",
           "title": {
             "en": "Solar surplus"
-          }
-        },
-        {
-          "id": "manual",
-          "title": {
-            "en": "Manual"
           }
         }
       ]
