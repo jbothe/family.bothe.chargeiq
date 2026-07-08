@@ -9,7 +9,7 @@
       "name": "current",
       "title": { "en": "Current (A)" },
       "min": 6,
-      "max": 31,
+      "max": 32,
       "step": 1,
       "value": 16,
       "label": " A",

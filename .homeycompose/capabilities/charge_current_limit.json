@@ -5,7 +5,7 @@
   "units": { "en": "A" },
   "icon": "/assets/capabilities/charge_current_limit.svg",
   "min": 6,
-  "max": 31,
+  "max": 32,
   "step": 1,
   "decimals": 0,
   "getable": true,
