@@ -586,7 +586,8 @@ export class ChargeController {
   // ---------------------------------------------------------------------------
 
   private clampAmps(amps: number): number {
-    return Math.max(this.cfg.minAmps, Math.min(this.cfg.maxAmps, Math.round(amps)));
+    // Floor (never round up) so a target can't exceed the available surplus/limit.
+    return Math.max(this.cfg.minAmps, Math.min(this.cfg.maxAmps, Math.floor(amps)));
   }
 
   private scheduleWrite(): void {
