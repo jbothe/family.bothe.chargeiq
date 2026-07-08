@@ -2,6 +2,7 @@
   "type": "enum",
   "title": { "en": "Charge Mode" },
   "desc": { "en": "Current mode: Manual, Scheduled or Solar" },
+  "icon": "/assets/capabilities/charge_mode.svg",
   "getable": true,
   "setable": false,
   "uiComponent": "sensor",

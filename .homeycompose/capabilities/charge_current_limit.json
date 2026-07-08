@@ -3,6 +3,7 @@
   "title": { "en": "Current Limit" },
   "desc": { "en": "Target charging current" },
   "units": { "en": "A" },
+  "icon": "/assets/capabilities/charge_current_limit.svg",
   "min": 6,
   "max": 31,
   "step": 1,

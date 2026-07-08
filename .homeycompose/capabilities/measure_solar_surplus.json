@@ -1,8 +1,9 @@
 {
   "type": "number",
-  "title": { "en": "Solar surplus" },
+  "title": { "en": "Solar Surplus" },
   "desc": { "en": "Excess solar power available to the charger" },
   "units": { "en": "W" },
+  "icon": "/assets/capabilities/measure_solar_surplus.svg",
   "decimals": 0,
   "getable": true,
   "setable": false,

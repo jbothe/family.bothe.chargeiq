@@ -2,6 +2,7 @@
   "type": "enum",
   "title": { "en": "Charger Status" },
   "desc": { "en": "Raw OCPP StatusNotification state" },
+  "icon": "/assets/capabilities/charger_status.svg",
   "getable": true,
   "setable": false,
   "uiComponent": "sensor",
