@@ -5,28 +5,106 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <script type="text/javascript" src="/homey.js" data-origin="settings"></script>
   <style>
-    body { font-family: -apple-system, "Segoe UI", Roboto, sans-serif; margin: 0; padding: 16px; color: #1a1a1a; }
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+      margin: 0; padding: 16px; color: #1a1a1a; background: #f7f8fa;
+    }
     h1 { font-size: 18px; margin: 0 0 4px; }
-    p.hint { color: #6b7280; font-size: 13px; margin: 0 0 16px; }
-    .window { border: 1px solid #e5e7eb; border-radius: 10px; padding: 12px; margin-bottom: 12px; }
-    .days { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }
-    .day { border: 1px solid #d1d5db; border-radius: 8px; padding: 6px 10px; cursor: pointer; user-select: none; font-size: 13px; }
+    p.hint { color: #6b7280; font-size: 13px; margin: 0 0 16px; line-height: 1.4; }
+
+    .window {
+      background: #fff;
+      border: 1px solid #e5e7eb;
+      border-radius: 12px;
+      padding: 14px;
+      margin-bottom: 12px;
+      box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
+      transition: opacity .15s ease;
+    }
+    .window.disabled { opacity: 0.55; }
+    .window.conflict { border-color: #e0533d; box-shadow: 0 0 0 1px #e0533d inset; }
+
+    .window-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+    .window-title { font-size: 13px; font-weight: 600; color: #374151; }
+
+    /* enable/disable switch */
+    .switch { position: relative; display: inline-block; width: 38px; height: 22px; flex: none; }
+    .switch input { opacity: 0; width: 0; height: 0; }
+    .slider {
+      position: absolute; cursor: pointer; inset: 0;
+      background: #d1d5db; border-radius: 999px; transition: background .15s ease;
+    }
+    .slider::before {
+      content: ""; position: absolute; height: 16px; width: 16px; left: 3px; bottom: 3px;
+      background: #fff; border-radius: 50%; transition: transform .15s ease;
+      box-shadow: 0 1px 2px rgba(0,0,0,.2);
+    }
+    .switch input:checked + .slider { background: #16a34a; }
+    .switch input:checked + .slider::before { transform: translateX(16px); }
+    .switch-row { display: flex; align-items: center; gap: 8px; }
+
+    /* days: grid so it never wraps to a second line */
+    .days { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; margin-bottom: 12px; }
+    .day {
+      border: 1px solid #d1d5db; border-radius: 7px; padding: 7px 0; text-align: center;
+      cursor: pointer; user-select: none; font-size: 12px; color: #374151;
+      transition: background .1s ease, color .1s ease, border-color .1s ease;
+    }
     .day.on { background: #16a34a; color: #fff; border-color: #16a34a; }
-    .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
-    .row label { font-size: 12px; color: #6b7280; display: block; }
-    input[type=time], input[type=number] { padding: 6px; border: 1px solid #d1d5db; border-radius: 8px; font-size: 14px; }
-    input[type=number] { width: 80px; }
-    button { font-size: 14px; padding: 8px 14px; border-radius: 8px; border: 0; cursor: pointer; }
-    .add { background: #eef2ff; color: #3730a3; }
-    .remove { background: transparent; color: #e0533d; padding: 4px 8px; }
-    .save { background: #16a34a; color: #fff; }
-    .bar { display: flex; justify-content: space-between; align-items: center; margin-top: 8px; }
+
+    .fields { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; }
+    .field label {
+      font-size: 11px; font-weight: 600; letter-spacing: .02em; text-transform: uppercase;
+      color: #9ca3af; display: block; margin-bottom: 4px;
+    }
+    input[type=time] {
+      padding: 7px 8px; border: 1px solid #d1d5db; border-radius: 8px; font-size: 14px; width: 100px;
+    }
+
+    /* amps number picker (stepper) */
+    .stepper { display: flex; align-items: stretch; border: 1px solid #d1d5db; border-radius: 8px; overflow: hidden; width: 132px; }
+    .stepper button {
+      width: 28px; border: 0; background: #f3f4f6; color: #374151; font-size: 16px; line-height: 1;
+      cursor: pointer; padding: 0;
+    }
+    .stepper button:active { background: #e5e7eb; }
+    .stepper button:disabled { color: #d1d5db; cursor: default; background: #f3f4f6; }
+    .stepper input[type=number] {
+      flex: 1; width: 0; border: 0; text-align: center; font-size: 14px; padding: 7px 2px;
+      -moz-appearance: textfield;
+    }
+    .stepper input[type=number]::-webkit-outer-spin-button,
+    .stepper input[type=number]::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+    .amps-unit { font-size: 11px; color: #9ca3af; padding-right: 6px; align-self: center; }
+
+    .spacer { flex: 1; }
+    button.remove {
+      background: transparent; color: #e0533d; border: 0; font-size: 13px; padding: 4px 6px; cursor: pointer;
+    }
+
+    .conflict-msg { color: #e0533d; font-size: 12px; margin-top: 8px; font-weight: 500; }
+
+    button.add {
+      background: #eef2ff; color: #3730a3; border: 0; border-radius: 8px; padding: 9px 14px;
+      font-size: 14px; cursor: pointer;
+    }
+    .bar { display: flex; justify-content: space-between; align-items: center; margin-top: 14px; }
     .status { font-size: 13px; color: #6b7280; }
+    .status.error { color: #e0533d; }
+    button.save {
+      background: #16a34a; color: #fff; border: 0; border-radius: 8px; padding: 9px 18px;
+      font-size: 14px; cursor: pointer;
+    }
+    button.save:disabled { background: #9ca3af; cursor: not-allowed; }
   </style>
 </head>
 <body>
   <h1 data-i18n="settings.title">Charging schedule</h1>
-  <p class="hint">Define weekly windows. In Scheduled mode the charger runs during these windows; schedules take priority over solar surplus.</p>
+  <p class="hint">
+    Configure weekly charging windows. These schedules have priority over solar surplus charging.
+    Turn a window off to keep it configured without deleting it.
+  </p>
 
   <div id="windows"></div>
   <button class="add" id="add">+ Add window</button>
@@ -39,27 +117,94 @@
   <script type="text/javascript">
     var DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
     var DAY_NUM = [1, 2, 3, 4, 5, 6, 0]; // map UI index -> JS getDay()
+    var MIN_A = 6, MAX_A = 32;
     var windows = [];
     var homeyRef = null;
+
+    function conflicts() {
+      var enabledIdx = [];
+      windows.forEach(function (w, i) { if (w.enabled !== false) enabledIdx.push(i); });
+      var bad = {};
+      for (var x = 0; x < enabledIdx.length; x++) {
+        for (var y = x + 1; y < enabledIdx.length; y++) {
+          var i = enabledIdx[x], j = enabledIdx[y];
+          if (windowsOverlap(windows[i], windows[j])) {
+            bad[i] = true; bad[j] = true;
+          }
+        }
+      }
+      return bad;
+    }
+
+    // Mirrors lib/control/Scheduler.ts's windowsOverlap for client-side validation.
+    function toMinutes(s) {
+      var m = /^(\d{1,2}):(\d{2})$/.exec((s || '').trim());
+      if (!m) return null;
+      return (+m[1]) * 60 + (+m[2]);
+    }
+    function expandWindow(w) {
+      var out = [];
+      var s = toMinutes(w.start), e = toMinutes(w.end);
+      if (s == null || e == null) return out;
+      var overnight = e <= s;
+      var MIN_PER_DAY = 1440, MIN_PER_WEEK = 7 * MIN_PER_DAY;
+      (w.days || []).forEach(function (day) {
+        var start = day * MIN_PER_DAY + s;
+        var end = day * MIN_PER_DAY + (overnight ? e + MIN_PER_DAY : e);
+        out.push({ start: start, end: end });
+        if (end > MIN_PER_WEEK) out.push({ start: start - MIN_PER_WEEK, end: end - MIN_PER_WEEK });
+      });
+      return out;
+    }
+    function intervalsOverlap(a, b) {
+      var MIN_PER_WEEK = 7 * 1440;
+      var shifts = [-MIN_PER_WEEK, 0, MIN_PER_WEEK];
+      for (var k = 0; k < shifts.length; k++) {
+        var sh = shifts[k];
+        if (a.start < b.end + sh && b.start + sh < a.end) return true;
+      }
+      return false;
+    }
+    function windowsOverlap(a, b) {
+      var as = expandWindow(a), bs = expandWindow(b);
+      for (var i = 0; i < as.length; i++) for (var j = 0; j < bs.length; j++) {
+        if (intervalsOverlap(as[i], bs[j])) return true;
+      }
+      return false;
+    }
 
     function render() {
       var root = document.getElementById('windows');
       root.innerHTML = '';
+      var bad = conflicts();
       windows.forEach(function (w, i) {
         var el = document.createElement('div');
-        el.className = 'window';
+        el.className = 'window' + (w.enabled === false ? ' disabled' : '') + (bad[i] ? ' conflict' : '');
         var days = DAYS.map(function (d, di) {
           var on = w.days.indexOf(DAY_NUM[di]) !== -1;
           return '<span class="day ' + (on ? 'on' : '') + '" data-w="' + i + '" data-d="' + DAY_NUM[di] + '">' + d + '</span>';
         }).join('');
+        var amps = w.currentA || '';
         el.innerHTML =
-          '<div class="days">' + days + '</div>' +
-          '<div class="row">' +
-          '<div><label>Start</label><input type="time" data-w="' + i + '" data-f="start" value="' + w.start + '"></div>' +
-          '<div><label>End</label><input type="time" data-w="' + i + '" data-f="end" value="' + w.end + '"></div>' +
-          '<div><label>Current (A, optional)</label><input type="number" min="6" max="80" data-w="' + i + '" data-f="currentA" value="' + (w.currentA || '') + '"></div>' +
+          '<div class="window-head">' +
+          '<span class="window-title">Window ' + (i + 1) + '</span>' +
+          '<div class="switch-row">' +
+          '<label class="switch"><input type="checkbox" class="enabled" data-w="' + i + '" ' + (w.enabled === false ? '' : 'checked') + '><span class="slider"></span></label>' +
           '<button class="remove" data-w="' + i + '">Remove</button>' +
-          '</div>';
+          '</div>' +
+          '</div>' +
+          '<div class="days">' + days + '</div>' +
+          '<div class="fields">' +
+          '<div class="field"><label>Start</label><input type="time" data-w="' + i + '" data-f="start" value="' + w.start + '"></div>' +
+          '<div class="field"><label>End</label><input type="time" data-w="' + i + '" data-f="end" value="' + w.end + '"></div>' +
+          '<div class="field"><label>Amps (optional)</label>' +
+          '<div class="stepper">' +
+          '<button type="button" class="dec" data-w="' + i + '">−</button>' +
+          '<input type="number" min="' + MIN_A + '" max="' + MAX_A + '" data-w="' + i + '" data-f="currentA" value="' + amps + '" placeholder="max">' +
+          '<button type="button" class="inc" data-w="' + i + '">+</button>' +
+          '</div></div>' +
+          '</div>' +
+          (bad[i] ? '<div class="conflict-msg">Overlaps another enabled window</div>' : '');
         root.appendChild(el);
       });
 
@@ -71,37 +216,64 @@
           render();
         };
       });
-      root.querySelectorAll('input').forEach(function (inp) {
+      root.querySelectorAll('input[type=time], input[type=number]').forEach(function (inp) {
         inp.onchange = function () {
           var wi = +inp.getAttribute('data-w'); var f = inp.getAttribute('data-f');
           windows[wi][f] = f === 'currentA' ? (inp.value ? +inp.value : undefined) : inp.value;
+          render();
+        };
+      });
+      root.querySelectorAll('.enabled').forEach(function (cb) {
+        cb.onchange = function () {
+          windows[+cb.getAttribute('data-w')].enabled = cb.checked;
+          render();
+        };
+      });
+      root.querySelectorAll('.inc, .dec').forEach(function (btn) {
+        btn.onclick = function () {
+          var wi = +btn.getAttribute('data-w');
+          var cur = windows[wi].currentA || MAX_A;
+          var delta = btn.className.indexOf('inc') !== -1 ? 1 : -1;
+          var next = Math.max(MIN_A, Math.min(MAX_A, cur + delta));
+          windows[wi].currentA = next;
+          render();
         };
       });
       root.querySelectorAll('.remove').forEach(function (b) {
         b.onclick = function () { windows.splice(+b.getAttribute('data-w'), 1); render(); };
       });
+
+      document.getElementById('save').disabled = Object.keys(bad).length > 0;
     }
 
-    function setStatus(t) { document.getElementById('status').textContent = t; }
+    function setStatus(t, isError) {
+      var el = document.getElementById('status');
+      el.textContent = t;
+      el.className = 'status' + (isError ? ' error' : '');
+    }
 
     function onHomeyReady(Homey) {
       homeyRef = Homey;
       Homey.ready();
       Homey.api('GET', '/getSchedule', null, function (err, result) {
         windows = (!err && Array.isArray(result)) ? result.map(function (w) {
-          return { days: w.days || [], start: w.start || '22:00', end: w.end || '06:00', currentA: w.currentA };
+          return { days: w.days || [], start: w.start || '22:00', end: w.end || '06:00', currentA: w.currentA, enabled: w.enabled !== false };
         }) : [];
         render();
       });
 
       document.getElementById('add').onclick = function () {
-        windows.push({ days: [1, 2, 3, 4, 5], start: '22:00', end: '06:00' });
+        windows.push({ days: [1, 2, 3, 4, 5], start: '22:00', end: '06:00', enabled: true });
         render();
       };
       document.getElementById('save').onclick = function () {
+        if (Object.keys(conflicts()).length > 0) {
+          setStatus('Fix overlapping windows before saving.', true);
+          return;
+        }
         setStatus('Saving…');
         Homey.api('POST', '/setSchedule', { windows: windows }, function (err) {
-          setStatus(err ? ('Error: ' + err) : 'Saved.');
+          setStatus(err ? ('Error: ' + (err.message || err)) : 'Saved.', !!err);
         });
       };
     }
