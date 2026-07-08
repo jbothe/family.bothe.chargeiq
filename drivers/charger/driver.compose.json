@@ -2,17 +2,22 @@
   "name": { "en": "EV Charger" },
   "class": "evcharger",
   "capabilities": [
-    "charge_mode",
     "evcharger_charging",
+    "charge_current_limit",
+    "charge_mode",
     "evcharger_charging_state",
+    "measure_solar_surplus",
     "charger_status",
     "measure_power",
     "measure_current",
     "measure_voltage",
-    "meter_power",
-    "charge_current_limit",
-    "measure_solar_surplus"
+    "meter_power"
   ],
+  "capabilitiesOptions": {
+    "meter_power": {
+      "title": { "en": "Energy (total)" }
+    }
+  },
   "platforms": ["local"],
   "connectivity": ["lan"],
   "images": {
