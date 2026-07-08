@@ -139,8 +139,10 @@ module.exports = class ChargerDevice extends Homey.Device {
       setWarning: (msg) => {
         (msg ? this.setWarning(msg) : this.unsetWarning()).catch(this.error);
       },
-      log: (...args) => this.log(...args),
-      error: (...args) => this.error(...args),
+      // Route controller diagnostics through the app logger for a short prefix
+      // ([ChargeIQApp] …) instead of Homey's long [ManagerDrivers][Driver][Device:uuid].
+      log: (...args) => this.homey.app.log(...args),
+      error: (...args) => this.homey.app.error(...args),
       onChargingChanged: (charging) => {
         const card = charging ? this.startedTrigger : this.stoppedTrigger;
         card.trigger(this, {}, {}).catch(this.error);
