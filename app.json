@@ -313,6 +313,9 @@
               "label": {
                 "en": "Phases"
               },
+              "hint": {
+                "en": "How many phases the charger is wired on (1 or 3). Used with Nominal voltage to convert between watts and amps everywhere, and sent to the charger in every charging profile."
+              },
               "value": 1,
               "min": 1,
               "max": 3,
@@ -324,6 +327,9 @@
               "label": {
                 "en": "Nominal voltage (V)"
               },
+              "hint": {
+                "en": "Grid voltage used with Phases for watt/amp conversions in solar and household-cap calculations. Use the nominal value for your grid (e.g. 230) - it doesn't need to track the live measured voltage."
+              },
               "value": 230,
               "min": 100,
               "max": 480
@@ -334,6 +340,9 @@
               "label": {
                 "en": "Minimum current (A)"
               },
+              "hint": {
+                "en": "Lowest current ever sent to the charger once it's told to charge - manual, scheduled, and solar targets are all floored to this. Also the surplus threshold: solar charging only starts once available surplus reaches at least this many amps."
+              },
               "value": 6,
               "min": 1,
               "max": 32
@@ -343,6 +352,9 @@
               "type": "number",
               "label": {
                 "en": "Maximum current (A)"
+              },
+              "hint": {
+                "en": "Highest current ever sent to the charger, in any mode. Manual, scheduled, and solar targets are all capped to this - match it to what the charger and your home's wiring/breaker support."
               },
               "value": 32,
               "min": 6,
@@ -362,6 +374,9 @@
               "label": {
                 "en": "Default idTag (RemoteStart)"
               },
+              "hint": {
+                "en": "Authorization tag sent when the app starts a charging session itself (manual/schedule/solar). By default any idTag is accepted, so this only needs to match something if you've enabled an idTag whitelist in the app's own settings."
+              },
               "value": "CHARGEIQ"
             },
             {
@@ -369,6 +384,9 @@
               "type": "number",
               "label": {
                 "en": "MeterValues interval (s)"
+              },
+              "hint": {
+                "en": "How often the charger itself is configured to report power/current/voltage/energy (OCPP MeterValues), in seconds. Lower values give more responsive solar tracking and a livelier dashboard, at the cost of more OCPP traffic."
               },
               "value": 10,
               "min": 2,
@@ -379,6 +397,9 @@
               "type": "number",
               "label": {
                 "en": "Min ms between profile writes"
+              },
+              "hint": {
+                "en": "Minimum spacing between charging-profile (current limit) writes sent to the charger. Prevents a fast-moving solar target from flooding the charger with SetChargingProfile calls; it also delays how quickly a new target actually reaches the charger."
               },
               "value": 15000,
               "min": 1000,
@@ -420,7 +441,7 @@
                 "en": "Grid reserve margin (W)"
               },
               "hint": {
-                "en": "Positive reserves headroom (charge less); negative allows some import."
+                "en": "Watts held back before offering surplus to the car. Positive reserves headroom and charges more conservatively; negative allows a bit of grid import. 0 targets breakeven."
               },
               "value": 0,
               "min": -3000,
@@ -432,6 +453,9 @@
               "label": {
                 "en": "Deadband (A)"
               },
+              "hint": {
+                "en": "While already charging, ignore surplus changes smaller than this many amps. Stops the current limit from adjusting on every minor solar flicker."
+              },
               "value": 1,
               "min": 0,
               "max": 10
@@ -441,6 +465,9 @@
               "type": "number",
               "label": {
                 "en": "Max ramp per step (A)"
+              },
+              "hint": {
+                "en": "While already charging, the most the current limit can change by on any single solar update. Smooths out sudden swings instead of jumping straight to the new target."
               },
               "value": 3,
               "min": 1,
@@ -452,6 +479,9 @@
               "label": {
                 "en": "Minimum on time (s)"
               },
+              "hint": {
+                "en": "Once solar charging starts, keep it running at least this long before a temporary drop in surplus is allowed to pause it."
+              },
               "value": 180,
               "min": 0,
               "max": 3600
@@ -462,6 +492,9 @@
               "label": {
                 "en": "Minimum off time (s)"
               },
+              "hint": {
+                "en": "Once paused (or before a first start), surplus must stay sufficient for at least this long before charging (re)starts. Prevents rapid pause/resume cycling."
+              },
               "value": 180,
               "min": 0,
               "max": 3600
@@ -471,6 +504,9 @@
               "type": "number",
               "label": {
                 "en": "Solar feed stale timeout (s)"
+              },
+              "hint": {
+                "en": "If no solar reading arrives for this long, solar charging pauses as a fail-safe until fresh data returns."
               },
               "value": 60,
               "min": 10,
