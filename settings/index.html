@@ -78,6 +78,14 @@
     .stepper input[type=number]::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
     .amps-unit { font-size: 11px; color: #9ca3af; padding-right: 6px; align-self: center; }
 
+    .boost-field { display: flex; align-items: center; }
+    .boost-field label.boost-check {
+      display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 400;
+      letter-spacing: normal; text-transform: none; color: #374151;
+      cursor: pointer; user-select: none; margin-bottom: 0; padding-bottom: 7px;
+    }
+    .boost-check input { margin: 0; }
+
     .spacer { flex: 1; }
     button.remove {
       background: transparent; color: #e0533d; border: 0; font-size: 13px; padding: 4px 6px; cursor: pointer;
@@ -203,6 +211,9 @@
           '<input type="number" min="' + MIN_A + '" max="' + MAX_A + '" data-w="' + i + '" data-f="currentA" value="' + amps + '" placeholder="max">' +
           '<button type="button" class="inc" data-w="' + i + '">+</button>' +
           '</div></div>' +
+          '<div class="field boost-field">' +
+          '<label class="boost-check"><input type="checkbox" class="boost" data-w="' + i + '" ' + (w.boostToCap ? 'checked' : '') + '> Boost above Amps when the shared circuit has spare capacity</label>' +
+          '</div>' +
           '</div>' +
           (bad[i] ? '<div class="conflict-msg">Overlaps another enabled window</div>' : '');
         root.appendChild(el);
@@ -226,6 +237,12 @@
       root.querySelectorAll('.enabled').forEach(function (cb) {
         cb.onchange = function () {
           windows[+cb.getAttribute('data-w')].enabled = cb.checked;
+          render();
+        };
+      });
+      root.querySelectorAll('.boost').forEach(function (cb) {
+        cb.onchange = function () {
+          windows[+cb.getAttribute('data-w')].boostToCap = cb.checked;
           render();
         };
       });
@@ -257,7 +274,10 @@
       Homey.ready();
       Homey.api('GET', '/getSchedule', null, function (err, result) {
         windows = (!err && Array.isArray(result)) ? result.map(function (w) {
-          return { days: w.days || [], start: w.start || '22:00', end: w.end || '06:00', currentA: w.currentA, enabled: w.enabled !== false };
+          return {
+            days: w.days || [], start: w.start || '22:00', end: w.end || '06:00', currentA: w.currentA,
+            enabled: w.enabled !== false, boostToCap: w.boostToCap === true,
+          };
         }) : [];
         render();
       });

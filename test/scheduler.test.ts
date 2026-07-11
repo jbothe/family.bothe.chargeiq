@@ -21,6 +21,16 @@ test('daytime window Mon-Fri 09:00-17:00', () => {
   assert.equal(s.activeCurrent(at(1, 10, 0)), 20);
 });
 
+test('activeBoostToCap reflects the active window, defaulting to false', () => {
+  const s = new Scheduler([
+    { days: [1], start: '09:00', end: '12:00', currentA: 16, boostToCap: true },
+    { days: [1], start: '13:00', end: '17:00', currentA: 10 },
+  ]);
+  assert.equal(s.activeBoostToCap(at(1, 10, 0)), true, 'first window opted in');
+  assert.equal(s.activeBoostToCap(at(1, 14, 0)), false, 'second window did not opt in');
+  assert.equal(s.activeBoostToCap(at(1, 20, 0)), false, 'no active window at all');
+});
+
 test('nextBoundary returns the next state flip', () => {
   const s = new Scheduler([{ days: [1, 2, 3, 4, 5], start: '09:00', end: '17:00' }]);
   const nb = s.nextBoundary(at(1, 10, 0));

@@ -4,8 +4,11 @@
  * A weekly charging window. `days` uses JS day numbers (0 = Sunday .. 6 = Saturday).
  * `start`/`end` are "HH:MM" local time. If `end` <= `start` the window runs
  * overnight into the following day. `currentA` optionally overrides the charge
- * current while this window is active. `enabled` (default true) lets a window
- * be kept configured but temporarily inactive, instead of deleting it.
+ * current while this window is active - here it acts as a floor, not a fixed
+ * target, when `boostToCap` is set. `enabled` (default true) lets a window be
+ * kept configured but temporarily inactive, instead of deleting it. `boostToCap`
+ * lets the controller raise the current above `currentA` up to the shared-circuit
+ * cap when there's spare capacity (see ChargeController.scheduledAmps).
  */
 export interface ScheduleWindow {
   days: number[];
@@ -13,6 +16,7 @@ export interface ScheduleWindow {
   end: string;
   currentA?: number;
   enabled?: boolean;
+  boostToCap?: boolean;
 }
 
 const MIN_PER_DAY = 1440;
@@ -132,11 +136,11 @@ export class Scheduler {
   }
 
   /** Expand enabled windows to weekly-minute intervals (end may wrap past week end). */
-  private intervals(): Array<Interval & { currentA?: number }> {
-    const out: Array<Interval & { currentA?: number }> = [];
+  private intervals(): Array<Interval & { currentA?: number; boostToCap?: boolean }> {
+    const out: Array<Interval & { currentA?: number; boostToCap?: boolean }> = [];
     for (const w of this.windows) {
       if (w.enabled === false) continue;
-      for (const iv of expandWindow(w)) out.push({ ...iv, currentA: w.currentA });
+      for (const iv of expandWindow(w)) out.push({ ...iv, currentA: w.currentA, boostToCap: w.boostToCap });
     }
     return out;
   }
@@ -157,6 +161,13 @@ export class Scheduler {
     const mow = minuteOfWeek(now, this.timezone);
     const hit = this.intervals().find((iv) => Scheduler.contains(iv, mow));
     return hit?.currentA;
+  }
+
+  /** Whether the active window at `now` allows boosting above its current (see `ScheduleWindow.boostToCap`). */
+  activeBoostToCap(now: Date): boolean {
+    const mow = minuteOfWeek(now, this.timezone);
+    const hit = this.intervals().find((iv) => Scheduler.contains(iv, mow));
+    return hit?.boostToCap === true;
   }
 
   /**

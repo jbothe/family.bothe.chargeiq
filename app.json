@@ -425,6 +425,32 @@
               "value": 14000,
               "min": 0,
               "max": 100000
+            },
+            {
+              "id": "sharedCircuitA",
+              "type": "number",
+              "label": {
+                "en": "Shared circuit rating (A)"
+              },
+              "hint": {
+                "en": "Set this if the charger shares a physical circuit/breaker with other equipment (e.g. a home battery inverter) - charging is throttled in any mode so total current on that circuit never exceeds this, using live solar/battery readings. This is independent of the whole-household grid cap above. Set 0 to disable."
+              },
+              "value": 0,
+              "min": 0,
+              "max": 100
+            },
+            {
+              "id": "sharedCircuitBufferA",
+              "type": "number",
+              "label": {
+                "en": "Shared circuit buffer (A)"
+              },
+              "hint": {
+                "en": "Amps reserved on the shared circuit for other equipment (inverter overhead, minor loads) not otherwise measured. Subtracted from the shared circuit rating before any of it is offered to the car."
+              },
+              "value": 0,
+              "min": 0,
+              "max": 32
             }
           ]
         },
