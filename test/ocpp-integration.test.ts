@@ -4,7 +4,7 @@ import test from 'node:test';
 import assert from 'node:assert';
 import { CentralSystem } from '../lib/ocpp/CentralSystem';
 import { ChargePoint } from '../lib/ocpp/ChargePoint';
-import { Readings } from '../lib/ocpp/types';
+import { Readings, StatusNotificationReq } from '../lib/ocpp/types';
 import { SimCharger } from './sim-charger';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -30,7 +30,7 @@ test('OCPP 1.6J: connect, boot, transaction, MeterValues, commands', async () =>
     c.on('boot', () => {
       events.boot = true;
     });
-    c.on('status', (s: any) => events.statuses.push(s.status));
+    c.on('status', (s: StatusNotificationReq) => events.statuses.push(s.status));
     c.on('meterValues', (r: Readings) => events.meter.push(r));
     c.on('startTransaction', (id: number) => {
       events.startId = id;

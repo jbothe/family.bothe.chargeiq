@@ -413,6 +413,7 @@ export class ChargeController {
       // clear it if not superseded by a plugged status shortly after (a
       // same-session reconnect blip, not a real stop).
       if (this.transactionId != null && !this.pendingIdleReconcile) {
+        // eslint-disable-next-line homey-app/global-timers -- unref()'d below, cleared in destroy()
         this.pendingIdleReconcile = setTimeout(() => {
           this.pendingIdleReconcile = null;
           this.applyIdleReconciliation();
@@ -678,8 +679,13 @@ export class ChargeController {
       detail = end ? `until ${fmtTime(end, this.timezone)}` : 'charging';
     } else { // solar
       const t = this.solarTargetAmps;
-      detail = (t != null && t >= this.cfg.minAmps) ? `charging ${t}A`
-        : (t === 0 ? 'paused (low excess)' : 'idle (low excess)');
+      if (t != null && t >= this.cfg.minAmps) {
+        detail = `charging ${t}A`;
+      } else if (t === 0) {
+        detail = 'paused (low excess)';
+      } else {
+        detail = 'idle (low excess)';
+      }
     }
     return { mode, detail };
   }
@@ -870,6 +876,7 @@ export class ChargeController {
 
   private scheduleNextTick(): void {
     if (this.tickTimer) clearTimeout(this.tickTimer);
+    // eslint-disable-next-line homey-app/global-timers -- unref()'d below, cleared in destroy()
     this.tickTimer = setTimeout(() => this.tick(new Date(), 'timer'), TICK_MS);
     this.tickTimer.unref?.();
   }
@@ -944,16 +951,19 @@ export class ChargeController {
     if (this.pendingWrite) return;
     const wait = Math.max(0, this.cfg.writeThrottleMs - (Date.now() - this.lastWriteAt));
     if (wait === 0) {
-      void this.writeProfile();
+      this.writeProfile().catch(this.host.error);
     } else {
+      // eslint-disable-next-line homey-app/global-timers -- unref()'d below, cleared in destroy()
       this.pendingWrite = setTimeout(() => {
         this.pendingWrite = null;
-        void this.writeProfile();
+        this.writeProfile().catch(this.host.error);
       }, wait);
       this.pendingWrite.unref?.();
     }
   }
 
+  // writeProfile() already catches everything internally (never rejects) -
+  // the .catch(host.error) above is a defensive backstop only.
   private async writeProfile(): Promise<void> {
     if (!this.cp?.connected || this.desiredAmps == null) return;
     this.lastWriteAt = Date.now();

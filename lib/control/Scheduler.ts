@@ -190,7 +190,7 @@ export class Scheduler {
       const delta = b > mow ? b - mow : b + MIN_PER_WEEK - mow;
       if (delta > 0 && delta < best) best = delta;
     }
-    if (!isFinite(best)) return undefined;
+    if (!Number.isFinite(best)) return undefined;
     return this.dateFromDelta(now, best);
   }
 
@@ -204,7 +204,7 @@ export class Scheduler {
       const delta = s > mow ? s - mow : s + MIN_PER_WEEK - mow;
       if (delta > 0 && delta < best) best = delta;
     }
-    return isFinite(best) ? this.dateFromDelta(now, best) : undefined;
+    return Number.isFinite(best) ? this.dateFromDelta(now, best) : undefined;
   }
 
   /** If a window is active at `now`, the Date it ends; otherwise undefined. */
@@ -219,7 +219,7 @@ export class Scheduler {
         }
       }
     }
-    return isFinite(best) ? this.dateFromDelta(now, best) : undefined;
+    return Number.isFinite(best) ? this.dateFromDelta(now, best) : undefined;
   }
 
   private dateFromDelta(now: Date, deltaMinutes: number): Date {

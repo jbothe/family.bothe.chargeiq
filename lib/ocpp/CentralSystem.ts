@@ -13,7 +13,15 @@ export interface CentralSystemOptions {
   /** Allocates the next transaction id; the app persists the counter. */
   allocateTransactionId: () => number;
   heartbeatIntervalSec?: number;
-  logger?: (msg: string, ...args: any[]) => void;
+  logger?: (msg: string, ...args: unknown[]) => void;
+}
+
+/** Minimal surface this file needs from the untyped ocpp-rpc RPCServer. */
+interface RpcServerLike {
+  on(event: 'client', listener: (client: RpcClient) => void): void;
+  on(event: 'error', listener: (err: Error) => void): void;
+  listen(port: number, host: string): Promise<void>;
+  close(opts?: { code?: number; reason?: string }): Promise<void>;
 }
 
 /**
@@ -30,11 +38,11 @@ export class CentralSystem extends EventEmitter {
 
   private opts: CentralSystemOptions;
 
-  private server: any = null;
+  private server: RpcServerLike | null = null;
 
   private points = new Map<string, ChargePoint>();
 
-  private log: (msg: string, ...args: any[]) => void;
+  private log: (msg: string, ...args: unknown[]) => void;
 
   constructor(opts: CentralSystemOptions) {
     super();

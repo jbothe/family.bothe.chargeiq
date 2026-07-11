@@ -16,15 +16,37 @@ import {
 /** Minimal shape of an ocpp-rpc server-side client we rely on. */
 export interface RpcClient {
   identity: string;
-  handle(method: string, handler: (ctx: { params: any }) => any): void;
-  handle(handler: (ctx: { method: string; params: any }) => any): void;
-  call(method: string, params?: any): Promise<any>;
+  handle(method: string, handler: (ctx: { params: unknown }) => Record<string, unknown>): void;
+  handle(handler: (ctx: { method: string; params: unknown }) => Record<string, unknown>): void;
+  // The OCPP response shape is genuinely dynamic (dispatched by method name at
+  // runtime, not known statically here) - any is the honest type, not a gap.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  call(method: string, params?: Record<string, unknown>): Promise<any>;
   close(opts?: { code?: number; reason?: string }): Promise<void> | void;
-  on(event: string, listener: (...args: any[]) => void): void;
+  on(event: 'close', listener: () => void): void;
 }
 
 /** How the app decides whether to authorise an idTag. */
 export type AuthorizePolicy = (idTag: string) => boolean;
+
+/** OCPP 1.6 ChargingProfile, as sent in SetChargingProfile.req. */
+interface OcppChargingProfile {
+  chargingProfileId: number;
+  stackLevel: number;
+  chargingProfilePurpose: 'TxProfile' | 'TxDefaultProfile';
+  chargingProfileKind: 'Absolute';
+  chargingSchedule: {
+    chargingRateUnit: 'A';
+    chargingSchedulePeriod: [{ startPeriod: number; limit: number; numberPhases: number }];
+  };
+  transactionId?: number;
+}
+
+/** OCPP 1.6 GetConfiguration.conf. */
+interface OcppGetConfigurationResult {
+  configurationKey?: Array<{ key: string; readonly: boolean; value?: string }>;
+  unknownKey?: string[];
+}
 
 export interface ChargePointEvents {
   boot: (info: BootNotificationReq) => void;
@@ -126,9 +148,10 @@ export class ChargePoint extends EventEmitter {
     });
 
     client.handle('Authorize', ({ params }) => {
-      const accepted = this.authorize(params.idTag);
+      const { idTag } = params as { idTag: string };
+      const accepted = this.authorize(idTag);
       const idTagInfo: IdTagInfo = { status: accepted ? 'Accepted' : 'Invalid' };
-      this.emit('authorize', params.idTag, accepted);
+      this.emit('authorize', idTag, accepted);
       return { idTagInfo };
     });
 
@@ -157,15 +180,15 @@ export class ChargePoint extends EventEmitter {
 
     // Accept the optional messages so strictMode does not reject them.
     client.handle('DataTransfer', ({ params }) => {
-      this.emit('dataTransfer', params ?? {});
+      this.emit('dataTransfer', (params ?? {}) as { vendorId?: string; messageId?: string; data?: string });
       return { status: 'Accepted' };
     });
     client.handle('FirmwareStatusNotification', ({ params }) => {
-      this.emit('firmwareStatus', params?.status ?? 'Unknown');
+      this.emit('firmwareStatus', (params as { status?: string } | undefined)?.status ?? 'Unknown');
       return {};
     });
     client.handle('DiagnosticsStatusNotification', ({ params }) => {
-      this.emit('diagnosticsStatus', params?.status ?? 'Unknown');
+      this.emit('diagnosticsStatus', (params as { status?: string } | undefined)?.status ?? 'Unknown');
       return {};
     });
 
@@ -211,7 +234,7 @@ export class ChargePoint extends EventEmitter {
    */
   async setChargingProfile(opts: ChargingProfileOptions): Promise<boolean> {
     const isTx = typeof opts.transactionId === 'number';
-    const csChargingProfiles: any = {
+    const csChargingProfiles: OcppChargingProfile = {
       chargingProfileId: opts.chargingProfileId,
       stackLevel: opts.stackLevel,
       chargingProfilePurpose: isTx ? 'TxProfile' : 'TxDefaultProfile',
@@ -242,7 +265,7 @@ export class ChargePoint extends EventEmitter {
     return res?.status === 'Accepted';
   }
 
-  async getConfiguration(keys?: string[]): Promise<any> {
+  async getConfiguration(keys?: string[]): Promise<OcppGetConfigurationResult> {
     return this.requireClient().call('GetConfiguration', keys ? { key: keys } : {});
   }
 
@@ -252,7 +275,7 @@ export class ChargePoint extends EventEmitter {
   }
 
   async triggerMessage(requestedMessage: string, connectorId?: number): Promise<boolean> {
-    const payload: any = { requestedMessage };
+    const payload: { requestedMessage: string; connectorId?: number } = { requestedMessage };
     if (connectorId !== undefined) payload.connectorId = connectorId;
     const res = await this.requireClient().call('TriggerMessage', payload);
     return res?.status === 'Accepted';

@@ -164,7 +164,7 @@ module.exports = class ChargerDevice extends Homey.Device {
     return {
       identity: this.getData().id as string,
       setCapability: (cap, value) => {
-        if (this.hasCapability(cap)) this.setCapabilityValue(cap, value as any).catch(this.error);
+        if (this.hasCapability(cap)) this.setCapabilityValue(cap, value).catch(this.error);
       },
       getSetting: <T>(key: string) => (
         this.pendingSettings && key in this.pendingSettings ? this.pendingSettings[key] : this.getSetting(key)

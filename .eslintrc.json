@@ -11,5 +11,14 @@
   "rules": {
     "import/extensions": ["error", "ignorePackages", { "js": "never", "mjs": "never", "jsx": "never", "ts": "never" }],
     "node/no-missing-import": ["error", { "allowModules": ["homey"], "tryExtensions": [".js", ".json", ".node", ".ts"] }]
-  }
+  },
+  "overrides": [
+    {
+      "files": ["test/**/*.ts"],
+      "rules": {
+        "@typescript-eslint/no-floating-promises": "off",
+        "homey-app/global-timers": "off"
+      }
+    }
+  ]
 }

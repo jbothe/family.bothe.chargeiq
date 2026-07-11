@@ -7,6 +7,16 @@ import { SolarFeed } from './lib/solar/SolarFeed';
 
 const DEFAULT_PORT = 9000;
 
+/** Minimal surface this file needs from the paired charger device, if any. */
+interface ChargerDeviceLike {
+  hasCapability(id: string): boolean;
+  getCapabilityValue(id: string): unknown;
+  getDiagnostics?(): { availableW: number; solarState: string; targetA: number | null; mode: string };
+  getModeInfo?(): { mode: string | null; detail: string };
+  getSchedule?(): unknown[];
+  setSchedule?(windows: unknown[]): Promise<void>;
+}
+
 /**
  * ChargeIQ — embeds the OCPP 1.6J Central System and orchestrates charging.
  * The Central System lives here on the App instance so it is available whenever
@@ -72,6 +82,7 @@ module.exports = class ChargeIQApp extends Homey.App {
       }
     };
     tick();
+    // eslint-disable-next-line homey-app/global-timers -- cleared in onUninit()
     this.widgetBroadcast = setInterval(tick, 10000);
   }
 
@@ -89,7 +100,7 @@ module.exports = class ChargeIQApp extends Homey.App {
   }
 
   /** The (single) charger device, if paired. */
-  private getChargerDevice(): any | null {
+  private getChargerDevice(): ChargerDeviceLike | null {
     try {
       const devices = this.homey.drivers.getDriver('charger').getDevices();
       return devices[0] ?? null;

@@ -64,15 +64,6 @@ export interface StartTransactionReq {
   timestamp: string;
 }
 
-export interface StopTransactionReq {
-  transactionId: number;
-  idTag?: string;
-  meterStop: number; // Wh
-  timestamp: string;
-  reason?: string;
-  transactionData?: MeterValue[];
-}
-
 export interface SampledValue {
   value: string;
   context?: string;
@@ -86,6 +77,15 @@ export interface SampledValue {
 export interface MeterValue {
   timestamp: string;
   sampledValue: SampledValue[];
+}
+
+export interface StopTransactionReq {
+  transactionId: number;
+  idTag?: string;
+  meterStop: number; // Wh
+  timestamp: string;
+  reason?: string;
+  transactionData?: MeterValue[];
 }
 
 export interface MeterValuesReq {

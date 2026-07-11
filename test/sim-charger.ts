@@ -23,11 +23,23 @@ export interface SimOptions {
   meterIntervalMs?: number;
 }
 
+/** Minimal shape of an ocpp-rpc RPCClient (the client side) we rely on. */
+interface RpcClientLike {
+  connect(): Promise<void>;
+  close(): Promise<void>;
+  handle(method: string, handler: (ctx: { params: unknown }) => unknown): void;
+  handle(handler: (ctx: { method: string; params: unknown }) => unknown): void;
+  // The OCPP response/request shapes are genuinely dynamic (dispatched by
+  // method name at runtime) - any is the honest type here, not a gap.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  call(method: string, params?: Record<string, unknown>): Promise<any>;
+}
+
 export class SimCharger {
 
   private opts: Required<SimOptions>;
 
-  private client: any = null;
+  private client: RpcClientLike | null = null;
 
   private txId: number | null = null;
 
@@ -50,22 +62,30 @@ export class SimCharger {
   }
 
   async connect(): Promise<void> {
-    const client = new RPCClient({
+    const client: RpcClientLike = new RPCClient({
       endpoint: this.opts.url,
       identity: this.opts.identity,
       protocols: ['ocpp1.6'],
     });
 
-    client.handle('RemoteStartTransaction', async ({ params }: any) => {
-      setTimeout(() => this.startTransaction(params.idTag ?? 'SIMTAG').catch(() => {}), 50);
+    client.handle('RemoteStartTransaction', async ({ params }) => {
+      const idTag = (params as { idTag?: string } | undefined)?.idTag;
+      setTimeout(() => {
+        this.startTransaction(idTag ?? 'SIMTAG').catch(() => {});
+      }, 50);
       return { status: 'Accepted' };
     });
     client.handle('RemoteStopTransaction', async () => {
-      setTimeout(() => this.stopTransaction().catch(() => {}), 50);
+      setTimeout(() => {
+        this.stopTransaction().catch(() => {});
+      }, 50);
       return { status: 'Accepted' };
     });
-    client.handle('SetChargingProfile', ({ params }: any) => {
-      const period = params?.csChargingProfiles?.chargingSchedule?.chargingSchedulePeriod?.[0];
+    client.handle('SetChargingProfile', ({ params }) => {
+      const req = params as {
+        csChargingProfiles?: { chargingSchedule?: { chargingSchedulePeriod?: Array<{ limit?: number }> } };
+      } | undefined;
+      const period = req?.csChargingProfiles?.chargingSchedule?.chargingSchedulePeriod?.[0];
       if (period && typeof period.limit === 'number') {
         this.limitA = period.limit;
       }
@@ -79,14 +99,17 @@ export class SimCharger {
       unknownKey: [],
     }));
     client.handle('ChangeConfiguration', () => ({ status: 'Accepted' }));
-    client.handle('TriggerMessage', ({ params }: any) => {
-      if (params?.requestedMessage === 'MeterValues') {
-        setTimeout(() => this.sendMeterValues().catch(() => {}), 20);
+    client.handle('TriggerMessage', ({ params }) => {
+      const requestedMessage = (params as { requestedMessage?: string } | undefined)?.requestedMessage;
+      if (requestedMessage === 'MeterValues') {
+        setTimeout(() => {
+          this.sendMeterValues().catch(() => {});
+        }, 20);
       }
       return { status: 'Accepted' };
     });
     // Catch-all so unexpected calls do not crash the sim.
-    client.handle(({ method }: any) => {
+    client.handle(({ method }) => {
       throw new Error(`Unsupported: ${method}`);
     });
 
@@ -94,8 +117,13 @@ export class SimCharger {
     await client.connect();
   }
 
-  async boot(): Promise<any> {
-    return this.client.call('BootNotification', {
+  private requireClient(): RpcClientLike {
+    if (!this.client) throw new Error('SimCharger not connected');
+    return this.client;
+  }
+
+  async boot(): Promise<Record<string, unknown>> {
+    return this.requireClient().call('BootNotification', {
       chargePointVendor: 'Wallbox',
       chargePointModel: 'Pulsar Max',
       firmwareVersion: 'sim-1.0',
@@ -103,22 +131,22 @@ export class SimCharger {
   }
 
   async heartbeat(): Promise<void> {
-    await this.client.call('Heartbeat', {});
+    await this.requireClient().call('Heartbeat', {});
   }
 
   async status(status: string, errorCode = 'NoError'): Promise<void> {
     this.connectorStatus = status;
-    await this.client.call('StatusNotification', { connectorId: 1, errorCode, status });
+    await this.requireClient().call('StatusNotification', { connectorId: 1, errorCode, status });
   }
 
   async startTransaction(idTag = 'SIMTAG'): Promise<number> {
-    const res = await this.client.call('StartTransaction', {
+    const res = await this.requireClient().call('StartTransaction', {
       connectorId: 1,
       idTag,
       meterStart: Math.round(this.meterWh),
       timestamp: new Date().toISOString(),
     });
-    this.txId = res.transactionId;
+    this.txId = res.transactionId as number;
     await this.status('Charging');
     if (this.opts.meterIntervalMs > 0) this.startMeterLoop();
     return this.txId as number;
@@ -127,7 +155,7 @@ export class SimCharger {
   async stopTransaction(): Promise<void> {
     this.stopMeterLoop();
     if (this.txId != null) {
-      await this.client.call('StopTransaction', {
+      await this.requireClient().call('StopTransaction', {
         transactionId: this.txId,
         meterStop: Math.round(this.meterWh),
         timestamp: new Date().toISOString(),
@@ -149,7 +177,7 @@ export class SimCharger {
     const power = this.powerW;
     const current = power > 0 ? this.limitA : 0;
     this.meterWh += power * (Math.max(this.opts.meterIntervalMs, 1000) / 3600000);
-    await this.client.call('MeterValues', {
+    await this.requireClient().call('MeterValues', {
       connectorId: 1,
       transactionId: this.txId ?? undefined,
       meterValue: [{
@@ -166,7 +194,9 @@ export class SimCharger {
 
   private startMeterLoop(): void {
     this.stopMeterLoop();
-    this.meterTimer = setInterval(() => this.sendMeterValues().catch(() => {}), this.opts.meterIntervalMs);
+    this.meterTimer = setInterval(() => {
+      this.sendMeterValues().catch(() => {});
+    }, this.opts.meterIntervalMs);
   }
 
   private stopMeterLoop(): void {
@@ -198,6 +228,7 @@ if (require.main === module) {
   main().catch((err) => {
     // eslint-disable-next-line no-console
     console.error(err);
+    // eslint-disable-next-line no-process-exit -- CLI entry point, not library code
     process.exit(1);
   });
 }

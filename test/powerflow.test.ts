@@ -10,7 +10,7 @@ import { join } from 'node:path';
  * from index.html and evaluating it. This tests the exact code the widget runs
  * (the logic is inlined so the widget stays self-contained on Homey).
  */
-function loadPF(): any {
+function loadPF(): Record<string, (...args: unknown[]) => unknown> {
   const html = readFileSync(
     join(__dirname, '../../widgets/power-flow/public/index.html'), 'utf8',
   );

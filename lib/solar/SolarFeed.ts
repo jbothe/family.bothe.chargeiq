@@ -10,6 +10,27 @@ const SOLAREDGE_APP = 'bothe.family.solaredge';
 /** Roles we read from the SolarEdge app, keyed by its driver id. */
 type Role = 'inverter' | 'meter' | 'battery';
 
+/** Handle returned by makeCapabilityInstance(), used only to unsubscribe. */
+interface CapabilityInstance {
+  destroy?(): Promise<void> | void;
+}
+
+/** Minimal shape of a homey-api device this file reads from. */
+interface HomeyApiDevice {
+  driverId?: string;
+  capabilities?: string[];
+  capabilitiesObj?: {
+    'measure_power'?: { value?: number };
+    'measure_battery'?: { value?: number };
+  };
+  makeCapabilityInstance(capabilityId: string, listener: (value: number) => void): CapabilityInstance;
+}
+
+/** Minimal shape of the homey-api client (HomeyAPI.createAppAPI()'s return value) we rely on. */
+interface HomeyApiClient {
+  devices: { getDevices(): Promise<Record<string, HomeyApiDevice>> };
+}
+
 export interface SolarSample {
   /** PV production (W, >=0). */
   pvW: number;
@@ -54,11 +75,12 @@ export function mergeSample(
  */
 export class SolarFeed extends EventEmitter {
 
-  private homey: any;
+  /** Only ever passed through opaquely to HomeyAPI.createAppAPI() - never read here. */
+  private homey: unknown;
 
-  private api: any = null;
+  private api: HomeyApiClient | null = null;
 
-  private instances: any[] = [];
+  private instances: CapabilityInstance[] = [];
 
   private values: Record<Role, number> = { inverter: 0, meter: 0, battery: 0 };
 
@@ -69,7 +91,7 @@ export class SolarFeed extends EventEmitter {
 
   private log: (...a: unknown[]) => void;
 
-  constructor(homey: any, logger?: (...a: unknown[]) => void) {
+  constructor(homey: unknown, logger?: (...a: unknown[]) => void) {
     super();
     this.homey = homey;
     this.log = logger ?? (() => { /* noop */ });
@@ -82,8 +104,8 @@ export class SolarFeed extends EventEmitter {
 
   /** Find SolarEdge devices and subscribe to their measure_power capability. */
   private async discover(): Promise<void> {
-    const devices = await this.api.devices.getDevices();
-    for (const device of Object.values<any>(devices)) {
+    const devices = await this.api!.devices.getDevices();
+    for (const device of Object.values(devices)) {
       const role = this.roleOf(device);
       if (!role) continue;
       if (!(device.capabilities || []).includes('measure_power')) continue;
@@ -125,7 +147,7 @@ export class SolarFeed extends EventEmitter {
     if (this.present.meter) this.emitSample();
   }
 
-  private roleOf(device: any): Role | null {
+  private roleOf(device: HomeyApiDevice): Role | null {
     // driverId is the canonical URI, e.g. "homey:app:bothe.family.solaredge:meter".
     const driverId: string = device.driverId ?? '';
     if (!driverId.includes(SOLAREDGE_APP)) return null;
