@@ -153,7 +153,9 @@ export class SolarFeed extends EventEmitter {
 
   async stop(): Promise<void> {
     for (const inst of this.instances) {
-      try { await inst.destroy?.(); } catch { /* ignore */ }
+      try {
+        await inst.destroy?.();
+      } catch { /* ignore */ }
     }
     this.instances = [];
   }

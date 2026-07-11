@@ -17,7 +17,7 @@ function loadPF(): any {
   const m = html.match(/POWERFLOW-LOGIC-START[\s\S]*?===\s*([\s\S]*?)\/\/ === POWERFLOW-LOGIC-END/);
   if (!m) throw new Error('PowerFlow logic block not found in index.html');
   // eslint-disable-next-line no-new-func
-  return new Function(m[1] + '\nreturn PF;')();
+  return new Function(`${m[1]}\nreturn PF;`)();
 }
 
 const PF = loadPF();

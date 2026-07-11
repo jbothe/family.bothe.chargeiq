@@ -1,10 +1,10 @@
 'use strict';
 
 import { EventEmitter } from 'events';
+import { AuthorizePolicy, ChargePoint, RpcClient } from './ChargePoint';
 // ocpp-rpc is a CommonJS module.
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { RPCServer } = require('ocpp-rpc');
-import { AuthorizePolicy, ChargePoint, RpcClient } from './ChargePoint';
 
 export interface CentralSystemOptions {
   port: number;
@@ -51,7 +51,7 @@ export class CentralSystem extends EventEmitter {
     });
 
     server.on('client', (client: RpcClient) => {
-      const identity = client.identity;
+      const { identity } = client;
       this.log(`[OCPP] client connected: ${identity}`);
 
       let cp = this.points.get(identity);

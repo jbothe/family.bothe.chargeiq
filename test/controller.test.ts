@@ -14,7 +14,9 @@ function at(day: number, hh: number, mm: number): Date {
   return d;
 }
 
-const SCHED: ScheduleWindow[] = [{ days: [1, 2, 3, 4, 5], start: '09:00', end: '17:00', currentA: 20 }];
+const SCHED: ScheduleWindow[] = [{
+  days: [1, 2, 3, 4, 5], start: '09:00', end: '17:00', currentA: 20,
+}];
 
 function makeController(schedule: ScheduleWindow[], extraSettings: Record<string, unknown> = {}): {
   c: ChargeController; caps: Record<string, unknown>; store: Record<string, unknown>; logs: string[];
@@ -27,17 +29,28 @@ function makeController(schedule: ScheduleWindow[], extraSettings: Record<string
   const logs: string[] = [];
   const host: ControllerHost = {
     identity: 'X',
-    setCapability: (k, v) => { caps[k] = v; },
+    setCapability: (k, v) => {
+      caps[k] = v;
+    },
     getSetting: <T>(k: string) => settings[k] as T,
     getStore: <T>(k: string) => store[k] as T,
-    setStore: async (k, v) => { store[k] = v; },
-    setAvailable: () => {}, setUnavailable: () => {}, setWarning: () => {},
-    log: (...a) => { logs.push(a.join(' ')); }, error: () => {},
+    setStore: async (k, v) => {
+      store[k] = v;
+    },
+    setAvailable: () => {},
+    setUnavailable: () => {},
+    setWarning: () => {},
+    log: (...a) => {
+      logs.push(a.join(' '));
+    },
+    error: () => {},
   };
   const cs = { getChargePoint: () => undefined, on: () => {} } as unknown as CentralSystem;
   const c = new ChargeController(host, cs);
   c.init();
-  return { c, caps, store, logs };
+  return {
+    c, caps, store, logs,
+  };
 }
 
 test('default outside a schedule is Solar; follows excess', () => {
@@ -89,7 +102,9 @@ test('setSchedule allows overlapping windows when one is disabled', async () => 
   const { c, store } = makeController([]);
   const windows: ScheduleWindow[] = [
     { days: [1], start: '09:00', end: '17:00' },
-    { days: [1], start: '16:00', end: '20:00', enabled: false },
+    {
+      days: [1], start: '16:00', end: '20:00', enabled: false,
+    },
   ];
   await c.setSchedule(windows);
   assert.deepEqual(c.getSchedule(), windows);
@@ -105,10 +120,10 @@ test('moving the current slider switches to Manual at that current', async () =>
 
 test('a schedule window starting clears the manual latch', async () => {
   const { c } = makeController(SCHED);
-  await c.stop();                    // manual-off outside a window
-  c.tick(at(1, 8, 59));              // just before window
+  await c.stop(); // manual-off outside a window
+  c.tick(at(1, 8, 59)); // just before window
   assert.equal(c.getMode(), 'manual');
-  c.tick(at(1, 9, 0));               // window starts -> clears latch
+  c.tick(at(1, 9, 0)); // window starts -> clears latch
   assert.equal(c.resolve(at(1, 9, 0)).mode, 'scheduled');
 });
 
@@ -120,12 +135,19 @@ test('manual latch persists across restart (restored from store)', async () => {
   const caps2: Record<string, unknown> = {};
   const host2: ControllerHost = {
     identity: 'X',
-    setCapability: (k, v) => { caps2[k] = v; },
+    setCapability: (k, v) => {
+      caps2[k] = v;
+    },
     getSetting: () => undefined,
     getStore: <T>(k: string) => store[k] as T,
-    setStore: async (k, v) => { store[k] = v; },
-    setAvailable: () => {}, setUnavailable: () => {}, setWarning: () => {},
-    log: () => {}, error: () => {},
+    setStore: async (k, v) => {
+      store[k] = v;
+    },
+    setAvailable: () => {},
+    setUnavailable: () => {},
+    setWarning: () => {},
+    log: () => {},
+    error: () => {},
   };
   const cs = { getChargePoint: () => undefined, on: () => {} } as unknown as CentralSystem;
   const c2 = new ChargeController(host2, cs);
@@ -173,14 +195,18 @@ test('shared circuit cap is a no-op on stale/absent solar data (trusts the confi
 });
 
 test('schedule boost raises the target up to shared-circuit capacity when the battery is idle', () => {
-  const sched: ScheduleWindow[] = [{ days: [1], start: '11:00', end: '14:00', currentA: 16, boostToCap: true }];
+  const sched: ScheduleWindow[] = [{
+    days: [1], start: '11:00', end: '14:00', currentA: 16, boostToCap: true,
+  }];
   const { c } = makeController(sched, { sharedCircuitA: 32, sharedCircuitBufferA: 2 });
   c.onSolarSample({ gridSignedW: 0, pvW: 0, batteryW: 0 }); // idle battery, no solar -> cap = 32 - 0 - 2 = 30
   assert.deepEqual(c.resolve(at(1, 12, 0)), { mode: 'scheduled', amps: 30 });
 });
 
 test('schedule boost matches the battery-charging + solar example (16A floor -> 20A)', () => {
-  const sched: ScheduleWindow[] = [{ days: [1], start: '11:00', end: '14:00', currentA: 16, boostToCap: true }];
+  const sched: ScheduleWindow[] = [{
+    days: [1], start: '11:00', end: '14:00', currentA: 16, boostToCap: true,
+  }];
   const { c } = makeController(sched, { sharedCircuitA: 32, sharedCircuitBufferA: 2 });
   // Battery charging at 14A (3220W, the rate that made 16A a sensible floor), pv +4A (920W) -> cap = 20.
   c.onSolarSample({ gridSignedW: 0, pvW: 920, batteryW: 3220 });
@@ -188,14 +214,18 @@ test('schedule boost matches the battery-charging + solar example (16A floor -> 
 });
 
 test('schedule boost clamps to the hardware maxAmps, not just the circuit rating', () => {
-  const sched: ScheduleWindow[] = [{ days: [1], start: '11:00', end: '14:00', currentA: 16, boostToCap: true }];
+  const sched: ScheduleWindow[] = [{
+    days: [1], start: '11:00', end: '14:00', currentA: 16, boostToCap: true,
+  }];
   const { c } = makeController(sched, { sharedCircuitA: 32, sharedCircuitBufferA: 0, maxAmps: 31 });
   c.onSolarSample({ gridSignedW: 0, pvW: 4600, batteryW: 0 }); // +20A pv -> cap = 52, way above hardware max
   assert.deepEqual(c.resolve(at(1, 12, 0)), { mode: 'scheduled', amps: 31 });
 });
 
 test('schedule boost never lowers below the configured floor', () => {
-  const sched: ScheduleWindow[] = [{ days: [1], start: '11:00', end: '14:00', currentA: 16, boostToCap: true }];
+  const sched: ScheduleWindow[] = [{
+    days: [1], start: '11:00', end: '14:00', currentA: 16, boostToCap: true,
+  }];
   const { c } = makeController(sched, { sharedCircuitA: 32, sharedCircuitBufferA: 2 });
   // Battery charging harder than assumed (20A) -> cap = 32 - 20 - 2 = 10, below the 16A floor.
   c.onSolarSample({ gridSignedW: 0, pvW: 0, batteryW: 4600 });
@@ -204,7 +234,9 @@ test('schedule boost never lowers below the configured floor', () => {
 });
 
 test('the shared-circuit safety cap still throttles the charger even when the schedule floor asks for more', () => {
-  const sched: ScheduleWindow[] = [{ days: [1], start: '11:00', end: '14:00', currentA: 16, boostToCap: true }];
+  const sched: ScheduleWindow[] = [{
+    days: [1], start: '11:00', end: '14:00', currentA: 16, boostToCap: true,
+  }];
   const { c, caps } = makeController(sched, { sharedCircuitA: 32, sharedCircuitBufferA: 2 });
   c.onSolarSample({ gridSignedW: 0, pvW: 0, batteryW: 4600 }); // cap = 10, below the 16A floor
   c.tick(at(1, 12, 0)); // re-resolve at a fixed in-window time (onSolarSample's own tick used real time)
@@ -212,7 +244,9 @@ test('the shared-circuit safety cap still throttles the charger even when the sc
 });
 
 test('schedule boost is fully suppressed while the battery is discharging', () => {
-  const sched: ScheduleWindow[] = [{ days: [1], start: '11:00', end: '14:00', currentA: 16, boostToCap: true }];
+  const sched: ScheduleWindow[] = [{
+    days: [1], start: '11:00', end: '14:00', currentA: 16, boostToCap: true,
+  }];
   const { c } = makeController(sched, { sharedCircuitA: 32, sharedCircuitBufferA: 2 });
   // No pv, battery discharging 10A -> the cap formula alone would say 32-(-10)-2=40A, but
   // discharge must never fund a boost above the floor.
@@ -222,14 +256,18 @@ test('schedule boost is fully suppressed while the battery is discharging', () =
 });
 
 test('schedule boost does nothing when the window has not opted in', () => {
-  const sched: ScheduleWindow[] = [{ days: [1], start: '11:00', end: '14:00', currentA: 16 }]; // no boostToCap
+  const sched: ScheduleWindow[] = [{
+    days: [1], start: '11:00', end: '14:00', currentA: 16,
+  }]; // no boostToCap
   const { c } = makeController(sched, { sharedCircuitA: 32, sharedCircuitBufferA: 2 });
   c.onSolarSample({ gridSignedW: 0, pvW: 0, batteryW: 0 }); // plenty of spare capacity available
   assert.deepEqual(c.resolve(at(1, 12, 0)), { mode: 'scheduled', amps: 16 }, 'stays at the fixed floor without opt-in');
 });
 
 test('schedule boost does nothing when the shared-circuit cap is disabled', () => {
-  const sched: ScheduleWindow[] = [{ days: [1], start: '11:00', end: '14:00', currentA: 16, boostToCap: true }];
+  const sched: ScheduleWindow[] = [{
+    days: [1], start: '11:00', end: '14:00', currentA: 16, boostToCap: true,
+  }];
   const { c } = makeController(sched); // sharedCircuitA defaults to 0 (disabled)
   c.onSolarSample({ gridSignedW: 0, pvW: 4600, batteryW: 0 });
   assert.deepEqual(c.resolve(at(1, 12, 0)), { mode: 'scheduled', amps: 16 }, 'no cap configured -> nothing to boost to');
@@ -237,7 +275,9 @@ test('schedule boost does nothing when the shared-circuit cap is disabled', () =
 
 test('excess floored at 0 and logged with all components', () => {
   const { c, caps, logs } = makeController([]);
-  c.onSolarSample({ gridSignedW: 40, pvW: 100, batteryW: -50, houseW: 190 }, Date.now());
+  c.onSolarSample({
+    gridSignedW: 40, pvW: 100, batteryW: -50, houseW: 190,
+  }, Date.now());
   assert.equal(caps.measure_solar_surplus, 0, 'excess floored at 0');
   const line = logs.find((l) => l.includes('[solar]')) || '';
   assert.ok(line.includes('solar=100W') && line.includes('battery=-50W') && line.includes('excess=0W'));
@@ -247,7 +287,9 @@ test('solar mode never charges off battery-funded "surplus" (real-hardware incid
   const { c, caps } = makeController([]);
   // pv=520W, house(non-EV)=1118W, charger=1632W (not charging yet in this
   // test - charger=0), battery discharging 2270W to fund a 40W export.
-  c.onSolarSample({ gridSignedW: -40, pvW: 520, batteryW: -2270, houseW: 2750 });
+  c.onSolarSample({
+    gridSignedW: -40, pvW: 520, batteryW: -2270, houseW: 2750,
+  });
   assert.equal(caps.measure_solar_surplus, 0, 'no surplus credited - it was entirely battery-funded');
   assert.deepEqual(c.resolve(new Date()), { mode: 'solar', amps: 0 });
 });
@@ -255,7 +297,9 @@ test('solar mode never charges off battery-funded "surplus" (real-hardware incid
 test('solar mode still charges off genuine surplus on top of a discharging battery', () => {
   const { c, caps } = makeController([]);
   // 3000W export, only 1000W of which is battery discharge - 2000W is real solar surplus.
-  c.onSolarSample({ gridSignedW: -3000, pvW: 3500, batteryW: -1000, houseW: 500 });
+  c.onSolarSample({
+    gridSignedW: -3000, pvW: 3500, batteryW: -1000, houseW: 500,
+  });
   assert.equal(caps.measure_solar_surplus, 2000);
   assert.deepEqual(c.resolve(new Date()), { mode: 'solar', amps: 8 });
 });
@@ -277,7 +321,9 @@ test('every tick logs a [decision] line, unconditionally, covering each branch',
   }
   // Scheduled: boost not enabled for the window.
   {
-    const sched: ScheduleWindow[] = [{ days: [1], start: '11:00', end: '14:00', currentA: 16 }];
+    const sched: ScheduleWindow[] = [{
+      days: [1], start: '11:00', end: '14:00', currentA: 16,
+    }];
     const { c, logs } = makeController(sched);
     c.tick(at(1, 12, 0));
     const line = logs.filter((l) => l.startsWith('[decision:')).pop();
@@ -285,7 +331,9 @@ test('every tick logs a [decision] line, unconditionally, covering each branch',
   }
   // Scheduled: boost blocked by battery discharge, even though caps have headroom.
   {
-    const sched: ScheduleWindow[] = [{ days: [1], start: '11:00', end: '14:00', currentA: 16, boostToCap: true }];
+    const sched: ScheduleWindow[] = [{
+      days: [1], start: '11:00', end: '14:00', currentA: 16, boostToCap: true,
+    }];
     const { c, logs } = makeController(sched, { sharedCircuitA: 32, sharedCircuitBufferA: 2 });
     c.onSolarSample({ gridSignedW: 0, pvW: 0, batteryW: -2300 });
     c.tick(at(1, 12, 0));
@@ -295,7 +343,9 @@ test('every tick logs a [decision] line, unconditionally, covering each branch',
   }
   // Scheduled: boosted, with pv/battery breakdown and both cap notes present.
   {
-    const sched: ScheduleWindow[] = [{ days: [1], start: '11:00', end: '14:00', currentA: 16, boostToCap: true }];
+    const sched: ScheduleWindow[] = [{
+      days: [1], start: '11:00', end: '14:00', currentA: 16, boostToCap: true,
+    }];
     const { c, logs } = makeController(sched, { sharedCircuitA: 32, sharedCircuitBufferA: 2 });
     c.onSolarSample({ gridSignedW: 0, pvW: 920, batteryW: 3220 });
     c.tick(at(1, 12, 0));
@@ -305,7 +355,9 @@ test('every tick logs a [decision] line, unconditionally, covering each branch',
   }
   // Both caps present: circuit cap boosts the request, household cap then pauses it.
   {
-    const sched: ScheduleWindow[] = [{ days: [1], start: '11:00', end: '14:00', currentA: 16, boostToCap: true }];
+    const sched: ScheduleWindow[] = [{
+      days: [1], start: '11:00', end: '14:00', currentA: 16, boostToCap: true,
+    }];
     const { c, logs } = makeController(sched, { sharedCircuitA: 32, sharedCircuitBufferA: 2, maxHouseholdW: 3000 });
     c.onSolarSample({ gridSignedW: 2800, pvW: 920, batteryW: 3220 });
     c.tick(at(1, 12, 0));
@@ -390,16 +442,25 @@ test('household cap nets out the charger\'s own draw once Charging, even without
   cp.attach(fakeClient);
 
   const store: Record<string, unknown> = { schedule: [] }; // no transactionId anywhere
-  const settings: Record<string, unknown> = { minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdW: 14200 };
+  const settings: Record<string, unknown> = {
+    minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdW: 14200,
+  };
   const caps: Record<string, unknown> = {};
   const host: ControllerHost = {
     identity: 'X',
-    setCapability: (k, v) => { caps[k] = v; },
+    setCapability: (k, v) => {
+      caps[k] = v;
+    },
     getSetting: <T>(k: string) => settings[k] as T,
     getStore: <T>(k: string) => store[k] as T,
-    setStore: async (k, v) => { store[k] = v; },
-    setAvailable: () => {}, setUnavailable: () => {}, setWarning: () => {},
-    log: () => {}, error: () => {},
+    setStore: async (k, v) => {
+      store[k] = v;
+    },
+    setAvailable: () => {},
+    setUnavailable: () => {},
+    setWarning: () => {},
+    log: () => {},
+    error: () => {},
   };
   const cs = { getChargePoint: () => cp, on: () => {} } as unknown as CentralSystem;
   const c = new ChargeController(host, cs);
@@ -423,16 +484,25 @@ test('the solar surplus calc sees the charger\'s real power once Charging, even 
   cp.attach(fakeClient);
 
   const store: Record<string, unknown> = { schedule: [] };
-  const settings: Record<string, unknown> = { minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdW: 14000 };
+  const settings: Record<string, unknown> = {
+    minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdW: 14000,
+  };
   const caps: Record<string, unknown> = {};
   const host: ControllerHost = {
     identity: 'X',
-    setCapability: (k, v) => { caps[k] = v; },
+    setCapability: (k, v) => {
+      caps[k] = v;
+    },
     getSetting: <T>(k: string) => settings[k] as T,
     getStore: <T>(k: string) => store[k] as T,
-    setStore: async (k, v) => { store[k] = v; },
-    setAvailable: () => {}, setUnavailable: () => {}, setWarning: () => {},
-    log: () => {}, error: () => {},
+    setStore: async (k, v) => {
+      store[k] = v;
+    },
+    setAvailable: () => {},
+    setUnavailable: () => {},
+    setWarning: () => {},
+    log: () => {},
+    error: () => {},
   };
   const cs = { getChargePoint: () => cp, on: () => {} } as unknown as CentralSystem;
   const c = new ChargeController(host, cs);
@@ -451,7 +521,9 @@ test('profile writes reach the charger (TxDefaultProfile) even without a known t
   const fakeClient: RpcClient = {
     identity: 'X',
     handle: () => {},
-    call: async (method: string) => { calls.push(method); return { status: 'Accepted' }; },
+    call: async (method: string) => {
+      calls.push(method); return { status: 'Accepted' };
+    },
     close: async () => {},
     on: () => {},
   };
@@ -467,9 +539,14 @@ test('profile writes reach the charger (TxDefaultProfile) even without a known t
     setCapability: () => {},
     getSetting: <T>(k: string) => settings[k] as T,
     getStore: <T>(k: string) => store[k] as T,
-    setStore: async (k, v) => { store[k] = v; },
-    setAvailable: () => {}, setUnavailable: () => {}, setWarning: () => {},
-    log: () => {}, error: () => {},
+    setStore: async (k, v) => {
+      store[k] = v;
+    },
+    setAvailable: () => {},
+    setUnavailable: () => {},
+    setWarning: () => {},
+    log: () => {},
+    error: () => {},
   };
   const cs = { getChargePoint: () => cp, on: () => {} } as unknown as CentralSystem;
   const c = new ChargeController(host, cs);
@@ -501,7 +578,9 @@ test('a pause (0A) decision reaches an already-mid-session charger, real-hardwar
   const fakeClient: RpcClient = {
     identity: 'X',
     handle: () => {},
-    call: async (method: string, params?: unknown) => { calls.push({ method, params }); return { status: 'Accepted' }; },
+    call: async (method: string, params?: unknown) => {
+      calls.push({ method, params }); return { status: 'Accepted' };
+    },
     close: async () => {},
     on: () => {},
   };
@@ -517,9 +596,14 @@ test('a pause (0A) decision reaches an already-mid-session charger, real-hardwar
     setCapability: () => {},
     getSetting: <T>(k: string) => settings[k] as T,
     getStore: <T>(k: string) => store[k] as T,
-    setStore: async (k, v) => { store[k] = v; },
-    setAvailable: () => {}, setUnavailable: () => {}, setWarning: () => {},
-    log: () => {}, error: () => {},
+    setStore: async (k, v) => {
+      store[k] = v;
+    },
+    setAvailable: () => {},
+    setUnavailable: () => {},
+    setWarning: () => {},
+    log: () => {},
+    error: () => {},
   };
   const cs = { getChargePoint: () => cp, on: () => {} } as unknown as CentralSystem;
   const c = new ChargeController(host, cs);
@@ -542,7 +626,9 @@ test('RemoteStartTransaction is only attempted while Preparing, not once already
   const fakeClient: RpcClient = {
     identity: 'X',
     handle: () => {},
-    call: async (method: string) => { calls.push(method); return { status: 'Accepted' }; },
+    call: async (method: string) => {
+      calls.push(method); return { status: 'Accepted' };
+    },
     close: async () => {},
     on: () => {},
   };
@@ -550,15 +636,22 @@ test('RemoteStartTransaction is only attempted while Preparing, not once already
   cp.attach(fakeClient);
 
   const store: Record<string, unknown> = { schedule: [] };
-  const settings: Record<string, unknown> = { minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdW: 14000 };
+  const settings: Record<string, unknown> = {
+    minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdW: 14000,
+  };
   const host: ControllerHost = {
     identity: 'X',
     setCapability: () => {},
     getSetting: <T>(k: string) => settings[k] as T,
     getStore: <T>(k: string) => store[k] as T,
-    setStore: async (k, v) => { store[k] = v; },
-    setAvailable: () => {}, setUnavailable: () => {}, setWarning: () => {},
-    log: () => {}, error: () => {},
+    setStore: async (k, v) => {
+      store[k] = v;
+    },
+    setAvailable: () => {},
+    setUnavailable: () => {},
+    setWarning: () => {},
+    log: () => {},
+    error: () => {},
   };
   const cs = { getChargePoint: () => cp, on: () => {} } as unknown as CentralSystem;
   const c = new ChargeController(host, cs);
@@ -587,16 +680,25 @@ test('a repeated identical status does not re-trigger the decision log/tick', ()
   cp.attach(fakeClient);
 
   const store: Record<string, unknown> = { schedule: [] };
-  const settings: Record<string, unknown> = { minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdW: 14000 };
+  const settings: Record<string, unknown> = {
+    minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdW: 14000,
+  };
   const logs: string[] = [];
   const host: ControllerHost = {
     identity: 'X',
     setCapability: () => {},
     getSetting: <T>(k: string) => settings[k] as T,
     getStore: <T>(k: string) => store[k] as T,
-    setStore: async (k, v) => { store[k] = v; },
-    setAvailable: () => {}, setUnavailable: () => {}, setWarning: () => {},
-    log: (...a) => { logs.push(a.join(' ')); }, error: () => {},
+    setStore: async (k, v) => {
+      store[k] = v;
+    },
+    setAvailable: () => {},
+    setUnavailable: () => {},
+    setWarning: () => {},
+    log: (...a) => {
+      logs.push(a.join(' '));
+    },
+    error: () => {},
   };
   const cs = { getChargePoint: () => cp, on: () => {} } as unknown as CentralSystem;
   const c = new ChargeController(host, cs);
@@ -635,7 +737,9 @@ test('a transient Available (reconnect blip) does not wipe a live transaction', 
     const fakeClient: RpcClient = {
       identity: 'X',
       handle: () => {},
-      call: async (method: string) => { calls.push(method); return { status: 'Accepted' }; },
+      call: async (method: string) => {
+        calls.push(method); return { status: 'Accepted' };
+      },
       close: async () => {},
       on: () => {},
     };
@@ -645,15 +749,22 @@ test('a transient Available (reconnect blip) does not wipe a live transaction', 
     // Mirrors the real incident: transactionId restored from the store at
     // boot (was already charging before the app restarted).
     const store: Record<string, unknown> = { schedule: [], transactionId: 55 };
-    const settings: Record<string, unknown> = { minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdW: 14000 };
+    const settings: Record<string, unknown> = {
+      minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdW: 14000,
+    };
     const host: ControllerHost = {
       identity: 'X',
       setCapability: () => {},
       getSetting: <T>(k: string) => settings[k] as T,
       getStore: <T>(k: string) => store[k] as T,
-      setStore: async (k, v) => { store[k] = v; },
-      setAvailable: () => {}, setUnavailable: () => {}, setWarning: () => {},
-      log: () => {}, error: () => {},
+      setStore: async (k, v) => {
+        store[k] = v;
+      },
+      setAvailable: () => {},
+      setUnavailable: () => {},
+      setWarning: () => {},
+      log: () => {},
+      error: () => {},
     };
     const cs = { getChargePoint: () => cp, on: () => {} } as unknown as CentralSystem;
     const c = new ChargeController(host, cs);
@@ -697,15 +808,22 @@ test('a genuinely sustained Available eventually reconciles a stale transaction 
     cp.attach(fakeClient);
 
     const store: Record<string, unknown> = { schedule: [], transactionId: 55 };
-    const settings: Record<string, unknown> = { minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdW: 14000 };
+    const settings: Record<string, unknown> = {
+      minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdW: 14000,
+    };
     const host: ControllerHost = {
       identity: 'X',
       setCapability: () => {},
       getSetting: <T>(k: string) => settings[k] as T,
       getStore: <T>(k: string) => store[k] as T,
-      setStore: async (k, v) => { store[k] = v; },
-      setAvailable: () => {}, setUnavailable: () => {}, setWarning: () => {},
-      log: () => {}, error: () => {},
+      setStore: async (k, v) => {
+        store[k] = v;
+      },
+      setAvailable: () => {},
+      setUnavailable: () => {},
+      setWarning: () => {},
+      log: () => {},
+      error: () => {},
     };
     const cs = { getChargePoint: () => cp, on: () => {} } as unknown as CentralSystem;
     const c = new ChargeController(host, cs);
@@ -745,18 +863,29 @@ test('EV-initiated Finishing (no StopTransaction) clears the stale transaction a
   // fresh-plug-in edge clears the manual latch below - otherwise mode falls
   // through to idle Solar (no target ever set here) at exactly the moment
   // Preparing arrives, which is a test artifact, not a realistic setup.
-  const schedule: ScheduleWindow[] = [{ days: [0, 1, 2, 3, 4, 5, 6], start: '00:00', end: '23:59', currentA: 16 }];
+  const schedule: ScheduleWindow[] = [{
+    days: [0, 1, 2, 3, 4, 5, 6], start: '00:00', end: '23:59', currentA: 16,
+  }];
   const store: Record<string, unknown> = { schedule, transactionId: 5 };
-  const settings: Record<string, unknown> = { minAmps: 6, maxAmps: 31, phases: 1, voltage: 230, maxHouseholdW: 14000 };
+  const settings: Record<string, unknown> = {
+    minAmps: 6, maxAmps: 31, phases: 1, voltage: 230, maxHouseholdW: 14000,
+  };
   const caps: Record<string, unknown> = {};
   const host: ControllerHost = {
     identity: 'X',
-    setCapability: (k, v) => { caps[k] = v; },
+    setCapability: (k, v) => {
+      caps[k] = v;
+    },
     getSetting: <T>(k: string) => settings[k] as T,
     getStore: <T>(k: string) => store[k] as T,
-    setStore: async (k, v) => { store[k] = v; },
-    setAvailable: () => {}, setUnavailable: () => {}, setWarning: () => {},
-    log: () => {}, error: () => {},
+    setStore: async (k, v) => {
+      store[k] = v;
+    },
+    setAvailable: () => {},
+    setUnavailable: () => {},
+    setWarning: () => {},
+    log: () => {},
+    error: () => {},
   };
   const cs = { getChargePoint: () => cp, on: () => {} } as unknown as CentralSystem;
   const c = new ChargeController(host, cs);
@@ -786,7 +915,9 @@ test('manual off pauses at 0A (keeps the transaction) instead of hard-stopping',
   const fakeClient: RpcClient = {
     identity: 'X',
     handle: () => {},
-    call: async (method: string) => { calls.push(method); return { status: 'Accepted' }; },
+    call: async (method: string) => {
+      calls.push(method); return { status: 'Accepted' };
+    },
     close: async () => {},
     on: () => {},
   };
@@ -800,12 +931,19 @@ test('manual off pauses at 0A (keeps the transaction) instead of hard-stopping',
   const caps: Record<string, unknown> = {};
   const host: ControllerHost = {
     identity: 'X',
-    setCapability: (k, v) => { caps[k] = v; },
+    setCapability: (k, v) => {
+      caps[k] = v;
+    },
     getSetting: <T>(k: string) => settings[k] as T,
     getStore: <T>(k: string) => store[k] as T,
-    setStore: async (k, v) => { store[k] = v; },
-    setAvailable: () => {}, setUnavailable: () => {}, setWarning: () => {},
-    log: () => {}, error: () => {},
+    setStore: async (k, v) => {
+      store[k] = v;
+    },
+    setAvailable: () => {},
+    setUnavailable: () => {},
+    setWarning: () => {},
+    log: () => {},
+    error: () => {},
   };
   const cs = { getChargePoint: () => cp, on: () => {} } as unknown as CentralSystem;
   const c = new ChargeController(host, cs);
@@ -831,7 +969,9 @@ test('manual latch set while unplugged is cleared by the fresh plug-in (never de
   const fakeClient: RpcClient = {
     identity: 'X',
     handle: () => {},
-    call: async (method: string) => { calls.push(method); return { status: 'Accepted' }; },
+    call: async (method: string) => {
+      calls.push(method); return { status: 'Accepted' };
+    },
     close: async () => {},
     on: () => {},
   };
@@ -839,16 +979,25 @@ test('manual latch set while unplugged is cleared by the fresh plug-in (never de
   cp.attach(fakeClient);
 
   const store: Record<string, unknown> = { schedule: [] };
-  const settings: Record<string, unknown> = { minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdW: 14000 };
+  const settings: Record<string, unknown> = {
+    minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdW: 14000,
+  };
   const caps: Record<string, unknown> = {};
   const host: ControllerHost = {
     identity: 'X',
-    setCapability: (k, v) => { caps[k] = v; },
+    setCapability: (k, v) => {
+      caps[k] = v;
+    },
     getSetting: <T>(k: string) => settings[k] as T,
     getStore: <T>(k: string) => store[k] as T,
-    setStore: async (k, v) => { store[k] = v; },
-    setAvailable: () => {}, setUnavailable: () => {}, setWarning: () => {},
-    log: () => {}, error: () => {},
+    setStore: async (k, v) => {
+      store[k] = v;
+    },
+    setAvailable: () => {},
+    setUnavailable: () => {},
+    setWarning: () => {},
+    log: () => {},
+    error: () => {},
   };
   const cs = { getChargePoint: () => cp, on: () => {} } as unknown as CentralSystem;
   const c = new ChargeController(host, cs);
@@ -870,7 +1019,9 @@ test('a transactionId restored from store at boot is never hard-stopped, confirm
   const fakeClient: RpcClient = {
     identity: 'X',
     handle: () => {},
-    call: async (method: string) => { calls.push(method); return { status: 'Accepted' }; },
+    call: async (method: string) => {
+      calls.push(method); return { status: 'Accepted' };
+    },
     close: async () => {},
     on: () => {},
   };
@@ -879,15 +1030,22 @@ test('a transactionId restored from store at boot is never hard-stopped, confirm
 
   // Solar target null (below excess threshold) -> controller wants to be idle.
   const store: Record<string, unknown> = { schedule: [], transactionId: 42 };
-  const settings: Record<string, unknown> = { minAmps: 6, maxAmps: 31, phases: 1, voltage: 230, maxHouseholdW: 14000 };
+  const settings: Record<string, unknown> = {
+    minAmps: 6, maxAmps: 31, phases: 1, voltage: 230, maxHouseholdW: 14000,
+  };
   const host: ControllerHost = {
     identity: 'X',
     setCapability: () => {},
     getSetting: <T>(k: string) => settings[k] as T,
     getStore: <T>(k: string) => store[k] as T,
-    setStore: async (k, v) => { store[k] = v; },
-    setAvailable: () => {}, setUnavailable: () => {}, setWarning: () => {},
-    log: () => {}, error: () => {},
+    setStore: async (k, v) => {
+      store[k] = v;
+    },
+    setAvailable: () => {},
+    setUnavailable: () => {},
+    setWarning: () => {},
+    log: () => {},
+    error: () => {},
   };
   const cs = { getChargePoint: () => cp, on: () => {} } as unknown as CentralSystem;
   const c = new ChargeController(host, cs);

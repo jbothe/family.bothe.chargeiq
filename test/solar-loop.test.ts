@@ -6,8 +6,15 @@ import { SolarLoop, SolarLoopConfig } from '../lib/control/SolarLoop';
 
 const T = 100000; // realistic time base (> dwell windows)
 const cfg = (): SolarLoopConfig => ({
-  voltage: 230, phases: 1, minAmps: 6, maxAmps: 31,
-  deadbandA: 1, rampA: 3, minOnMs: 1000, minOffMs: 1000, marginW: 0,
+  voltage: 230,
+  phases: 1,
+  minAmps: 6,
+  maxAmps: 31,
+  deadbandA: 1,
+  rampA: 3,
+  minOnMs: 1000,
+  minOffMs: 1000,
+  marginW: 0,
 });
 
 test('starts charging when surplus >= min', () => {
@@ -51,7 +58,9 @@ test('battery discharge fully funding an apparent export is not counted as solar
   // the battery, grid would need to import ~2230W - there is no genuine
   // surplus here at all.
   const l = new SolarLoop(cfg());
-  const r = l.evaluate({ gridSignedW: -40, chargerPowerW: 1632, batteryW: -2270, now: T });
+  const r = l.evaluate({
+    gridSignedW: -40, chargerPowerW: 1632, batteryW: -2270, now: T,
+  });
   // Raw availableW can go negative here (it's not the surplus metric itself -
   // ChargeController floors that at 0 for the widget/capability); what matters
   // is the resulting desiredA/target, which floors internally regardless.
@@ -63,7 +72,9 @@ test('battery discharge only cancels out its own contribution, not genuine solar
   const l = new SolarLoop(cfg());
   // 3000W genuinely exported on top of a 1000W battery discharge - 2000W of
   // that export is real solar surplus and should still be usable.
-  const r = l.evaluate({ gridSignedW: -3000, chargerPowerW: 0, batteryW: -1000, now: T });
+  const r = l.evaluate({
+    gridSignedW: -3000, chargerPowerW: 0, batteryW: -1000, now: T,
+  });
   assert.equal(r.availableW, 2000);
   assert.equal(r.target, 8);
 });
@@ -72,7 +83,9 @@ test('battery charging is not double-counted - the grid reading already reflects
   const l = new SolarLoop(cfg());
   const withoutBattery = l.evaluate({ gridSignedW: -2300, chargerPowerW: 0, now: T });
   const l2 = new SolarLoop(cfg());
-  const withCharging = l2.evaluate({ gridSignedW: -2300, chargerPowerW: 0, batteryW: 1500, now: T });
+  const withCharging = l2.evaluate({
+    gridSignedW: -2300, chargerPowerW: 0, batteryW: 1500, now: T,
+  });
   assert.equal(withCharging.availableW, withoutBattery.availableW, 'positive (charging) batteryW needs no extra adjustment');
 });
 

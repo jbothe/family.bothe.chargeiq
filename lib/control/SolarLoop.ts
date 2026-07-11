@@ -85,7 +85,9 @@ export class SolarLoop {
   }
 
   evaluate(input: SolarInput): SolarResult {
-    const { voltage, phases, minAmps, deadbandA, rampA, minOnMs, minOffMs, marginW } = this.cfg;
+    const {
+      voltage, phases, minAmps, deadbandA, rampA, minOnMs, minOffMs, marginW,
+    } = this.cfg;
     // Power available to the car = what it already draws, minus the net grid flow
     // (export is negative grid so it adds capacity; import is positive so it subtracts),
     // minus a reserve margin. This works whether the meter is importing or exporting.

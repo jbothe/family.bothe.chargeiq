@@ -21,15 +21,23 @@ test('OCPP 1.6J: connect, boot, transaction, MeterValues, commands', async () =>
   });
   await cs.start();
 
-  const events = { boot: false, statuses: [] as string[], meter: [] as Readings[], startId: 0, stopped: false };
+  const events = {
+    boot: false, statuses: [] as string[], meter: [] as Readings[], startId: 0, stopped: false,
+  };
   let cp: ChargePoint | undefined;
   cs.on('chargePoint', (c: ChargePoint) => {
     cp = c;
-    c.on('boot', () => { events.boot = true; });
+    c.on('boot', () => {
+      events.boot = true;
+    });
     c.on('status', (s: any) => events.statuses.push(s.status));
     c.on('meterValues', (r: Readings) => events.meter.push(r));
-    c.on('startTransaction', (id: number) => { events.startId = id; });
-    c.on('stopTransaction', () => { events.stopped = true; });
+    c.on('startTransaction', (id: number) => {
+      events.startId = id;
+    });
+    c.on('stopTransaction', () => {
+      events.stopped = true;
+    });
   });
 
   const sim = new SimCharger({ url: `ws://localhost:${PORT}/${IDENTITY}`, identity: IDENTITY });

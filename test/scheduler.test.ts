@@ -13,7 +13,9 @@ function at(day: number, hh: number, mm: number): Date {
 }
 
 test('daytime window Mon-Fri 09:00-17:00', () => {
-  const s = new Scheduler([{ days: [1, 2, 3, 4, 5], start: '09:00', end: '17:00', currentA: 20 }]);
+  const s = new Scheduler([{
+    days: [1, 2, 3, 4, 5], start: '09:00', end: '17:00', currentA: 20,
+  }]);
   assert.equal(s.isActive(at(1, 10, 0)), true);
   assert.equal(s.isActive(at(1, 8, 59)), false);
   assert.equal(s.isActive(at(1, 17, 0)), false, 'end exclusive');
@@ -23,8 +25,12 @@ test('daytime window Mon-Fri 09:00-17:00', () => {
 
 test('activeBoostToCap reflects the active window, defaulting to false', () => {
   const s = new Scheduler([
-    { days: [1], start: '09:00', end: '12:00', currentA: 16, boostToCap: true },
-    { days: [1], start: '13:00', end: '17:00', currentA: 10 },
+    {
+      days: [1], start: '09:00', end: '12:00', currentA: 16, boostToCap: true,
+    },
+    {
+      days: [1], start: '13:00', end: '17:00', currentA: 10,
+    },
   ]);
   assert.equal(s.activeBoostToCap(at(1, 10, 0)), true, 'first window opted in');
   assert.equal(s.activeBoostToCap(at(1, 14, 0)), false, 'second window did not opt in');
@@ -72,13 +78,17 @@ test('no windows', () => {
 });
 
 test('disabled window is never active', () => {
-  const s = new Scheduler([{ days: [1, 2, 3, 4, 5], start: '09:00', end: '17:00', enabled: false }]);
+  const s = new Scheduler([{
+    days: [1, 2, 3, 4, 5], start: '09:00', end: '17:00', enabled: false,
+  }]);
   assert.equal(s.isActive(at(1, 10, 0)), false);
   assert.equal(s.nextBoundary(at(1, 10, 0)), undefined);
 });
 
 test('re-enabling a window makes it active again', () => {
-  const s = new Scheduler([{ days: [1], start: '09:00', end: '17:00', enabled: true }]);
+  const s = new Scheduler([{
+    days: [1], start: '09:00', end: '17:00', enabled: true,
+  }]);
   assert.equal(s.isActive(at(1, 10, 0)), true);
 });
 
@@ -115,7 +125,9 @@ test('windowsOverlap: overnight window does not overlap unrelated day', () => {
 test('findScheduleConflicts: ignores disabled windows', () => {
   const windows = [
     { days: [1], start: '09:00', end: '17:00' },
-    { days: [1], start: '10:00', end: '11:00', enabled: false },
+    {
+      days: [1], start: '10:00', end: '11:00', enabled: false,
+    },
   ];
   assert.deepEqual(findScheduleConflicts(windows), []);
 });

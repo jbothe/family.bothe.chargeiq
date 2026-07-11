@@ -302,8 +302,14 @@ export class ChargeController {
   private solarLoopConfig(): SolarLoopConfig {
     const c = this.cfg;
     return {
-      voltage: c.voltage, phases: c.phases, minAmps: c.minAmps, maxAmps: c.maxAmps,
-      deadbandA: c.deadbandA, rampA: c.rampA, minOnMs: c.minOnMs, minOffMs: c.minOffMs,
+      voltage: c.voltage,
+      phases: c.phases,
+      minAmps: c.minAmps,
+      maxAmps: c.maxAmps,
+      deadbandA: c.deadbandA,
+      rampA: c.rampA,
+      minOnMs: c.minOnMs,
+      minOffMs: c.minOffMs,
       marginW: c.marginW,
     };
   }
@@ -320,9 +326,9 @@ export class ChargeController {
     this.cp = cp;
 
     cp.on('boot', (info: BootNotificationReq) => {
-      this.host.log(`[charger] boot ${info.chargePointVendor} ${info.chargePointModel}`
-        + (info.firmwareVersion ? ` fw=${info.firmwareVersion}` : '')
-        + (info.chargePointSerialNumber ? ` sn=${info.chargePointSerialNumber}` : ''));
+      this.host.log(`[charger] boot ${info.chargePointVendor} ${info.chargePointModel}${
+        info.firmwareVersion ? ` fw=${info.firmwareVersion}` : ''
+      }${info.chargePointSerialNumber ? ` sn=${info.chargePointSerialNumber}` : ''}`);
       this.configureCharger().catch((e) => this.host.error('configureCharger', e));
     });
     cp.on('status', (i: StatusNotificationReq) => this.onStatus(i));
@@ -334,9 +340,9 @@ export class ChargeController {
       this.host.log(`[charger] authorize ${idTag} -> ${accepted ? 'accepted' : 'invalid'}`);
     });
     cp.on('dataTransfer', (payload: { vendorId?: string; messageId?: string; data?: string }) => {
-      this.host.log(`[charger] dataTransfer vendor=${payload.vendorId ?? '?'}`
-        + (payload.messageId ? ` msg=${payload.messageId}` : '')
-        + (payload.data ? ` data=${payload.data}` : ''));
+      this.host.log(`[charger] dataTransfer vendor=${payload.vendorId ?? '?'}${
+        payload.messageId ? ` msg=${payload.messageId}` : ''
+      }${payload.data ? ` data=${payload.data}` : ''}`);
     });
     cp.on('firmwareStatus', (status: string) => this.host.log(`[charger] firmware status ${status}`));
     cp.on('diagnosticsStatus', (status: string) => this.host.log(`[charger] diagnostics status ${status}`));
@@ -355,10 +361,14 @@ export class ChargeController {
   private requestFreshState(): void {
     if (!this.cp?.connected) return;
     this.cp.triggerMessage('StatusNotification', CONNECTOR_ID)
-      .then((ok) => { if (!ok) this.host.log('[charger] TriggerMessage(StatusNotification) not accepted'); })
+      .then((ok) => {
+        if (!ok) this.host.log('[charger] TriggerMessage(StatusNotification) not accepted');
+      })
       .catch((e) => this.host.log(`[charger] TriggerMessage(StatusNotification) failed: ${(e as Error).message}`));
     this.cp.triggerMessage('MeterValues', CONNECTOR_ID)
-      .then((ok) => { if (!ok) this.host.log('[charger] TriggerMessage(MeterValues) not accepted'); })
+      .then((ok) => {
+        if (!ok) this.host.log('[charger] TriggerMessage(MeterValues) not accepted');
+      })
       .catch((e) => this.host.log(`[charger] TriggerMessage(MeterValues) failed: ${(e as Error).message}`));
   }
 
@@ -382,8 +392,8 @@ export class ChargeController {
   private onStatus(info: StatusNotificationReq): void {
     const changed = info.status !== this.prevStatus;
     if (changed) {
-      this.host.log(`[charger] status ${this.prevStatus ?? '?'} -> ${info.status}`
-        + (info.errorCode && info.errorCode !== 'NoError' ? ` (${info.errorCode})` : ''));
+      this.host.log(`[charger] status ${this.prevStatus ?? '?'} -> ${info.status}${
+        info.errorCode && info.errorCode !== 'NoError' ? ` (${info.errorCode})` : ''}`);
       this.prevStatus = info.status;
     }
     this.host.setCapability('charger_status', info.status);
@@ -461,14 +471,16 @@ export class ChargeController {
   }
 
   private onMeterValues(r: Readings): void {
-    if (r.power !== undefined) { this.lastPowerW = r.power; this.host.setCapability('measure_power', r.power); }
+    if (r.power !== undefined) {
+      this.lastPowerW = r.power; this.host.setCapability('measure_power', r.power);
+    }
     if (r.current !== undefined) this.host.setCapability('measure_current', r.current);
     if (r.voltage !== undefined) this.host.setCapability('measure_voltage', r.voltage);
     if (r.energyKwh !== undefined) this.host.setCapability('meter_power', r.energyKwh);
 
     // TEMP debugging: log every MeterValues report, unthrottled (normally
     // gated to a >=100W change - see git history to restore that).
-    this.host.log(`[charger] power=${r.power !== undefined ? Math.round(r.power) + 'W' : '?'} `
+    this.host.log(`[charger] power=${r.power !== undefined ? `${Math.round(r.power)}W` : '?'} `
       + `current=${r.current ?? '?'}A voltage=${r.voltage ?? '?'}V`);
   }
 
@@ -518,9 +530,13 @@ export class ChargeController {
     this.tick(new Date(), 'manual-current');
   }
 
-  startManual(amps?: number): Promise<void> { return this.setManualCharging(true, amps); }
+  startManual(amps?: number): Promise<void> {
+    return this.setManualCharging(true, amps);
+  }
 
-  stop(): Promise<void> { return this.setManualCharging(false); }
+  stop(): Promise<void> {
+    return this.setManualCharging(false);
+  }
 
   private clearManualLatch(reason: string): void {
     if (!this.manualLatch) return;
@@ -578,13 +594,15 @@ export class ChargeController {
   onSolarSample(sample: SolarSampleInput, now: number = Date.now()): void {
     this.lastSolarSampleAt = now;
     this.solarStaleWarned = false;
-    const gridSignedW = sample.gridSignedW;
+    const { gridSignedW } = sample;
     this.lastGridSignedW = gridSignedW;
     this.lastPvW = sample.pvW ?? 0;
     this.lastBatteryW = sample.batteryW ?? 0;
     if (!this.solarLoop) return;
     const chargerPowerW = this.isDeliveringPower() ? this.lastPowerW : 0;
-    const res = this.solarLoop.evaluate({ gridSignedW, chargerPowerW, batteryW: this.lastBatteryW, now });
+    const res = this.solarLoop.evaluate({
+      gridSignedW, chargerPowerW, batteryW: this.lastBatteryW, now,
+    });
     this.lastAvailableW = Math.max(0, res.availableW);
     this.solarTargetAmps = res.target;
     this.host.setCapability('measure_solar_surplus', Math.round(this.lastAvailableW));
@@ -595,7 +613,7 @@ export class ChargeController {
     // (via tick() below) - state is SolarLoop's own hysteresis state, which
     // isn't shown anywhere else and keeps running in the background even when
     // solar isn't the active mode.
-    const f = (w?: number) => (w == null ? '?' : Math.round(w) + 'W');
+    const f = (w?: number) => (w == null ? '?' : `${Math.round(w)}W`);
     this.host.log(`[solar] solar=${f(sample.pvW)} battery=${f(sample.batteryW)} house=${f(sample.houseW)} `
       + `grid=${f(gridSignedW)} charger=${f(chargerPowerW)} excess=${Math.round(this.lastAvailableW)}W`
       + ` (state=${res.state})`);
@@ -717,15 +735,17 @@ export class ChargeController {
     // text spells that difference out rather than treating them as the same.
     if (this.solarTargetAmps == null) {
       return {
-        mode: 'solar', amps: 0,
+        mode: 'solar',
+        amps: 0,
         reason: `solar: idle (no session started yet - starts once surplus reaches ${this.cfg.minAmps}A)`,
       };
     }
     if (this.solarTargetAmps === 0) {
       const cooldownSec = Math.round(this.cfg.minOffMs / 1000);
       return {
-        mode: 'solar', amps: 0,
-        reason: `solar: paused (stopped charging - won't resume until surplus recovers `
+        mode: 'solar',
+        amps: 0,
+        reason: 'solar: paused (stopped charging - won\'t resume until surplus recovers '
           + `and the ${cooldownSec}s cooldown elapses)`,
       };
     }
@@ -802,7 +822,7 @@ export class ChargeController {
     // (not just on change) so every tick's outcome - and exactly why - is
     // visible in the log, covering every branch: uncapped, household-capped,
     // circuit-capped, or both.
-    let amps = decision.amps;
+    let { amps } = decision;
     const capNotes: string[] = [];
 
     if (amps > 0) {
@@ -810,7 +830,7 @@ export class ChargeController {
       const cap = this.householdCapAmps();
       if (cap != null && cap < amps) {
         const capped = cap < this.cfg.minAmps ? 0 : cap;
-        capNotes.push(`household cap ${this.cfg.maxHouseholdW}W -> ${capped === 0 ? 'pause' : capped + 'A'} `
+        capNotes.push(`household cap ${this.cfg.maxHouseholdW}W -> ${capped === 0 ? 'pause' : `${capped}A`} `
           + `(requested ${requested}A)`);
         amps = capped;
       } else if (cap != null) {
@@ -826,7 +846,7 @@ export class ChargeController {
       const circuitCap = this.sharedCircuitCapAmps();
       if (circuitCap != null && circuitCap < amps) {
         const capped = circuitCap < this.cfg.minAmps ? 0 : circuitCap;
-        capNotes.push(`shared circuit cap ${this.cfg.sharedCircuitA}A -> ${capped === 0 ? 'pause' : capped + 'A'} `
+        capNotes.push(`shared circuit cap ${this.cfg.sharedCircuitA}A -> ${capped === 0 ? 'pause' : `${capped}A`} `
           + `(requested ${requested}A)`);
         amps = capped;
       } else if (circuitCap != null) {
@@ -835,8 +855,8 @@ export class ChargeController {
     }
 
     const finalDesc = amps <= 0 ? 'paused' : `${amps}A`;
-    this.host.log(`[decision:${trigger}] ${decision.reason}`
-      + (capNotes.length ? ` | ${capNotes.join('; ')}` : '') + ` -> ${finalDesc}`);
+    this.host.log(`[decision:${trigger}] ${decision.reason}${
+      capNotes.length ? ` | ${capNotes.join('; ')}` : ''} -> ${finalDesc}`);
 
     this.ensureCharging(amps);
 
@@ -905,7 +925,9 @@ export class ChargeController {
           this.host.log(`[charger] start ${accepted ? 'accepted' : 'rejected'}`);
           if (!accepted) this.awaitingStart = false;
         })
-        .catch((e) => { this.awaitingStart = false; this.host.error('remoteStart', e); });
+        .catch((e) => {
+          this.awaitingStart = false; this.host.error('remoteStart', e);
+        });
     }
   }
 

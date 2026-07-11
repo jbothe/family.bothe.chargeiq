@@ -10,7 +10,7 @@ interface ChargeIQApp extends Homey.App {
 module.exports = class ChargerDriver extends Homey.Driver {
 
   async onInit() {
-    const flow = this.homey.flow;
+    const { flow } = this.homey;
 
     flow.getActionCard('start_charging')
       .registerRunListener((args: any) => args.device.flowStart(args.current));

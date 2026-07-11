@@ -147,7 +147,7 @@ export function parseMeterValues(meterValue: MeterValue[]): Readings {
       const measurand = sv.measurand ?? 'Energy.Active.Import.Register';
       const num = toNumber(sv.value);
       if (num === undefined) continue;
-      const unit = sv.unit;
+      const { unit } = sv;
 
       switch (measurand) {
         case 'Power.Active.Import': {

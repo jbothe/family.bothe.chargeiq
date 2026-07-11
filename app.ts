@@ -64,7 +64,9 @@ module.exports = class ChargeIQApp extends Homey.App {
     const tick = () => {
       try {
         this.homey.api.realtime('powerflow', this.getWidgetState());
-        if (!firstLogged) { this.log('[widget] broadcasting state via realtime'); firstLogged = true; }
+        if (!firstLogged) {
+          this.log('[widget] broadcasting state via realtime'); firstLogged = true;
+        }
       } catch (err) {
         this.error('[widget] realtime broadcast failed:', err);
       }
@@ -99,7 +101,9 @@ module.exports = class ChargeIQApp extends Homey.App {
   /** Merged state for the power-flow widget. App owns all four data points. */
   getWidgetState() {
     const solar = this.solarFeed?.getSample()
-      ?? { pvW: 0, gridSignedW: 0, batteryW: 0, houseW: 0, batterySoc: null };
+      ?? {
+        pvW: 0, gridSignedW: 0, batteryW: 0, houseW: 0, batterySoc: null,
+      };
     const dev = this.getChargerDevice();
     const cap = (id: string) => (dev && dev.hasCapability(id) ? dev.getCapabilityValue(id) : null);
     const diag = dev?.getDiagnostics?.();

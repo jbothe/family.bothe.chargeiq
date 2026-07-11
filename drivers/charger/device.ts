@@ -117,22 +117,38 @@ module.exports = class ChargerDevice extends Homey.Device {
 
   // --- Flow card entry points -------------------------------------------------
 
-  flowStart(current?: number) { return this.controller.startManual(current); }
+  flowStart(current?: number) {
+    return this.controller.startManual(current);
+  }
 
-  flowStop() { return this.controller.stop(); }
+  flowStop() {
+    return this.controller.stop();
+  }
 
-  flowSetCurrent(current: number) { return this.controller.setCurrentLimit(current); }
+  flowSetCurrent(current: number) {
+    return this.controller.setCurrentLimit(current);
+  }
 
-  flowIsCharging() { return this.controller.isCharging(); }
+  flowIsCharging() {
+    return this.controller.isCharging();
+  }
 
-  flowModeIs(mode: ChargeMode) { return this.controller.getMode() === mode; }
+  flowModeIs(mode: ChargeMode) {
+    return this.controller.getMode() === mode;
+  }
 
-  flowWithinSchedule() { return this.controller.isWithinSchedule(); }
+  flowWithinSchedule() {
+    return this.controller.isWithinSchedule();
+  }
 
   /** Used by the settings/widget editor to persist weekly windows. */
-  setSchedule(windows: ScheduleWindow[]) { return this.controller.setSchedule(windows); }
+  setSchedule(windows: ScheduleWindow[]) {
+    return this.controller.setSchedule(windows);
+  }
 
-  getSchedule() { return this.controller.getSchedule(); }
+  getSchedule() {
+    return this.controller.getSchedule();
+  }
 
   private async ensureCapabilities() {
     for (const cap of CAPABILITIES) {
@@ -155,8 +171,12 @@ module.exports = class ChargerDevice extends Homey.Device {
       ) as T,
       getStore: <T>(key: string) => this.getStoreValue(key) as T,
       setStore: (key, value) => this.setStoreValue(key, value),
-      setAvailable: () => { this.setAvailable().catch(this.error); },
-      setUnavailable: (msg) => { this.setUnavailable(msg).catch(this.error); },
+      setAvailable: () => {
+        this.setAvailable().catch(this.error);
+      },
+      setUnavailable: (msg) => {
+        this.setUnavailable(msg).catch(this.error);
+      },
       setWarning: (msg) => {
         (msg ? this.setWarning(msg) : this.unsetWarning()).catch(this.error);
       },

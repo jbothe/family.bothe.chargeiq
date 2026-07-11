@@ -31,7 +31,9 @@ function parseHHMM(s: string): number {
   return h * 60 + min;
 }
 
-const DAY_INDEX: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+const DAY_INDEX: Record<string, number> = {
+  Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6,
+};
 
 /**
  * Wall-clock day/hour/minute in `timezone` (an IANA name, e.g. "Europe/Amsterdam").
@@ -59,7 +61,7 @@ interface Interval { start: number; end: number } // minutes-of-week; end may ex
 function expandWindow(w: ScheduleWindow): Interval[] {
   const out: Interval[] = [];
   const s = parseHHMM(w.start);
-  let e = parseHHMM(w.end);
+  const e = parseHHMM(w.end);
   const overnight = e <= s;
   for (const day of w.days) {
     const start = day * MIN_PER_DAY + s;
