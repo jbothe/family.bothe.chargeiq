@@ -59,7 +59,7 @@ battery inverter on the same breaker as the charger) — `sharedCircuitA + pv �
 household cap. A schedule window can opt in to **boosting** above its `currentA` up to this cap via
 `ScheduleWindow.boostToCap` — `currentA` becomes a floor, not a fixed target, so solar (or the
 battery simply not charging as hard as assumed) can push the current higher. Battery **discharge**
-is deliberately excluded from the boost calc (`ChargeController.scheduledAmps`) even though it
+is deliberately excluded from the boost calc (`ChargeController.scheduledAmpsDetail`) even though it
 legitimately raises the safety-cap ceiling — the home battery must never fund extra EV current
 beyond the configured floor, only genuine spare circuit capacity may.
 
