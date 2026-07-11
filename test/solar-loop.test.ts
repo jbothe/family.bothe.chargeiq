@@ -44,3 +44,41 @@ test('never starts below min, clamps to max, margin reserves headroom', () => {
   const c = cfg(); c.marginW = 1000;
   assert.equal(new SolarLoop(c).evaluate({ gridSignedW: -2300, chargerPowerW: 0, now: T }).target, null);
 });
+
+test('battery discharge fully funding an apparent export is not counted as solar surplus', () => {
+  // Real-world incident: pv=520W, house(non-EV)=1118W, charger=1632W, battery
+  // discharging 2270W to cover the shortfall, leaving a 40W export. Without
+  // the battery, grid would need to import ~2230W - there is no genuine
+  // surplus here at all.
+  const l = new SolarLoop(cfg());
+  const r = l.evaluate({ gridSignedW: -40, chargerPowerW: 1632, batteryW: -2270, now: T });
+  // Raw availableW can go negative here (it's not the surplus metric itself -
+  // ChargeController floors that at 0 for the widget/capability); what matters
+  // is the resulting desiredA/target, which floors internally regardless.
+  assert.equal(r.availableW, 1632 - -40 - 2270);
+  assert.equal(r.target, null, 'never starts a session off battery-funded "surplus"');
+});
+
+test('battery discharge only cancels out its own contribution, not genuine solar export on top of it', () => {
+  const l = new SolarLoop(cfg());
+  // 3000W genuinely exported on top of a 1000W battery discharge - 2000W of
+  // that export is real solar surplus and should still be usable.
+  const r = l.evaluate({ gridSignedW: -3000, chargerPowerW: 0, batteryW: -1000, now: T });
+  assert.equal(r.availableW, 2000);
+  assert.equal(r.target, 8);
+});
+
+test('battery charging is not double-counted - the grid reading already reflects it', () => {
+  const l = new SolarLoop(cfg());
+  const withoutBattery = l.evaluate({ gridSignedW: -2300, chargerPowerW: 0, now: T });
+  const l2 = new SolarLoop(cfg());
+  const withCharging = l2.evaluate({ gridSignedW: -2300, chargerPowerW: 0, batteryW: 1500, now: T });
+  assert.equal(withCharging.availableW, withoutBattery.availableW, 'positive (charging) batteryW needs no extra adjustment');
+});
+
+test('omitting batteryW behaves exactly as before (no battery present)', () => {
+  const l = new SolarLoop(cfg());
+  const r = l.evaluate({ gridSignedW: -2300, chargerPowerW: 0, now: T });
+  assert.equal(r.availableW, 2300);
+  assert.equal(r.target, 10);
+});

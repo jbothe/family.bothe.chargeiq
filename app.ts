@@ -55,7 +55,7 @@ module.exports = class ChargeIQApp extends Homey.App {
   }
 
   /**
-   * Push merged state to the power-flow widget via realtime events every 5s.
+   * Push merged state to the power-flow widget via realtime events every 10s.
    * This is the primary widget data channel (Homey.on in the widget), avoiding
    * any dependence on widget/app API routing.
    */
@@ -122,6 +122,7 @@ module.exports = class ChargeIQApp extends Homey.App {
         limitA: (cap('charge_current_limit') as number) ?? null,
         mode: modeInfo.mode,
         status: cap('charger_status'),
+        chargingState: cap('evcharger_charging_state'),
         charging: !!cap('evcharger_charging'),
       },
     };

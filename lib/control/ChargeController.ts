@@ -77,6 +77,8 @@ interface ControllerConfig {
   marginW: number;
   solarStaleMs: number;
   maxHouseholdW: number;
+  sharedCircuitA: number;
+  sharedCircuitBufferA: number;
 }
 
 const DEFAULTS: ControllerConfig = {
@@ -94,12 +96,24 @@ const DEFAULTS: ControllerConfig = {
   marginW: 0,
   solarStaleMs: 60000,
   maxHouseholdW: 14000,
+  sharedCircuitA: 0,
+  sharedCircuitBufferA: 0,
 };
 
 const PROFILE_ID = 1;
 const STACK_LEVEL = 1;
 const CONNECTOR_ID = 1;
-const TICK_MS = 10000;
+// 15s rather than 10s: SolarEdge reports roughly every 10s, so this avoids the
+// backstop timer and solar-driven ticks routinely landing at nearly the same
+// moment under normal conditions.
+const TICK_MS = 15000;
+// Some charge points (seen on a Wallbox Pulsar Max) report a transient
+// Available as part of their own OCPP reconnect handshake, even while a
+// vehicle is still plugged in and actively charging - flipping back to the
+// real status within well under a second. Idle-reconciliation (clearing a
+// still-live transaction/manual-latch) is debounced by this long so that
+// blip can't be mistaken for a genuine idle charger.
+const IDLE_RECONCILE_DELAY_MS = 5000;
 
 /** OCPP statuses that mean a vehicle is connected. */
 const PLUGGED = ['Preparing', 'Charging', 'SuspendedEV', 'SuspendedEVSE', 'Finishing'];
@@ -182,14 +196,16 @@ export class ChargeController {
 
   private lastGridSignedW = 0;
 
-  private loggedCapAmps: number | null = null;
+  /** PV production (W) from the last solar sample, used by sharedCircuitCapAmps. */
+  private lastPvW = 0;
+
+  /** Battery power (W) from the last solar sample, charge positive / discharge negative. */
+  private lastBatteryW = 0;
 
   private prevStatus: string | null = null;
 
   /** Raw last-seen OCPP status, used to gate a new RemoteStartTransaction. */
   private lastStatusValue: OcppStatus | null = null;
-
-  private loggedPowerW = 0;
 
   private transactionId: number | null = null;
 
@@ -197,11 +213,17 @@ export class ChargeController {
 
   private awaitingStart = false;
 
+  /** Whether the last ensureCharging() call was eligible to write a profile - see there. */
+  private wasWriteEligible = false;
+
   private lastWriteAt = 0;
 
   private pendingWrite: NodeJS.Timeout | null = null;
 
   private tickTimer: NodeJS.Timeout | null = null;
+
+  /** Debounces idle-reconciliation on an Available report - see IDLE_RECONCILE_DELAY_MS. */
+  private pendingIdleReconcile: NodeJS.Timeout | null = null;
 
   constructor(host: ControllerHost, cs: CentralSystem) {
     this.host = host;
@@ -235,16 +257,16 @@ export class ChargeController {
       }
     });
 
-    this.tickTimer = setInterval(() => this.tick(), TICK_MS);
-    this.tickTimer.unref?.();
-    this.tick(); // establish initial mode capability
+    this.tick(new Date(), 'init'); // establish initial mode capability; also arms the backstop timer
   }
 
   destroy(): void {
-    if (this.tickTimer) clearInterval(this.tickTimer);
+    if (this.tickTimer) clearTimeout(this.tickTimer);
     if (this.pendingWrite) clearTimeout(this.pendingWrite);
+    if (this.pendingIdleReconcile) clearTimeout(this.pendingIdleReconcile);
     this.tickTimer = null;
     this.pendingWrite = null;
+    this.pendingIdleReconcile = null;
   }
 
   refreshConfig(): void {
@@ -264,10 +286,17 @@ export class ChargeController {
       marginW: g('marginW', DEFAULTS.marginW),
       solarStaleMs: g('solarStaleSec', DEFAULTS.solarStaleMs / 1000) * 1000,
       maxHouseholdW: g('maxHouseholdW', DEFAULTS.maxHouseholdW),
+      sharedCircuitA: g('sharedCircuitA', DEFAULTS.sharedCircuitA),
+      sharedCircuitBufferA: g('sharedCircuitBufferA', DEFAULTS.sharedCircuitBufferA),
     };
     this.solarLoop?.setConfig(this.solarLoopConfig());
     this.timezone = this.host.getTimezone?.();
     this.scheduler.setTimezone(this.timezone);
+    // Logs the full resolved config on every refresh (boot + every settings
+    // save) so a settings change can be confirmed as actually applied,
+    // rather than assumed - see the onSettings/getSetting timing gotcha in
+    // CLAUDE.md that this would otherwise mask.
+    this.host.log('[config] refreshed:', JSON.stringify(this.cfg));
   }
 
   private solarLoopConfig(): SolarLoopConfig {
@@ -320,7 +349,7 @@ export class ChargeController {
     this.requestFreshState();
 
     this.host.log(`Controller bound to ${cp.identity}`);
-    this.tick();
+    this.tick(new Date(), 'bind');
   }
 
   private requestFreshState(): void {
@@ -351,7 +380,8 @@ export class ChargeController {
   // ---------------------------------------------------------------------------
 
   private onStatus(info: StatusNotificationReq): void {
-    if (info.status !== this.prevStatus) {
+    const changed = info.status !== this.prevStatus;
+    if (changed) {
       this.host.log(`[charger] status ${this.prevStatus ?? '?'} -> ${info.status}`
         + (info.errorCode && info.errorCode !== 'NoError' ? ` (${info.errorCode})` : ''));
       this.prevStatus = info.status;
@@ -368,13 +398,22 @@ export class ChargeController {
     // from the store at boot with no real status seen yet.
     if (info.status === 'Available') {
       this.prevPlugged = false;
-      // Idle charger: reconcile any stale transaction id from before a restart.
-      if (this.transactionId != null) {
-        this.transactionId = null;
-        this.awaitingStart = false;
-        this.host.setStore('transactionId', null).catch(this.host.error);
+      // Debounced: see IDLE_RECONCILE_DELAY_MS. Don't trust a single Available
+      // report as proof a still-tracked transaction has actually ended - only
+      // clear it if not superseded by a plugged status shortly after (a
+      // same-session reconnect blip, not a real stop).
+      if (this.transactionId != null && !this.pendingIdleReconcile) {
+        this.pendingIdleReconcile = setTimeout(() => {
+          this.pendingIdleReconcile = null;
+          this.applyIdleReconciliation();
+        }, IDLE_RECONCILE_DELAY_MS);
+        this.pendingIdleReconcile.unref?.();
       }
     } else if (PLUGGED.includes(info.status)) {
+      if (this.pendingIdleReconcile) {
+        clearTimeout(this.pendingIdleReconcile);
+        this.pendingIdleReconcile = null;
+      }
       if (this.prevPlugged === false && this.manualLatch) {
         this.clearManualLatch('fresh plug-in');
       }
@@ -395,7 +434,30 @@ export class ChargeController {
       this.host.onChargingChanged?.(false);
     }
     this.lastStatusValue = info.status;
-    this.tick();
+    // Only re-resolve on an actual status change - a repeat of the same
+    // status (e.g. the real charger echoing back what bind() already
+    // replayed from cache, after requestFreshState()'s TriggerMessage) is not
+    // new information, so skip the otherwise-duplicate [decision] line.
+    if (changed) {
+      this.tick(new Date(), `status:${info.status}`);
+    }
+  }
+
+  /**
+   * Applied once an Available report has persisted for IDLE_RECONCILE_DELAY_MS
+   * without a plugged status superseding it - i.e. the charger is genuinely
+   * idle, not mid-reconnect-blip. Reconciles a transaction id left over from
+   * before an app restart, exactly as the pre-debounce code did. (prevPlugged
+   * itself is set immediately on Available, not debounced - see onStatus -
+   * only the transaction reconciliation needs this caution.)
+   */
+  private applyIdleReconciliation(): void {
+    if (this.transactionId != null) {
+      this.transactionId = null;
+      this.awaitingStart = false;
+      this.host.setStore('transactionId', null).catch(this.host.error);
+      this.host.log('[charger] reconciled a stale transaction id (idle confirmed)');
+    }
   }
 
   private onMeterValues(r: Readings): void {
@@ -404,10 +466,10 @@ export class ChargeController {
     if (r.voltage !== undefined) this.host.setCapability('measure_voltage', r.voltage);
     if (r.energyKwh !== undefined) this.host.setCapability('meter_power', r.energyKwh);
 
-    if (r.power !== undefined && Math.abs(r.power - this.loggedPowerW) >= 100) {
-      this.loggedPowerW = r.power;
-      this.host.log(`[charger] power=${Math.round(r.power)}W current=${r.current ?? '?'}A voltage=${r.voltage ?? '?'}V`);
-    }
+    // TEMP debugging: log every MeterValues report, unthrottled (normally
+    // gated to a >=100W change - see git history to restore that).
+    this.host.log(`[charger] power=${r.power !== undefined ? Math.round(r.power) + 'W' : '?'} `
+      + `current=${r.current ?? '?'}A voltage=${r.voltage ?? '?'}V`);
   }
 
   private onStartTransaction(id: number, req: StartTransactionReq): void {
@@ -444,7 +506,7 @@ export class ChargeController {
     }
     this.host.log(`[mode] manual ${on ? `charge ${this.manualLatch.amps}A` : 'off'} (holds until schedule/replug)`);
     await this.host.setStore('manualLatch', this.manualLatch);
-    this.tick();
+    this.tick(new Date(), 'manual-toggle');
   }
 
   /** Changing the current is a hands-on action: latch Manual at that current. */
@@ -453,7 +515,7 @@ export class ChargeController {
     this.manualLatch = { intent: 'charge', amps: target };
     this.host.setCapability('charge_current_limit', target);
     await this.host.setStore('manualLatch', this.manualLatch);
-    this.tick();
+    this.tick(new Date(), 'manual-current');
   }
 
   startManual(amps?: number): Promise<void> { return this.setManualCharging(true, amps); }
@@ -475,6 +537,19 @@ export class ChargeController {
     return this.transactionId != null;
   }
 
+  /**
+   * Is the charger's own reported status telling us current is actually
+   * flowing right now? Deliberately independent of `isCharging()`/
+   * `transactionId` - a charge point that never hands back a `StartTransaction`
+   * for a session it's already running (some Wallbox firmware, apparently)
+   * would otherwise leave `lastPowerW` permanently un-netted-out everywhere it
+   * matters (solar surplus calc, household cap), even while genuinely
+   * delivering power. Status is the more reliable ground truth here.
+   */
+  private isDeliveringPower(): boolean {
+    return this.lastStatusValue === 'Charging';
+  }
+
   isWithinSchedule(now: Date = new Date()): boolean {
     return this.scheduler.isActive(now);
   }
@@ -487,7 +562,7 @@ export class ChargeController {
     }
     this.scheduler.setWindows(windows);
     await this.host.setStore('schedule', windows);
-    this.tick();
+    this.tick(new Date(), 'schedule-updated');
   }
 
   getSchedule(): ScheduleWindow[] {
@@ -497,7 +572,7 @@ export class ChargeController {
   /** Directly set the solar target (A): null = stop, 0 = pause, >=min = charge. Test use. */
   setSolarTarget(amps: number | null): void {
     this.solarTargetAmps = amps;
-    this.tick();
+    this.tick(new Date(), 'test-solar-target');
   }
 
   onSolarSample(sample: SolarSampleInput, now: number = Date.now()): void {
@@ -505,22 +580,27 @@ export class ChargeController {
     this.solarStaleWarned = false;
     const gridSignedW = sample.gridSignedW;
     this.lastGridSignedW = gridSignedW;
+    this.lastPvW = sample.pvW ?? 0;
+    this.lastBatteryW = sample.batteryW ?? 0;
     if (!this.solarLoop) return;
-    const chargerPowerW = this.isCharging() ? this.lastPowerW : 0;
-    const res = this.solarLoop.evaluate({ gridSignedW, chargerPowerW, now });
+    const chargerPowerW = this.isDeliveringPower() ? this.lastPowerW : 0;
+    const res = this.solarLoop.evaluate({ gridSignedW, chargerPowerW, batteryW: this.lastBatteryW, now });
     this.lastAvailableW = Math.max(0, res.availableW);
     this.solarTargetAmps = res.target;
     this.host.setCapability('measure_solar_surplus', Math.round(this.lastAvailableW));
 
-    const tgt = res.target === null ? 'stop' : (res.target === 0 ? 'pause' : res.target + 'A');
     // TEMP debugging: log every sample, unthrottled (normally deduped on a
     // rounded-to-50W fingerprint change - see git history to restore that).
+    // The resolved target itself is left to the [decision] line that follows
+    // (via tick() below) - state is SolarLoop's own hysteresis state, which
+    // isn't shown anywhere else and keeps running in the background even when
+    // solar isn't the active mode.
     const f = (w?: number) => (w == null ? '?' : Math.round(w) + 'W');
     this.host.log(`[solar] solar=${f(sample.pvW)} battery=${f(sample.batteryW)} house=${f(sample.houseW)} `
       + `grid=${f(gridSignedW)} charger=${f(chargerPowerW)} excess=${Math.round(this.lastAvailableW)}W`
-      + ` -> ${tgt} (${res.state})`);
+      + ` (state=${res.state})`);
 
-    this.tick(new Date(now));
+    this.tick(new Date(now), 'solar');
   }
 
   private householdCapAmps(): number | null {
@@ -528,10 +608,34 @@ export class ChargeController {
     const stale = this.lastSolarSampleAt === 0
       || (Date.now() - this.lastSolarSampleAt) > this.cfg.solarStaleMs;
     if (stale) return null;
-    const chargerW = this.isCharging() ? this.lastPowerW : 0;
+    const chargerW = this.isDeliveringPower() ? this.lastPowerW : 0;
     const baseLoadW = this.lastGridSignedW - chargerW;
     const maxChargerW = this.cfg.maxHouseholdW - baseLoadW;
     return Math.floor(maxChargerW / (this.cfg.voltage * this.cfg.phases));
+  }
+
+  /**
+   * Hard ceiling for a physical circuit shared with other equipment (e.g. a
+   * home battery inverter), independent of the whole-household cap above.
+   * `sharedCircuitA + pv − battery − buffer`: PV production adds headroom,
+   * battery charging subtracts it, battery discharging adds it back (it's
+   * genuinely not drawing on the shared conductor right now) - this is a
+   * Kirchhoff's-law current sum at the shared circuit node, so it's correct
+   * to let discharge raise this ceiling even though `scheduledAmps` deliberately
+   * refuses to use that same discharge as a reason to boost above a schedule's
+   * floor (see there). Stale feed -> no extra restriction, same convention as
+   * householdCapAmps: whatever ceiling is already configured for the active
+   * mode (manual amps / schedule currentA) is trusted as the safety margin.
+   */
+  private sharedCircuitCapAmps(): number | null {
+    if (this.cfg.sharedCircuitA <= 0) return null;
+    const stale = this.lastSolarSampleAt === 0
+      || (Date.now() - this.lastSolarSampleAt) > this.cfg.solarStaleMs;
+    if (stale) return null;
+    const div = this.cfg.voltage * this.cfg.phases;
+    const pvA = this.lastPvW / div;
+    const batteryA = this.lastBatteryW / div;
+    return Math.floor(this.cfg.sharedCircuitA + pvA - batteryA - this.cfg.sharedCircuitBufferA);
   }
 
   // ---------------------------------------------------------------------------
@@ -583,24 +687,95 @@ export class ChargeController {
    * one is never worth the risk of stranding the charger.
    */
   resolve(now: Date): Decision {
+    const { mode, amps } = this.resolveDetailed(now);
+    return { mode, amps };
+  }
+
+  /**
+   * Same resolution as `resolve()`, plus a human-readable `reason` covering
+   * every branch below - this is what `tick()` logs every cycle so the log
+   * always explains why a given current was requested, before any cap is
+   * applied. Kept separate from the public `resolve()` (used directly by
+   * tests) so its return shape doesn't grow for callers that don't need it.
+   */
+  private resolveDetailed(now: Date): Decision & { reason: string } {
     if (this.manualLatch) {
-      if (this.manualLatch.intent === 'off') return { mode: 'manual', amps: 0 };
-      return { mode: 'manual', amps: this.manualLatch.amps ?? this.cfg.maxAmps };
+      if (this.manualLatch.intent === 'off') {
+        return { mode: 'manual', amps: 0, reason: 'manual: off (paused)' };
+      }
+      const amps = this.manualLatch.amps ?? this.cfg.maxAmps;
+      return { mode: 'manual', amps, reason: `manual: charging at ${amps}A` };
     }
     if (this.scheduler.isActive(now)) {
-      return { mode: 'scheduled', amps: this.scheduleOrMax(now) };
+      return { mode: 'scheduled', ...this.scheduledAmpsDetail(now) };
     }
-    // Solar is the default outside a schedule. null (never started) and 0
-    // (paused after charging) both just mean "hold at 0A".
-    if (!this.solarTargetAmps) return { mode: 'solar', amps: 0 };
-    return { mode: 'solar', amps: this.clampAmps(this.solarTargetAmps) };
+    // Solar is the default outside a schedule. null (SolarLoop's 'off' state:
+    // never started, or just reset) and 0 (its 'paused' state: was charging,
+    // backed off) both mean "hold at 0A" here, but they restart differently -
+    // 'off' can start the instant surplus is enough, while 'paused' must also
+    // wait out the min-off dwell from when it actually stopped, so the reason
+    // text spells that difference out rather than treating them as the same.
+    if (this.solarTargetAmps == null) {
+      return {
+        mode: 'solar', amps: 0,
+        reason: `solar: idle (no session started yet - starts once surplus reaches ${this.cfg.minAmps}A)`,
+      };
+    }
+    if (this.solarTargetAmps === 0) {
+      const cooldownSec = Math.round(this.cfg.minOffMs / 1000);
+      return {
+        mode: 'solar', amps: 0,
+        reason: `solar: paused (stopped charging - won't resume until surplus recovers `
+          + `and the ${cooldownSec}s cooldown elapses)`,
+      };
+    }
+    const amps = this.clampAmps(this.solarTargetAmps);
+    return { mode: 'solar', amps, reason: `solar: following surplus at ${amps}A` };
   }
 
   private scheduleOrMax(now: Date): number {
     return this.clampAmps(this.scheduler.activeCurrent(now) ?? this.cfg.maxAmps);
   }
 
-  tick(now: Date = new Date()): void {
+  /**
+   * The active schedule window's current, as a floor rather than a fixed
+   * target when the window has `boostToCap` set: if there's spare capacity on
+   * the shared circuit, raise the target up to it. Deliberately excludes
+   * battery discharge as a reason to boost - `lastBatteryW < 0` means the
+   * battery is actively servicing some load on the shared circuit right now,
+   * and the home battery must never be the thing funding extra EV current
+   * beyond the configured floor, even though sharedCircuitCapAmps() (the hard
+   * safety ceiling applied afterwards in tick()) correctly treats that same
+   * discharge as freeing up real capacity on the conductor.
+   */
+  private scheduledAmpsDetail(now: Date): { amps: number; reason: string } {
+    const floor = this.scheduleOrMax(now);
+    if (!this.scheduler.activeBoostToCap(now)) {
+      return { amps: floor, reason: `scheduled: floor ${floor}A (boost not enabled for this window)` };
+    }
+    if (this.lastBatteryW < 0) {
+      const dischargeA = Math.abs(Math.round(this.lastBatteryW / (this.cfg.voltage * this.cfg.phases)));
+      return {
+        amps: floor,
+        reason: `scheduled: floor ${floor}A (boost blocked - battery discharging ~${dischargeA}A on shared circuit)`,
+      };
+    }
+    const cap = this.sharedCircuitCapAmps();
+    if (cap == null) {
+      return { amps: floor, reason: `scheduled: floor ${floor}A (boost enabled, but shared-circuit cap unavailable)` };
+    }
+    if (cap <= floor) {
+      return { amps: floor, reason: `scheduled: floor ${floor}A (boost enabled, circuit cap ${cap}A doesn't exceed floor)` };
+    }
+    const amps = this.clampAmps(Math.max(floor, cap));
+    return {
+      amps,
+      reason: `scheduled: boosted floor ${floor}A -> ${amps}A (circuit cap ${cap}A, `
+        + `pv=${Math.round(this.lastPvW)}W battery=${Math.round(this.lastBatteryW)}W)`,
+    };
+  }
+
+  tick(now: Date = new Date(), trigger: string = 'timer'): void {
     // Clear the manual latch when a schedule window starts (rising edge).
     const inSchedule = this.scheduler.isActive(now);
     if (inSchedule && !this.wasInSchedule && this.manualLatch) {
@@ -619,27 +794,64 @@ export class ChargeController {
       this.solarLoop?.reset();
     }
 
-    const decision = this.resolve(now);
+    const decision = this.resolveDetailed(now);
     this.updateMode(decision.mode);
 
+    // Two independent hard ceilings apply on top of the decision above, in
+    // every mode. Both are logged into the same per-tick decision line below
+    // (not just on change) so every tick's outcome - and exactly why - is
+    // visible in the log, covering every branch: uncapped, household-capped,
+    // circuit-capped, or both.
     let amps = decision.amps;
+    const capNotes: string[] = [];
+
     if (amps > 0) {
+      const requested = amps;
       const cap = this.householdCapAmps();
       if (cap != null && cap < amps) {
         const capped = cap < this.cfg.minAmps ? 0 : cap;
-        if (this.loggedCapAmps !== capped) {
-          this.host.log(`[cap] household limit ${this.cfg.maxHouseholdW}W -> charger `
-            + `${capped === 0 ? 'paused' : capped + 'A'} (requested ${amps}A)`);
-          this.loggedCapAmps = capped;
-        }
+        capNotes.push(`household cap ${this.cfg.maxHouseholdW}W -> ${capped === 0 ? 'pause' : capped + 'A'} `
+          + `(requested ${requested}A)`);
         amps = capped;
-      } else if (cap != null && this.loggedCapAmps !== null) {
-        this.host.log('[cap] household limit no longer constraining');
-        this.loggedCapAmps = null;
+      } else if (cap != null) {
+        // "ceiling" is the max the charger could draw under this cap right
+        // now (baseline load already netted out) - not spare capacity above
+        // the current request, which is `cap - requested` if that's wanted.
+        capNotes.push(`household cap ok (ceiling ${cap}A >= requested ${requested}A)`);
       }
     }
 
+    if (amps > 0) {
+      const requested = amps;
+      const circuitCap = this.sharedCircuitCapAmps();
+      if (circuitCap != null && circuitCap < amps) {
+        const capped = circuitCap < this.cfg.minAmps ? 0 : circuitCap;
+        capNotes.push(`shared circuit cap ${this.cfg.sharedCircuitA}A -> ${capped === 0 ? 'pause' : capped + 'A'} `
+          + `(requested ${requested}A)`);
+        amps = capped;
+      } else if (circuitCap != null) {
+        capNotes.push(`shared circuit cap ok (ceiling ${circuitCap}A >= requested ${requested}A)`);
+      }
+    }
+
+    const finalDesc = amps <= 0 ? 'paused' : `${amps}A`;
+    this.host.log(`[decision:${trigger}] ${decision.reason}`
+      + (capNotes.length ? ` | ${capNotes.join('; ')}` : '') + ` -> ${finalDesc}`);
+
     this.ensureCharging(amps);
+
+    // Backstop: guarantee a re-resolve at least every TICK_MS even with no
+    // reactive trigger (status/solar/manual/schedule) - but every tick, from
+    // whichever source, pushes the backstop out another TICK_MS rather than
+    // firing independently on its own fixed schedule. So this is a "max once
+    // every TICK_MS from the timer" rather than "every TICK_MS regardless".
+    this.scheduleNextTick();
+  }
+
+  private scheduleNextTick(): void {
+    if (this.tickTimer) clearTimeout(this.tickTimer);
+    this.tickTimer = setTimeout(() => this.tick(new Date(), 'timer'), TICK_MS);
+    this.tickTimer.unref?.();
   }
 
   private updateMode(mode: ChargeMode): void {
@@ -656,21 +868,43 @@ export class ChargeController {
   /** amps: 0 = pause (hold 0A, keep the transaction), >0 = charge at that current. */
   private ensureCharging(amps: number): void {
     const target = amps <= 0 ? 0 : this.clampAmps(amps);
-    if (this.desiredAmps !== target) {
+    // Genuinely plugged in and mid-session from the charger's own point of
+    // view, whether or not *we* hold a transaction id for it.
+    const plugged = this.lastStatusValue != null && PLUGGED.includes(this.lastStatusValue)
+      && this.lastStatusValue !== 'Finishing';
+    // TxProfile once a transaction id is known, or TxDefaultProfile whenever
+    // the charger is visibly plugged in even without one - some charge points
+    // never hand back a StartTransaction for a session they're already
+    // running (observed on real hardware: a redundant RemoteStartTransaction
+    // while already Charging gets rejected outright), which would otherwise
+    // leave the app permanently unable to adjust the current for that entire
+    // session.
+    const eligible = this.transactionId != null || plugged;
+    const ampsChanged = this.desiredAmps !== target;
+    if (ampsChanged) {
       this.desiredAmps = target;
       if (target > 0) this.host.setCapability('charge_current_limit', target);
-      if (this.transactionId != null) this.scheduleWrite();
     }
-    // Don't attempt a new session while the charger is still winding down a
-    // finished one (Finishing) - the EV won't accept it until unplug/replug.
-    // Also wait for a real status before acting, so a transactionId restored
-    // from the store at boot can't drive commands before it's confirmed live.
+    // Also write on becoming newly eligible even if the target didn't change
+    // across that transition (e.g. the charger only just reported a plugged
+    // status) - otherwise a target that happens not to move at that exact
+    // moment would never actually reach the charger.
+    if (eligible && (ampsChanged || !this.wasWriteEligible)) this.scheduleWrite();
+    this.wasWriteEligible = eligible;
+    // Only attempt a fresh start while the charger is genuinely waiting for
+    // one (Preparing: cable connected, no session yet) - not once a session
+    // already appears underway (Charging/SuspendedEV/SuspendedEVSE), which
+    // has been observed to just get rejected, and which TxDefaultProfile
+    // above already covers for adjusting the current anyway.
     if (target > 0 && this.transactionId == null && !this.awaitingStart
-      && this.lastStatusValue != null && this.lastStatusValue !== 'Finishing' && this.cp?.connected) {
+      && this.lastStatusValue === 'Preparing' && this.cp?.connected) {
       this.awaitingStart = true;
       this.host.log(`[charger] requesting start (${target}A)`);
       this.cp.remoteStartTransaction(this.cfg.idTag, CONNECTOR_ID)
-        .then((accepted) => { if (!accepted) this.awaitingStart = false; })
+        .then((accepted) => {
+          this.host.log(`[charger] start ${accepted ? 'accepted' : 'rejected'}`);
+          if (!accepted) this.awaitingStart = false;
+        })
         .catch((e) => { this.awaitingStart = false; this.host.error('remoteStart', e); });
     }
   }
@@ -701,8 +935,10 @@ export class ChargeController {
   private async writeProfile(): Promise<void> {
     if (!this.cp?.connected || this.desiredAmps == null) return;
     this.lastWriteAt = Date.now();
+    const kind = this.transactionId != null ? `TxProfile tx=${this.transactionId}` : 'TxDefaultProfile';
+    this.host.log(`[charger] setting profile: ${this.desiredAmps}A (${kind})`);
     try {
-      await this.cp.setChargingProfile({
+      const accepted = await this.cp.setChargingProfile({
         limitAmps: this.desiredAmps,
         connectorId: CONNECTOR_ID,
         transactionId: this.transactionId ?? undefined,
@@ -710,6 +946,7 @@ export class ChargeController {
         chargingProfileId: PROFILE_ID,
         stackLevel: STACK_LEVEL,
       });
+      this.host.log(`[charger] profile ${accepted ? 'accepted' : 'rejected'}`);
     } catch (err) {
       this.host.error('SetChargingProfile failed:', (err as Error).message);
     }

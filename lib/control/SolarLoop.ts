@@ -24,6 +24,14 @@ export interface SolarInput {
   gridSignedW: number;
   /** Present charger draw (W) — already included in the grid reading. */
   chargerPowerW: number;
+  /**
+   * Battery power, charge positive / discharge negative (W). Optional - a
+   * feed without a battery just omits it. Discharge is subtracted back out
+   * of the surplus calc below (see evaluate()) - the home battery must never
+   * be mistaken for solar surplus, matching the same principle already
+   * applied to the schedule-boost feature (ChargeController.scheduledAmpsDetail).
+   */
+  batteryW?: number;
   now: number;
 }
 
@@ -81,7 +89,13 @@ export class SolarLoop {
     // Power available to the car = what it already draws, minus the net grid flow
     // (export is negative grid so it adds capacity; import is positive so it subtracts),
     // minus a reserve margin. This works whether the meter is importing or exporting.
-    const availableW = input.chargerPowerW - input.gridSignedW - marginW;
+    // Battery discharge is subtracted back out: the grid meter alone can't tell real
+    // PV export apart from the battery propping up that same export, so left in, a
+    // discharging battery would get mistaken for solar surplus and fund EV charging
+    // (the same failure mode the shared-circuit boost feature avoids by using the
+    // real battery/pv readings instead of a grid-based proxy).
+    const batteryDischargeW = Math.max(0, -(input.batteryW ?? 0));
+    const availableW = input.chargerPowerW - input.gridSignedW - marginW - batteryDischargeW;
     // Floor to bias toward slight export rather than import.
     const desiredA = Math.max(0, Math.min(this.cfg.maxAmps, Math.floor(availableW / (voltage * phases))));
     const enough = desiredA >= minAmps;

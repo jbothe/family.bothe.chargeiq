@@ -33,6 +33,16 @@ module.exports = class ChargerDevice extends Homey.Device {
 
   private lastSolarSample: SolarSample | null = null;
 
+  /**
+   * Homey's onSettings hook fires *before* the new values are actually
+   * persisted - this.getSetting() during that call still returns the OLD
+   * settings, so refreshConfig() would silently read one generation stale.
+   * newSettings (the full, fresh settings object) is cached here for the
+   * duration of that one refresh so buildHost().getSetting sees the values
+   * that were just saved, not the ones about to be replaced.
+   */
+  private pendingSettings: Record<string, boolean | string | number | undefined | null> | null = null;
+
   async onInit() {
     await this.ensureCapabilities();
 
@@ -70,8 +80,17 @@ module.exports = class ChargerDevice extends Homey.Device {
     this.log(`ChargerDevice ${this.getData().id} initialised`);
   }
 
-  async onSettings() {
-    this.controller?.refreshConfig();
+  async onSettings({ newSettings }: {
+    oldSettings: { [key: string]: boolean | string | number | undefined | null };
+    newSettings: { [key: string]: boolean | string | number | undefined | null };
+    changedKeys: string[];
+  }) {
+    this.pendingSettings = newSettings;
+    try {
+      this.controller?.refreshConfig();
+    } finally {
+      this.pendingSettings = null;
+    }
   }
 
   async onDeleted() {
@@ -131,7 +150,9 @@ module.exports = class ChargerDevice extends Homey.Device {
       setCapability: (cap, value) => {
         if (this.hasCapability(cap)) this.setCapabilityValue(cap, value as any).catch(this.error);
       },
-      getSetting: <T>(key: string) => this.getSetting(key) as T,
+      getSetting: <T>(key: string) => (
+        this.pendingSettings && key in this.pendingSettings ? this.pendingSettings[key] : this.getSetting(key)
+      ) as T,
       getStore: <T>(key: string) => this.getStoreValue(key) as T,
       setStore: (key, value) => this.setStoreValue(key, value),
       setAvailable: () => { this.setAvailable().catch(this.error); },
