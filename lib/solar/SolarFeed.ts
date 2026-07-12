@@ -11,12 +11,12 @@ const SOLAREDGE_APP = 'bothe.family.solaredge';
 type Role = 'inverter' | 'meter' | 'battery';
 
 /** Handle returned by makeCapabilityInstance(), used only to unsubscribe. */
-interface CapabilityInstance {
+export interface CapabilityInstance {
   destroy?(): Promise<void> | void;
 }
 
 /** Minimal shape of a homey-api device this file reads from. */
-interface HomeyApiDevice {
+export interface HomeyApiDevice {
   driverId?: string;
   capabilities?: string[];
   capabilitiesObj?: {
@@ -27,7 +27,7 @@ interface HomeyApiDevice {
 }
 
 /** Minimal shape of the homey-api client (HomeyAPI.createAppAPI()'s return value) we rely on. */
-interface HomeyApiClient {
+export interface HomeyApiClient {
   devices: { getDevices(): Promise<Record<string, HomeyApiDevice>> };
 }
 
@@ -91,14 +91,20 @@ export class SolarFeed extends EventEmitter {
 
   private log: (...a: unknown[]) => void;
 
-  constructor(homey: unknown, logger?: (...a: unknown[]) => void) {
+  /**
+   * @param apiOverride Skips the real HomeyAPI.createAppAPI() call in start()
+   * - lets tests exercise discover()'s actual matching/subscription logic
+   * against a fake client without needing the Homey runtime.
+   */
+  constructor(homey: unknown, logger?: (...a: unknown[]) => void, apiOverride?: HomeyApiClient) {
     super();
     this.homey = homey;
     this.log = logger ?? (() => { /* noop */ });
+    this.api = apiOverride ?? null;
   }
 
   async start(): Promise<void> {
-    this.api = await HomeyAPI.createAppAPI({ homey: this.homey });
+    if (!this.api) this.api = await HomeyAPI.createAppAPI({ homey: this.homey });
     await this.discover();
   }
 
