@@ -1061,3 +1061,229 @@ test('a transactionId restored from store at boot is never hard-stopped, confirm
   assert.ok(!calls.includes('RemoteStopTransaction'),
     'still no hard stop once a real status confirms the charger is live - pause only, never end the transaction');
 });
+
+// ---------------------------------------------------------------------------
+// onStartTransaction / onStopTransaction bookkeeping
+// ---------------------------------------------------------------------------
+
+test('onStartTransaction persists the transaction id/meter start, flips the capability, and writes a pending target', async () => {
+  const calls: string[] = [];
+  const fakeClient: RpcClient = {
+    identity: 'X',
+    handle: () => {},
+    call: async (method: string) => {
+      calls.push(method); return { status: 'Accepted' };
+    },
+    close: async () => {},
+    on: () => {},
+  };
+  const cp = new ChargePoint({ identity: 'X', authorize: () => true, nextTransactionId: () => 1 });
+  cp.attach(fakeClient);
+
+  const store: Record<string, unknown> = { schedule: [] };
+  const settings: Record<string, unknown> = {
+    minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdW: 14000, writeThrottleMs: 0,
+  };
+  const caps: Record<string, unknown> = {};
+  const chargingChanged: boolean[] = [];
+  const host: ControllerHost = {
+    identity: 'X',
+    setCapability: (k, v) => {
+      caps[k] = v;
+    },
+    getSetting: <T>(k: string) => settings[k] as T,
+    getStore: <T>(k: string) => store[k] as T,
+    setStore: async (k, v) => {
+      store[k] = v;
+    },
+    setAvailable: () => {},
+    setUnavailable: () => {},
+    setWarning: () => {},
+    log: () => {},
+    error: () => {},
+    onChargingChanged: (charging) => chargingChanged.push(charging),
+  };
+  const cs = { getChargePoint: () => cp, on: () => {} } as unknown as CentralSystem;
+  const c = new ChargeController(host, cs);
+  c.init();
+  await c.startManual(16); // sets desiredAmps, but not yet eligible to write (no transaction id, not plugged)
+  calls.length = 0;
+
+  cp.emit('startTransaction', 42, {
+    connectorId: 1, idTag: 'TAG', meterStart: 100, timestamp: new Date().toISOString(),
+  });
+
+  assert.equal(store.transactionId, 42);
+  assert.equal(store.meterStartWh, 100);
+  assert.equal(caps.evcharger_charging, true);
+  assert.deepEqual(chargingChanged, [true]);
+  assert.ok(c.isCharging());
+  assert.ok(calls.includes('SetChargingProfile'),
+    'a known desiredAmps writes immediately once a transaction id is finally granted');
+});
+
+test('onStopTransaction clears the transaction id and flips the charging capability off', () => {
+  const fakeClient: RpcClient = {
+    identity: 'X', handle: () => {}, call: async () => ({ status: 'Accepted' }), close: async () => {}, on: () => {},
+  };
+  const cp = new ChargePoint({ identity: 'X', authorize: () => true, nextTransactionId: () => 1 });
+  cp.attach(fakeClient);
+
+  const store: Record<string, unknown> = { schedule: [], transactionId: 42 };
+  const settings: Record<string, unknown> = {
+    minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdW: 14000,
+  };
+  const caps: Record<string, unknown> = {};
+  const chargingChanged: boolean[] = [];
+  const host: ControllerHost = {
+    identity: 'X',
+    setCapability: (k, v) => {
+      caps[k] = v;
+    },
+    getSetting: <T>(k: string) => settings[k] as T,
+    getStore: <T>(k: string) => store[k] as T,
+    setStore: async (k, v) => {
+      store[k] = v;
+    },
+    setAvailable: () => {},
+    setUnavailable: () => {},
+    setWarning: () => {},
+    log: () => {},
+    error: () => {},
+    onChargingChanged: (charging) => chargingChanged.push(charging),
+  };
+  const cs = { getChargePoint: () => cp, on: () => {} } as unknown as CentralSystem;
+  const c = new ChargeController(host, cs);
+  c.init();
+  assert.ok(c.isCharging(), 'transaction id restored from store on init');
+
+  cp.emit('stopTransaction', {
+    transactionId: 42, meterStop: 500, timestamp: new Date().toISOString(), reason: 'Local',
+  });
+
+  assert.equal(store.transactionId, null);
+  assert.equal(caps.evcharger_charging, false);
+  assert.deepEqual(chargingChanged, [false]);
+  assert.ok(!c.isCharging());
+});
+
+// ---------------------------------------------------------------------------
+// Mid-session solar feed staleness (tick()'s fail-safe, distinct from the
+// cap formulas' own "never arrived" staleness check)
+// ---------------------------------------------------------------------------
+
+test('a mid-session solar feed staleness pauses solar charging exactly once (deduped log)', () => {
+  const { c, logs } = makeController([]);
+  const start = Date.now();
+  c.onSolarSample({ gridSignedW: -3000, pvW: 3000, batteryW: 0 }, start);
+  assert.equal(c.resolve(new Date(start)).mode, 'solar');
+  assert.ok((c.resolve(new Date(start)).amps ?? 0) > 0, 'solar is actively charging from a live sample');
+  logs.length = 0;
+
+  // Advance well past the default 60s solarStaleMs without another sample.
+  const later = new Date(start + 70000);
+  c.tick(later);
+  assert.deepEqual(c.resolve(later), { mode: 'solar', amps: 0 }, 'fails safe to paused once the feed goes stale mid-session');
+  assert.equal(logs.filter((l) => l.includes('Solar feed stale')).length, 1);
+
+  c.tick(new Date(start + 80000)); // still stale
+  assert.equal(logs.filter((l) => l.includes('Solar feed stale')).length, 1,
+    'the stale warning is not repeated on every subsequent tick');
+});
+
+test('a fresh solar sample clears the stale warning latch, so a later re-staling logs again', () => {
+  const { c, logs } = makeController([]);
+  const start = Date.now();
+  c.onSolarSample({ gridSignedW: -3000, pvW: 3000, batteryW: 0 }, start);
+  c.tick(new Date(start + 70000));
+  assert.equal(logs.filter((l) => l.includes('Solar feed stale')).length, 1);
+
+  c.onSolarSample({ gridSignedW: -3000, pvW: 3000, batteryW: 0 }, start + 70000);
+  logs.length = 0;
+  c.tick(new Date(start + 140000));
+  assert.equal(logs.filter((l) => l.includes('Solar feed stale')).length, 1, 'a fresh sample re-arms the warning');
+});
+
+// ---------------------------------------------------------------------------
+// getModeInfo() / getDiagnostics()
+// ---------------------------------------------------------------------------
+
+test('getModeInfo() detail text for manual mode: charging vs stopped', async () => {
+  const { c } = makeController([]);
+  await c.startManual(16);
+  assert.deepEqual(c.getModeInfo(), { mode: 'manual', detail: 'charging' });
+
+  await c.stop();
+  assert.deepEqual(c.getModeInfo(), { mode: 'manual', detail: 'stopped' });
+});
+
+test('getModeInfo() detail text for manual mode appends the next schedule start time when one exists', async () => {
+  const { c } = makeController(SCHED);
+  await c.startManual(10);
+  const { detail } = c.getModeInfo();
+  assert.ok(detail.startsWith('charging · schedule '), `expected a schedule suffix, got: ${detail}`);
+});
+
+test('getModeInfo() detail text for scheduled mode shows the window end time', () => {
+  // All-day, every-day window so this isn't tied to exactly when the test happens to run.
+  const allDay: ScheduleWindow[] = [{
+    days: [0, 1, 2, 3, 4, 5, 6], start: '00:00', end: '23:59', currentA: 16,
+  }];
+  const { c } = makeController(allDay);
+  c.tick();
+  const info = c.getModeInfo();
+  assert.equal(info.mode, 'scheduled');
+  assert.match(info.detail, /^until \d{1,2}:\d{2}/, `expected an end time, got: ${info.detail}`);
+});
+
+test('getModeInfo() detail text for solar mode: charging / paused / idle', () => {
+  const { c } = makeController([]);
+  c.setSolarTarget(10);
+  assert.deepEqual(c.getModeInfo(), { mode: 'solar', detail: 'charging 10A' });
+
+  c.setSolarTarget(0);
+  assert.deepEqual(c.getModeInfo(), { mode: 'solar', detail: 'paused (low excess)' });
+
+  c.setSolarTarget(null);
+  assert.deepEqual(c.getModeInfo(), { mode: 'solar', detail: 'idle (low excess)' });
+});
+
+test('getDiagnostics() reflects the live solar loop state, target, and available surplus', () => {
+  const { c } = makeController([]);
+  c.onSolarSample({ gridSignedW: -2300, pvW: 2300, batteryW: 0 });
+  const diag = c.getDiagnostics();
+  assert.equal(diag.mode, 'solar');
+  assert.equal(diag.targetA, 10);
+  assert.equal(diag.solarState, 'charging');
+  assert.equal(diag.availableW, 2300);
+});
+
+// ---------------------------------------------------------------------------
+// destroy()
+// ---------------------------------------------------------------------------
+
+test('destroy() clears every timer it scheduled', () => {
+  const realSetTimeout = global.setTimeout;
+  const realClearTimeout = global.clearTimeout;
+  const scheduled = new Set<NodeJS.Timeout>();
+  const cleared = new Set<NodeJS.Timeout>();
+  global.setTimeout = ((fn: (...args: unknown[]) => void, ms?: number) => {
+    const handle = realSetTimeout(fn, ms);
+    scheduled.add(handle);
+    return handle;
+  }) as typeof setTimeout;
+  global.clearTimeout = ((handle: NodeJS.Timeout) => {
+    cleared.add(handle);
+    realClearTimeout(handle);
+  }) as typeof clearTimeout;
+
+  try {
+    const { c } = makeController([]); // init() arms the backstop timer
+    c.destroy();
+    assert.ok(scheduled.size >= 1, 'at least the backstop timer was scheduled');
+    scheduled.forEach((h) => assert.ok(cleared.has(h), 'every scheduled timer was cleared by destroy()'));
+  } finally {
+    global.setTimeout = realSetTimeout;
+    global.clearTimeout = realClearTimeout;
+  }
+});
