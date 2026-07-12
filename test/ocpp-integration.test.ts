@@ -47,6 +47,8 @@ test('OCPP 1.6J: connect, boot, transaction, MeterValues, commands', async () =>
     await sleep(80);
     assert.ok(cp, 'charge point registered');
     assert.ok(cs.listIdentities().includes(IDENTITY));
+    assert.equal(cs.getChargePoint(IDENTITY), cp);
+    assert.equal(cs.getChargePoint('NOT-CONNECTED'), undefined);
 
     const boot = await sim.boot();
     await sleep(40);
