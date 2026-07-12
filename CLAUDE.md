@@ -169,9 +169,16 @@ dims (`.stale`) after ~50 s (5 missed 10s broadcasts) without a realtime update 
 
 ## Testing
 Pure logic is unit-tested (`SolarLoop`, `Scheduler`, controller mode/latch/cap resolution, solar
-merge, widget presentation). `test/sim-charger.ts` is an `ocpp-rpc` `RPCClient` simulator used by
-`test/ocpp-integration.test.ts` to exercise the real CentralSystem end-to-end without hardware.
-Controllers/CentralSystem are Homey-independent (host is an interface), so they run in plain Node.
+merge, widget presentation, `parseMeterValues()`). `test/sim-charger.ts` is an `ocpp-rpc` `RPCClient`
+simulator used by `test/ocpp-integration.test.ts` to exercise the real CentralSystem end-to-end
+without hardware. Controllers/CentralSystem are Homey-independent (host is an interface), so they run
+in plain Node. Two other classes that wrap an external API are made testable the same way, via a
+constructor-injected fake rather than mocking the module: `SolarFeed` takes an optional `apiOverride`
+(`HomeyApiClient`) so `discover()`'s matching/subscription logic runs against a fake device set
+instead of the real `HomeyAPI.createAppAPI()`; `ChargePoint`'s inbound OCPP handlers are exercised via
+a `FakeRpcClient` (`test/charge-point.test.ts`) that captures whatever `attach()` registers via
+`handle()`, so a test can dispatch a synthetic inbound call directly without a real WebSocket round
+trip - complementary to, not a replacement for, the full `ocpp-integration.test.ts` coverage.
 When adding behaviour, prefer a pure function + a node:test over needing the Homey runtime.
 
 ## Not yet verified on hardware
