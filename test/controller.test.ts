@@ -517,6 +517,105 @@ test('the solar surplus calc sees the charger\'s real power once Charging, even 
   assert.equal(caps.measure_solar_surplus, 1000, 'charger power is credited even without a known transaction id');
 });
 
+test('household cap is unavailable, not a guessed-low value, while Charging with no MeterValues yet this connection', async () => {
+  // Mirrors a real restart-onto-an-already-charging-session log: status
+  // flips to Charging (from a persisted transaction id / fresh reconnect)
+  // before any MeterValues has come back on this connection - a fresh
+  // ChargePoint instance has no cached reading to replay, and the triggered
+  // MeterValues round trip takes a few real seconds. Netting out 0W for the
+  // charger's own (unknown) draw would understate headroom and needlessly
+  // throttle an already-fine session.
+  const fakeClient: RpcClient = {
+    identity: 'X', handle: () => {}, call: async () => ({ status: 'Accepted' }), close: async () => {}, on: () => {},
+  };
+  const cp = new ChargePoint({ identity: 'X', authorize: () => true, nextTransactionId: () => 1 });
+  cp.attach(fakeClient);
+
+  const store: Record<string, unknown> = { schedule: [] };
+  const settings: Record<string, unknown> = {
+    minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdW: 14200,
+  };
+  const caps: Record<string, unknown> = {};
+  const host: ControllerHost = {
+    identity: 'X',
+    setCapability: (k, v) => {
+      caps[k] = v;
+    },
+    getSetting: <T>(k: string) => settings[k] as T,
+    getStore: <T>(k: string) => store[k] as T,
+    setStore: async (k, v) => {
+      store[k] = v;
+    },
+    setAvailable: () => {},
+    setUnavailable: () => {},
+    setWarning: () => {},
+    log: () => {},
+    error: () => {},
+  };
+  const cs = { getChargePoint: () => cp, on: () => {} } as unknown as CentralSystem;
+  const c = new ChargeController(host, cs);
+  c.init();
+  await c.startManual(31);
+  cp.emit('status', { connectorId: 1, errorCode: 'NoError', status: 'Charging' }); // no meterValues emitted yet
+
+  // If chargerW were wrongly netted as 0: baseLoadW = 11150, maxChargerW = 14200-11150 = 3050 -> 13A.
+  // The fix instead leaves the cap unavailable (trusts the configured 31A ceiling).
+  c.onSolarSample({ gridSignedW: 11150, pvW: 0, batteryW: 0 });
+  assert.equal(caps.charge_current_limit, 31,
+    'household cap is skipped (not guessed at 13A) until a real MeterValues reading arrives');
+
+  cp.emit('meterValues', { power: 3550 });
+  // Now netted correctly: baseLoadW = 11150-3550 = 7600. Tighten maxHouseholdW so the cap is
+  // provably live and binding again (not just "no longer stale"): maxChargerW = 11050-7600 = 3450 ->
+  // floor(3450/230) = 15A, below the 31A manual target.
+  settings.maxHouseholdW = 11050;
+  c.refreshConfig();
+  c.onSolarSample({ gridSignedW: 11150, pvW: 0, batteryW: 0 });
+  assert.equal(caps.charge_current_limit, 15, 'the cap is live again and binding once a real reading is known');
+});
+
+test('solar surplus evaluation is skipped, not zeroed, while Charging with no MeterValues yet this connection', () => {
+  const fakeClient: RpcClient = {
+    identity: 'X', handle: () => {}, call: async () => ({ status: 'Accepted' }), close: async () => {}, on: () => {},
+  };
+  const cp = new ChargePoint({ identity: 'X', authorize: () => true, nextTransactionId: () => 1 });
+  cp.attach(fakeClient);
+
+  const store: Record<string, unknown> = { schedule: [] };
+  const settings: Record<string, unknown> = {
+    minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdW: 14000,
+  };
+  const caps: Record<string, unknown> = {};
+  const logs: string[] = [];
+  const host: ControllerHost = {
+    identity: 'X',
+    setCapability: (k, v) => {
+      caps[k] = v;
+    },
+    getSetting: <T>(k: string) => settings[k] as T,
+    getStore: <T>(k: string) => store[k] as T,
+    setStore: async (k, v) => {
+      store[k] = v;
+    },
+    setAvailable: () => {},
+    setUnavailable: () => {},
+    setWarning: () => {},
+    log: (...a) => {
+      logs.push(a.join(' '));
+    },
+    error: () => {},
+  };
+  const cs = { getChargePoint: () => cp, on: () => {} } as unknown as CentralSystem;
+  const c = new ChargeController(host, cs);
+  c.init();
+  cp.emit('status', { connectorId: 1, errorCode: 'NoError', status: 'Charging' }); // no meterValues emitted yet
+
+  c.onSolarSample({ gridSignedW: 2000, pvW: 0, batteryW: 0 });
+  assert.equal(caps.measure_solar_surplus, undefined,
+    'surplus is left untouched (not overwritten with a wrong 0-charger-power figure) while unknown');
+  assert.ok(logs.some((l) => l.includes('no MeterValues yet this connection')), 'the gap is visible in the log');
+});
+
 test('profile writes reach the charger (TxDefaultProfile) even without a known transaction id, once Charging', async () => {
   const calls: string[] = [];
   const fakeClient: RpcClient = {

@@ -110,6 +110,17 @@ beyond the configured floor, only genuine spare circuit capacity may.
   === 'Charging'`) is used instead everywhere `chargerPowerW`/`lastPowerW` needs netting out (solar
   surplus calc, household cap) - otherwise the charger's own draw reads as 0 forever in exactly the
   same stuck-transactionId scenario, making household-cap headroom look far tighter than reality.
+  **`lastPowerW` itself defaults to `null` ("no `MeterValues` yet this connection"), not `0`** - found
+  via a real restart-onto-an-already-charging-session log: a fresh `ChargePoint` instance has no
+  cached reading to replay on `bind()`, so for the few real seconds until the triggered-`MeterValues`
+  round trip returns, `isDeliveringPower()` can be `true` with no reading yet at all. Netting that gap
+  as `0` (confirmed-zero) rather than unknown makes the exact same "charger's draw reads as 0" mistake
+  the paragraph above describes, just via a different path - `nettedChargerW()` returns `null` for
+  this genuinely-unknown case, and both call sites treat `null` as "don't guess": `householdCapAmps()`
+  returns `null` (cap unavailable, trust the configured ceiling - the existing convention for stale
+  data) and `onSolarSample()` skips that sample's surplus evaluation entirely (leaving
+  `solarTargetAmps`/`measure_solar_surplus` as they were) rather than crediting/debiting an unknown
+  amount - both self-resolve within moments once a real reading lands.
 - **The controller never issues `RemoteStopTransaction`.** Every "don't charge" decision (manual
   off, no schedule/solar target, stale solar feed, disconnected latch) resolves to `amps: 0` (pause)
   in `ChargeController.resolve()`/`tick()`, never a hard stop. The Wallbox holds `Finishing` until a

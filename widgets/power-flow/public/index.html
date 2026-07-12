@@ -64,8 +64,12 @@
              position: absolute; top: 0; }
     .hcol.ev .hicon { left: 25%; transform: translateX(-50%); }
     .hcol.solar .hicon { left: 75%; transform: translateX(-50%); }
+    /* height is pinned to the value row's own line height (not the val+lbl block's combined
+       height) so translateY(-50%) centers .val itself at top:20px — the label just flows
+       below, uncentered. .mode-stack mirrors this exactly so its first row (icon+amps) lands
+       on the same y as .val regardless of how tall the CHARGING/READY/UNPLUGGED chip is. */
     .htext { display: flex; flex-direction: column; gap: 1px;
-              position: absolute; top: 20px; transform: translateY(-50%); }
+              position: absolute; top: 20px; height: 19px; transform: translateY(-50%); }
     .hcol.ev .htext { right: calc(75% + 30px); align-items: flex-end; text-align: right; }
     .hcol.solar .htext { left: calc(75% + 30px); align-items: flex-start; text-align: left; }
 
@@ -93,7 +97,7 @@
     /* Mode icon + EV status chip, stacked to the right of the EV icon. Anchored at the same
        top/transform as .htext so the icon lines up with the power value's baseline band on
        the other side, and the chip lines up with that side's label. */
-    .mode-stack { position: absolute; left: 100%; top: 20px; transform: translateY(-50%); margin-left: 6px;
+    .mode-stack { position: absolute; left: 100%; top: 20px; height: 19px; transform: translateY(-50%); margin-left: 6px;
                   display: flex; flex-direction: column; align-items: flex-start; gap: 2px; }
     .mode-row { display: flex; align-items: center; gap: 4px; }
     .mode-icon { width: 17px; height: 17px; color: var(--text); }

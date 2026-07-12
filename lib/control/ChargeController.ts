@@ -190,7 +190,8 @@ export class ChargeController {
 
   private solarStaleWarned = false;
 
-  private lastPowerW = 0;
+  /** null until the first MeterValues this connection - see nettedChargerW(). */
+  private lastPowerW: number | null = null;
 
   private lastAvailableW = 0;
 
@@ -572,6 +573,24 @@ export class ChargeController {
     return this.lastStatusValue === 'Charging';
   }
 
+  /**
+   * The charger's own draw (W) to net out of grid-based calcs (solar surplus,
+   * household cap) - 0 when confirmed not delivering, the last MeterValues
+   * reading when delivering and known, or null when delivering but genuinely
+   * unknown (e.g. right after an app restart/reconnect onto an already-live
+   * session, before the first MeterValues has come back - confirmed on real
+   * hardware to take a few seconds via the triggered-MeterValues round trip,
+   * since a fresh ChargePoint instance has no cached reading to replay).
+   * Callers must NOT default a null result to 0 - that's the bug this exists
+   * to prevent: it would treat the charger's own draw as competing
+   * "other" household/grid load, understating available headroom right when
+   * a session is already mid-charge, rather than honestly reporting unknown.
+   */
+  private nettedChargerW(): number | null {
+    if (!this.isDeliveringPower()) return 0;
+    return this.lastPowerW;
+  }
+
   isWithinSchedule(now: Date = new Date()): boolean {
     return this.scheduler.isActive(now);
   }
@@ -605,7 +624,18 @@ export class ChargeController {
     this.lastPvW = sample.pvW ?? 0;
     this.lastBatteryW = sample.batteryW ?? 0;
     if (!this.solarLoop) return;
-    const chargerPowerW = this.isDeliveringPower() ? this.lastPowerW : 0;
+    const chargerPowerW = this.nettedChargerW();
+    if (chargerPowerW == null) {
+      // Charging but no MeterValues yet this connection - can't net the
+      // charger's own draw out of the grid reading, so skip this sample's
+      // surplus evaluation rather than crediting/debiting an unknown amount.
+      // solarTargetAmps/lastAvailableW are left as they were; the next
+      // sample (moments away, given the ~10s cadence) resolves this once a
+      // real reading lands.
+      this.host.log('[solar] charger reports Charging but no MeterValues yet this connection - skipping evaluation');
+      this.tick(new Date(now), 'solar');
+      return;
+    }
     const res = this.solarLoop.evaluate({
       gridSignedW, chargerPowerW, batteryW: this.lastBatteryW, now,
     });
@@ -632,7 +662,11 @@ export class ChargeController {
     const stale = this.lastSolarSampleAt === 0
       || (Date.now() - this.lastSolarSampleAt) > this.cfg.solarStaleMs;
     if (stale) return null;
-    const chargerW = this.isDeliveringPower() ? this.lastPowerW : 0;
+    const chargerW = this.nettedChargerW();
+    // Charging but no MeterValues yet this connection: same "don't guess"
+    // gap as onSolarSample - trust the configured ceiling rather than netting
+    // out 0 and understating headroom by the charger's own (unknown) draw.
+    if (chargerW == null) return null;
     const baseLoadW = this.lastGridSignedW - chargerW;
     const maxChargerW = this.cfg.maxHouseholdW - baseLoadW;
     return Math.floor(maxChargerW / (this.cfg.voltage * this.cfg.phases));
