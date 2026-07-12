@@ -8,10 +8,14 @@ charging across three derived modes, plus a live power-flow dashboard widget. Ap
 ## Commands
 - `npm run build` — `tsc` → `.homeybuild/` (the run/publish output).
 - `npm test` — `tsc && node --test .homeybuild/test/*.test.js` (node:test; no framework dep).
+- `npm run lint` — `eslint --ext .js,.ts .`; must be 0 problems, not just 0 errors (fix warnings too,
+  don't suppress).
 - `homey app validate --level publish` — must pass (only the expected `homey:manager:api`
   review notice is allowed). Also run `--level debug` for quick checks.
 - `homey app run` — run on the user's Homey (LAN). This is the only real integration env.
 - Do **not** hand-edit `app.json` — it is generated from `.homeycompose/`. Edit compose files.
+- Before **any** commit: build, test, and lint must all be clean, and `homey app validate --level
+  publish` must pass. Run all four - a green `npm test` does not imply lint is clean or vice versa.
 
 ## Architecture
 The **App** (`app.ts`) owns the long-lived services and exposes them to the device via
@@ -181,6 +185,15 @@ a `FakeRpcClient` (`test/charge-point.test.ts`) that captures whatever `attach()
 trip - complementary to, not a replacement for, the full `ocpp-integration.test.ts` coverage.
 When adding behaviour, prefer a pure function + a node:test over needing the Homey runtime.
 
+Keep unit test coverage high on everything in `lib/**` - new branches/methods there should land with a
+test in the same commit, not as a follow-up. Check with `node --test --experimental-test-coverage
+.homeybuild/test/*.test.js` after `npm test`. `app.ts`/`api.ts`/`drivers/**/device.ts`/`driver.ts` are
+the deliberate exception - they're thin Homey-runtime adapters with no seam to fake the SDK, so low
+coverage there is by design, not a gap. A handful of pure-logging lines (single-line OCPP event
+handlers with no branching) and one third-party-library catch branch (`CentralSystem.stop()`'s
+`server.close()`) are knowingly left uncovered - not worth a dedicated test or a DI seam added solely
+to reach one log line.
+
 ## Not yet verified on hardware
 `SetChargingProfile` behaviour at exactly 6A (as opposed to 0A, confirmed below), and a live schedule
 window actually *starting* a charge from cold (`Preparing` → accepted `RemoteStartTransaction` →
@@ -206,5 +219,5 @@ may be unverifiable on this hardware in its current local-auth config, not merel
 ## Conventions
 - Match the surrounding style. `'use strict'` + `import` + `module.exports = class …` for
   App/Driver/Device (Homey template); plain `export`/classes in `lib/`.
-- Commit per logical change; run build + test + validate before committing.
+- Commit per logical change; see Commands above for the pre-commit checklist (build/test/lint/validate).
 - User's global tooling prefs apply (`rg`/`fd`/`jq` etc.).
