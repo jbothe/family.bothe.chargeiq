@@ -31,6 +31,23 @@ test('fmtW formats W / kW, always stripping a trailing .0', () => {
   assert.equal(PF.fmtW(null), '–');
 });
 
+test('valHtml: wraps the unit in a span with a leading space, so the space picks up the unit\'s smaller size', () => {
+  assert.equal(PF.valHtml(850), '850<span class="unit"> W</span>');
+  assert.equal(PF.valHtml(2300), '2.3<span class="unit"> kW</span>');
+});
+
+test('valHtml: no separator string is left between the number and the unit span', () => {
+  // The split point (str.lastIndexOf(' ')) drops the original fmtW() space entirely -
+  // confirms the space in the output comes only from the one added inside <span class="unit">.
+  const html = PF.valHtml(850) as string;
+  assert.equal(html.indexOf('850 '), -1, 'no bare space directly after the number');
+  assert.ok(html.startsWith('850<span'), 'the number is immediately followed by the unit span, no gap');
+});
+
+test('valHtml: passes through unchanged when fmtW has no unit to split off (e.g. the dash placeholder)', () => {
+  assert.equal(PF.valHtml(null), '–');
+});
+
 test('flow: ev reads charger.powerW, 0 when no charger paired', () => {
   assert.deepEqual(PF.flow('ev', { charger: { available: true, powerW: 2100 } }), { mag: 2100, dir: 'up' });
   assert.deepEqual(PF.flow('ev', { charger: { available: true, powerW: 0 } }), { mag: 0, dir: null });
@@ -260,29 +277,30 @@ test('meterHtml: exactly 100% renders the tile\'s full 44px width, flush into th
   assert.match(html, /width:44px/);
 });
 
-test('meterHtml: a low nonzero reading is rescaled up to a visible floor', () => {
+test('meterHtml: a low nonzero reading is rescaled up to a visible floor, without overstating it', () => {
   // Regression: confirmed on real hardware that a ~6.3% grid reading (900W / 14200W)
   // rendered as fully invisible - .tile's overflow:hidden clips the meter strip to its
   // corner radius, and a fill under the corner's own dead-zone threshold is entirely
-  // swallowed by that curve at every row of the strip, not just thinned out.
+  // swallowed by that curve at every row of the strip, not just thinned out. EDGE_PX is
+  // deliberately just past that geometric threshold (not a much bigger round number), so a
+  // low reading is visible without inflating it toward a disproportionately large bar.
   const html = PF.meterHtml({ pct: 900 / 14200, color: 'var(--purple)' }, 'top') as string;
-  // EDGE_PX(8) + pct*(44-2*EDGE_PX) = 8 + 0.0634*28 = 9.77 -> rounds to 10px.
-  assert.match(html, /width:10px/);
+  // EDGE_PX(5) + pct*(44-2*EDGE_PX) = 5 + 0.0634*34 = 7.16 -> rounds to 7px.
+  assert.match(html, /width:7px/);
 });
 
 test('meterHtml: a high-but-not-full reading is rescaled down, staying visibly short of 100%', () => {
   // Regression: confirmed on real hardware that both 92% and 96% readings were visually
   // indistinguishable from a full 100% fill, because all three extended past the same
-  // corner-clip boundary - a bigger EDGE_PX widens the margin so the gap before 100% reads
-  // as unmistakable, not just technically present.
+  // corner-clip boundary.
   const html92 = PF.meterHtml({ pct: 0.92, color: '#ef4444' }, 'top') as string;
-  // 8 + 0.92*28 = 33.76 -> 34px, clearly short of the true 44px full width.
-  assert.match(html92, /width:34px/);
+  // 5 + 0.92*34 = 36.28 -> 36px, clearly short of the true 44px full width.
+  assert.match(html92, /width:36px/);
 
   const html96 = PF.meterHtml({ pct: 0.96, color: '#ef4444' }, 'top') as string;
-  // 8 + 0.96*28 = 34.88 -> 35px - distinct from both 92% (34px) and 100% (44px), not
+  // 5 + 0.96*34 = 37.64 -> 38px - distinct from both 92% (36px) and 100% (44px), not
   // collapsed into the same rendered width as either.
-  assert.match(html96, /width:35px/);
+  assert.match(html96, /width:38px/);
 });
 
 test('meterHtml: the rescale is monotonic and reaches both true endpoints only at 0 and 1', () => {

@@ -114,10 +114,10 @@
 
     /* align-items:baseline (not center) so the smaller .unit span sits on the same text
        baseline as the number, not vertically centered against it - the explicit height
-       still keeps the box itself deterministic (see .htext comment). gap is the space
-       between the number and unit: kept in CSS rather than a literal space character in
-       the markup so it survives regardless of how flex handles whitespace text nodes. */
-    .val { display: flex; align-items: baseline; gap: 2px; height: 20px;
+       still keeps the box itself deterministic (see .htext comment). No CSS `gap` here -
+       the number-to-unit space is a literal character inside .unit (see PF.valHtml()), so it
+       renders at the unit's own smaller font-size instead of a fixed pixel gap. */
+    .val { display: flex; align-items: baseline; height: 20px;
            font-size: 17px; font-weight: 700; font-variant-numeric: tabular-nums; letter-spacing: -0.01em; }
     .val .unit { font-size: 11px; color: var(--muted); font-weight: 600; } /* de-emphasized so the number reads first */
     /* Explicit height (not line-height/padding) gives .lbl the same rendered height as
@@ -428,20 +428,33 @@
       // pct in (0,1) is linearly rescaled into [EDGE_PX, TILE_PX-EDGE_PX] - every distinct
       // reading still renders at a distinct, monotonic width - and only the true endpoints
       // (0% genuinely empty, 100% genuinely full, flush into the corner) use the tile's real
-      // extent. EDGE_PX (8) clears the dead-zone threshold (1.3px at .meter's 5px height and
-      // .tile's 10px radius, r - sqrt(r^2-(r-h)^2) at r=10, h=5) with generous margin, so the
-      // gap before 100% - and the sliver above 0% - both read as unmistakable at a glance,
-      // not just technically present.
+      // extent. EDGE_PX (5) clears the dead-zone threshold (1.3px at .meter's 5px height and
+      // .tile's 10px radius, r - sqrt(r^2-(r-h)^2) at r=10, h=5) with ~3.7x margin - enough
+      // that the sliver above 0% and the gap before 100% both stay unmistakable, without
+      // overstating a genuinely low reading by inflating it toward a much bigger floor than
+      // the geometry actually requires. Symmetric by construction: the same EDGE_PX buffers
+      // both ends identically, so tightening/loosening it never favors one end over the other.
       meterHtml: function (m, edge) {
         if (!m) return '';
         var TILE_PX = 44; // must match .tile's width
-        var EDGE_PX = 8;
+        var EDGE_PX = 5;
         var w;
         if (m.pct <= 0) w = 0;
         else if (m.pct >= 1) w = TILE_PX;
         else w = EDGE_PX + m.pct * (TILE_PX - 2 * EDGE_PX);
         return '<div class="meter ' + edge + '"><span style="width:' + Math.round(w)
           + 'px; background:' + m.color + ';"></span></div>';
+      },
+      // Wraps the "kW"/"W" suffix of an fmtW() string in a <span> so it can be
+      // de-emphasized. The separating space is placed inside that span (not as a CSS gap
+      // on .val) so it renders at the unit's own smaller font-size rather than the
+      // number's. Used only for the primary power value/unit text (EV/Solar/Grid/
+      // Battery/House's .val) - not the EV chip's amps text or any other unit-like text.
+      valHtml: function (w) {
+        var str = PF.fmtW(w);
+        var i = str.lastIndexOf(' ');
+        if (i < 0) return str;
+        return str.slice(0, i) + '<span class="unit"> ' + str.slice(i + 1) + '</span>';
       },
     };
     // === POWERFLOW-LOGIC-END ===
@@ -450,16 +463,6 @@
       el.className = 'conn' + (f.dir ? ' active dir-' + f.dir : '');
       el.style.backgroundImage = f.dir
         ? 'repeating-linear-gradient(180deg, ' + color + ' 0 3px, transparent 3px 6px)' : '';
-    }
-
-    // Wraps the "kW"/"W" suffix of a PF.fmtW() string in a <span> so it can be de-emphasized.
-    // No space character here - the gap between number and unit is .val's own CSS `gap`
-    // (sized to the unit's smaller font), not a literal space in the markup.
-    function valHtml(w) {
-      var str = PF.fmtW(w);
-      var i = str.lastIndexOf(' ');
-      if (i < 0) return str;
-      return str.slice(0, i) + '<span class="unit">' + str.slice(i + 1) + '</span>';
     }
 
     function render(s) {
@@ -493,11 +496,11 @@
       document.getElementById('mode-time').textContent = PF.modeStatusText(s);
       document.getElementById('mode-boost').innerHTML = PF.showBoost(s) ? ICONS.boost : '';
 
-      document.getElementById('ev-val').innerHTML = valHtml(ev.mag);
-      document.getElementById('solar-val').innerHTML = valHtml(solar.mag);
-      document.getElementById('grid-val').innerHTML = valHtml(grid.mag);
-      document.getElementById('battery-val').innerHTML = valHtml(battery.mag);
-      document.getElementById('house-val').innerHTML = valHtml(house.mag);
+      document.getElementById('ev-val').innerHTML = PF.valHtml(ev.mag);
+      document.getElementById('solar-val').innerHTML = PF.valHtml(solar.mag);
+      document.getElementById('grid-val').innerHTML = PF.valHtml(grid.mag);
+      document.getElementById('battery-val').innerHTML = PF.valHtml(battery.mag);
+      document.getElementById('house-val').innerHTML = PF.valHtml(house.mag);
 
       var bv = PF.batteryVisual(s.batterySoc);
       document.getElementById('battery-tile').innerHTML = batterySvg(bv) + PF.meterHtml(PF.meter('battery', s), 'top');
