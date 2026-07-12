@@ -61,6 +61,42 @@ function fakeApi(devices: Record<string, HomeyApiDevice>): HomeyApiClient {
   return { devices: { getDevices: async () => devices } };
 }
 
+/**
+ * Stubs global setTimeout/clearTimeout so SolarFeed's emit debounce can be
+ * driven synchronously instead of via real 2s delays - same approach used for
+ * ChargeController's backstop-timer test (test/controller.test.ts). flush()
+ * invokes whichever callback is currently pending, simulating the debounce
+ * elapsing; a reschedule (clearTimeout + new setTimeout, as emitSample() does
+ * on every call) replaces the pending callback rather than queuing a second
+ * one, matching the real single-timer behaviour.
+ */
+function stubDebounceTimer(): { flush(): void; restore(): void } {
+  const realSetTimeout = global.setTimeout;
+  const realClearTimeout = global.clearTimeout;
+  let pending: { id: number; fn: () => void } | null = null;
+  let nextId = 0;
+  (global as unknown as { setTimeout: unknown }).setTimeout = ((fn: () => void) => {
+    const id = ++nextId;
+    pending = { id, fn };
+    return { id } as unknown as NodeJS.Timeout;
+  }) as typeof setTimeout;
+  (global as unknown as { clearTimeout: unknown }).clearTimeout = ((handle: unknown) => {
+    const id = (handle as { id?: number } | undefined)?.id;
+    if (pending?.id === id) pending = null;
+  }) as typeof clearTimeout;
+  return {
+    flush() {
+      const p = pending;
+      pending = null;
+      p?.fn();
+    },
+    restore() {
+      global.setTimeout = realSetTimeout;
+      global.clearTimeout = realClearTimeout;
+    },
+  };
+}
+
 const INVERTER_ID = 'homey:app:bothe.family.solaredge:inverter';
 const METER_ID = 'homey:app:bothe.family.solaredge:meter';
 const BATTERY_ID = 'homey:app:bothe.family.solaredge:battery';
@@ -127,35 +163,105 @@ test('a device without measure_power is skipped entirely, even if otherwise matc
   assert.equal(Object.keys(meter.listeners).length, 0, 'never subscribed');
 });
 
-test('live measure_power updates emit a fresh merged sample', async () => {
+test('live measure_power updates emit a fresh merged sample once debounced', async () => {
   const inverter = new FakeDevice(INVERTER_ID, ['measure_power'], { power: 1000 });
   const meter = new FakeDevice(METER_ID, ['measure_power'], { power: 0 });
   const feed = new SolarFeed(undefined, undefined, fakeApi({ inverter, meter }));
   const samples: number[] = [];
   feed.on('sample', (s) => samples.push(s.pvW));
 
-  await feed.start();
-  samples.length = 0; // discard the initial discovery-time emission
+  const timer = stubDebounceTimer();
+  try {
+    await feed.start();
+    timer.flush(); // the initial discovery-time emission
+    samples.length = 0; // discard it
 
-  inverter.trigger('measure_power', 2500);
-  assert.equal(samples.length, 1);
-  assert.equal(samples[0], 2500);
-  assert.equal(feed.getSample().pvW, 2500, 'internal state updated, not just the emitted event');
+    inverter.trigger('measure_power', 2500);
+    assert.equal(samples.length, 0, 'debounced - not emitted synchronously');
+    timer.flush();
+    assert.equal(samples.length, 1);
+    assert.equal(samples[0], 2500);
+    assert.equal(feed.getSample().pvW, 2500, 'internal state updated, not just the emitted event');
+  } finally {
+    timer.restore();
+  }
 });
 
-test('live measure_battery updates emit a fresh sample with the new SoC', async () => {
+test('live measure_battery updates emit a fresh sample with the new SoC once debounced', async () => {
   const battery = new FakeDevice(BATTERY_ID, ['measure_power', 'measure_battery'], { power: 0, battery: 50 });
   const meter = new FakeDevice(METER_ID, ['measure_power'], { power: 0 });
   const feed = new SolarFeed(undefined, undefined, fakeApi({ battery, meter }));
   const socs: (number | null)[] = [];
   feed.on('sample', (s) => socs.push(s.batterySoc));
 
-  await feed.start();
-  socs.length = 0;
+  const timer = stubDebounceTimer();
+  try {
+    await feed.start();
+    timer.flush();
+    socs.length = 0;
 
-  battery.trigger('measure_battery', 91);
-  assert.equal(socs.length, 1);
-  assert.equal(socs[0], 91);
+    battery.trigger('measure_battery', 91);
+    assert.equal(socs.length, 0, 'debounced - not emitted synchronously');
+    timer.flush();
+    assert.equal(socs.length, 1);
+    assert.equal(socs[0], 91);
+  } finally {
+    timer.restore();
+  }
+});
+
+test('a burst of capability updates within the debounce window collapses into a single sample', async () => {
+  // Regression coverage for a real log where inverter/meter/battery updates
+  // from the same underlying SolarEdge reading cycle landed ~150ms apart and
+  // each fired its own 'sample' (and downstream ChargeController.tick()).
+  const inverter = new FakeDevice(INVERTER_ID, ['measure_power'], { power: 1000 });
+  const meter = new FakeDevice(METER_ID, ['measure_power'], { power: -200 });
+  const battery = new FakeDevice(BATTERY_ID, ['measure_power', 'measure_battery'], { power: 300, battery: 50 });
+  const feed = new SolarFeed(undefined, undefined, fakeApi({ inverter, meter, battery }));
+  const samples: number[] = [];
+  feed.on('sample', (s) => samples.push(s.pvW));
+
+  const timer = stubDebounceTimer();
+  try {
+    await feed.start();
+    timer.flush(); // discovery-time emission
+    samples.length = 0;
+
+    // Each trigger clears/reschedules the same debounce timer rather than
+    // emitting independently.
+    inverter.trigger('measure_power', 2000);
+    meter.trigger('measure_power', -100);
+    battery.trigger('measure_power', 400);
+    assert.equal(samples.length, 0, 'nothing emitted mid-burst');
+
+    timer.flush();
+    assert.equal(samples.length, 1, 'the whole burst collapsed into one emission');
+    assert.equal(samples[0], 2000, 'reflects the latest merged values, not an intermediate one');
+    assert.equal(feed.getSample().gridSignedW, -100);
+    assert.equal(feed.getSample().batteryW, 400);
+  } finally {
+    timer.restore();
+  }
+});
+
+test('stop() cancels a pending debounced emission', async () => {
+  const inverter = new FakeDevice(INVERTER_ID, ['measure_power'], { power: 100 });
+  const meter = new FakeDevice(METER_ID, ['measure_power'], { power: 0 });
+  const feed = new SolarFeed(undefined, undefined, fakeApi({ inverter, meter }));
+  let fired = false;
+  feed.on('sample', () => {
+    fired = true;
+  });
+
+  const timer = stubDebounceTimer();
+  try {
+    await feed.start(); // schedules the discovery-time emission
+    await feed.stop();
+    timer.flush(); // if stop() hadn't cancelled it, this would fire it
+    assert.equal(fired, false, 'stop() cancelled the pending emission');
+  } finally {
+    timer.restore();
+  }
 });
 
 test('an initial sample fires during discovery iff a meter device was found', async () => {
@@ -165,8 +271,15 @@ test('an initial sample fires during discovery iff a meter device was found', as
   withMeter.on('sample', () => {
     fired = true;
   });
-  await withMeter.start();
-  assert.equal(fired, true);
+  const timer1 = stubDebounceTimer();
+  try {
+    await withMeter.start();
+    assert.equal(fired, false, 'debounced - scheduled but not fired synchronously');
+    timer1.flush();
+    assert.equal(fired, true);
+  } finally {
+    timer1.restore();
+  }
 
   const inverter = new FakeDevice(INVERTER_ID, ['measure_power'], { power: 500 });
   let firedWithoutMeter = false;
@@ -174,8 +287,14 @@ test('an initial sample fires during discovery iff a meter device was found', as
   withoutMeter.on('sample', () => {
     firedWithoutMeter = true;
   });
-  await withoutMeter.start();
-  assert.equal(firedWithoutMeter, false, 'no meter -> no initial emission, even with other devices present');
+  const timer2 = stubDebounceTimer();
+  try {
+    await withoutMeter.start();
+    timer2.flush(); // nothing was scheduled - a no-op
+    assert.equal(firedWithoutMeter, false, 'no meter -> no initial emission, even with other devices present');
+  } finally {
+    timer2.restore();
+  }
 });
 
 test('a subscription failure on one device does not prevent discovering the others', async () => {

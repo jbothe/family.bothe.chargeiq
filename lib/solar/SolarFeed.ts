@@ -7,6 +7,34 @@ const { HomeyAPI } = require('homey-api');
 
 const SOLAREDGE_APP = 'bothe.family.solaredge';
 
+/**
+ * Inverter/meter/battery power (and battery SoC) each subscribe to their own
+ * capability instance, so a single underlying SolarEdge reading cycle can
+ * fire several independent listener callbacks within the same real-world
+ * moment - confirmed via a real log with 3 near-duplicate emits ~150ms apart,
+ * each driving its own downstream ChargeController.tick(). Debounced (reset
+ * on every update, not a fixed delay from the first) so a burst of any size
+ * collapses into one emit of the latest merged sample. Generous on purpose -
+ * per-role updates in practice are sparse (well under SolarEdge's ~10s report
+ * cadence, ChargeController's TICK_MS backstop, and solarStaleMs), so this
+ * only adds latency to reaching a quiet point, not to the freshness of the
+ * value once emitted, and plays nice with ChargeController's own tick
+ * backstop (scheduleNextTick() re-arms from whenever tick() actually runs,
+ * not a fixed wall-clock schedule).
+ *
+ * A tick() triggered independently of solar (the backstop timer, a status
+ * change, a manual/schedule action) while a sample is mid-debounce will
+ * resolve against the previous sample's cached values - at most this many ms
+ * stale, bounded by the debounce window itself, and strictly smaller than the
+ * staleness any tick() already tolerates between two solar reports ~10s apart.
+ * It self-corrects the moment the debounced sample lands and drives its own
+ * tick(): tick()'s capTightened comparison is tick-over-tick against whatever
+ * the *previous* tick last saw (stale or not), so a hard cap that actually
+ * tightened is still detected and written urgently, just up to
+ * SAMPLE_DEBOUNCE_MS later than an undebounced feed would have caught it.
+ */
+const SAMPLE_DEBOUNCE_MS = 1000;
+
 /** Roles we read from the SolarEdge app, keyed by its driver id. */
 type Role = 'inverter' | 'meter' | 'battery';
 
@@ -89,6 +117,9 @@ export class SolarFeed extends EventEmitter {
   /** Battery state of charge (%) from the battery device's measure_battery. */
   private batterySoc: number | null = null;
 
+  /** Debounces emitSample() - see SAMPLE_DEBOUNCE_MS. */
+  private pendingEmit: ReturnType<typeof setTimeout> | null = null;
+
   private log: (...a: unknown[]) => void;
 
   /**
@@ -123,6 +154,13 @@ export class SolarFeed extends EventEmitter {
       try {
         const inst = device.makeCapabilityInstance('measure_power', (value: number) => {
           if (typeof value === 'number') {
+            // TEMP debugging: raw per-role update, logged before the emit
+            // debounce - lets a quiet stretch in the merged [solar] log be
+            // told apart from Homey simply not rebroadcasting an unchanged
+            // capability value at all (setCapabilityValue only fires
+            // listeners on an actual change) vs. a genuine gap in this feed.
+            // See git history to remove once confirmed on real hardware.
+            this.log(`[solar] raw ${role} update: ${value}W`);
             this.values[role] = value;
             this.emitSample();
           }
@@ -139,6 +177,7 @@ export class SolarFeed extends EventEmitter {
         try {
           const inst = device.makeCapabilityInstance('measure_battery', (value: number) => {
             if (typeof value === 'number') {
+              this.log(`[solar] raw battery SoC update: ${value}%`); // TEMP debugging - see above
               this.batterySoc = value;
               this.emitSample();
             }
@@ -167,7 +206,13 @@ export class SolarFeed extends EventEmitter {
   }
 
   private emitSample(): void {
-    this.emit('sample', this.sample());
+    if (this.pendingEmit) clearTimeout(this.pendingEmit);
+    // eslint-disable-next-line homey-app/global-timers -- unref()'d below, cleared in stop()
+    this.pendingEmit = setTimeout(() => {
+      this.pendingEmit = null;
+      this.emit('sample', this.sample());
+    }, SAMPLE_DEBOUNCE_MS);
+    this.pendingEmit.unref?.();
   }
 
   /** Latest merged sample (for the widget / initial state). */
@@ -180,6 +225,10 @@ export class SolarFeed extends EventEmitter {
   }
 
   async stop(): Promise<void> {
+    if (this.pendingEmit) {
+      clearTimeout(this.pendingEmit);
+      this.pendingEmit = null;
+    }
     for (const inst of this.instances) {
       try {
         await inst.destroy?.();
