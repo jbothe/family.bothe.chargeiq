@@ -34,6 +34,8 @@ class FakeDevice implements HomeyApiDevice {
 
   throwOnSubscribe = false;
 
+  throwOnCapability: string | null = null;
+
   constructor(driverId: string, capabilities: string[], initial: { power?: number; battery?: number } = {}) {
     this.driverId = driverId;
     this.capabilities = capabilities;
@@ -43,7 +45,7 @@ class FakeDevice implements HomeyApiDevice {
   }
 
   makeCapabilityInstance(capabilityId: string, listener: (value: number) => void): CapabilityInstance {
-    if (this.throwOnSubscribe) throw new Error('subscribe failed');
+    if (this.throwOnSubscribe || capabilityId === this.throwOnCapability) throw new Error('subscribe failed');
     this.listeners[capabilityId] = listener;
     const inst = fakeCapabilityInstance();
     this.instances.push(inst);
@@ -187,6 +189,20 @@ test('a subscription failure on one device does not prevent discovering the othe
 
   assert.equal(feed.getSample().gridSignedW, -200, 'the meter device still got discovered/subscribed');
   assert.ok(logs.some((l) => String(l[0]).includes('could not subscribe')), 'the failure was logged, not swallowed silently');
+});
+
+test('a battery SoC subscription failure is logged separately, without blocking the power reading', async () => {
+  const battery = new FakeDevice(BATTERY_ID, ['measure_power', 'measure_battery'], { power: 500, battery: 70 });
+  battery.throwOnCapability = 'measure_battery';
+  const logs: unknown[][] = [];
+  const feed = new SolarFeed(undefined, (...a) => logs.push(a), fakeApi({ battery }));
+
+  await feed.start();
+
+  assert.equal(feed.getSample().batteryW, 500, 'the power capability still subscribed fine');
+  assert.equal(feed.getSample().batterySoc, 70, 'the initial SoC value was still captured from discovery, just not subscribed live');
+  assert.ok(logs.some((l) => String(l[0]).includes('could not subscribe to battery SoC')),
+    'the SoC-specific failure is logged distinctly from the power-capability failure');
 });
 
 test('stop() destroys every subscribed instance and is safe to call twice', async () => {
