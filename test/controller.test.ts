@@ -2,6 +2,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert';
+import { EventEmitter } from 'events';
 import { ChargeController, ControllerHost } from '../lib/control/ChargeController';
 import { CentralSystem } from '../lib/ocpp/CentralSystem';
 import { ChargePoint, RpcClient } from '../lib/ocpp/ChargePoint';
@@ -1286,4 +1287,293 @@ test('destroy() clears every timer it scheduled', () => {
     global.setTimeout = realSetTimeout;
     global.clearTimeout = realClearTimeout;
   }
+});
+
+// ---------------------------------------------------------------------------
+// isWithinSchedule()
+// ---------------------------------------------------------------------------
+
+test('isWithinSchedule() reports whether now falls inside a configured window', () => {
+  const { c } = makeController(SCHED);
+  assert.equal(c.isWithinSchedule(at(1, 10, 0)), true);
+  assert.equal(c.isWithinSchedule(at(1, 20, 0)), false);
+});
+
+// ---------------------------------------------------------------------------
+// CentralSystem connect/disconnect wiring, and bind()'s same-ChargePoint
+// reconnect branch (distinct from a fresh bind)
+// ---------------------------------------------------------------------------
+
+test('binds on a connect event, treats a rebind of the same ChargePoint as a reconnect, and disconnect clears it', () => {
+  const calls: string[] = [];
+  const fakeClient: RpcClient = {
+    identity: 'X',
+    handle: () => {},
+    call: async (method: string) => {
+      calls.push(method); return { status: 'Accepted' };
+    },
+    close: async () => {},
+    on: () => {},
+  };
+  const cp = new ChargePoint({ identity: 'X', authorize: () => true, nextTransactionId: () => 1 });
+  cp.attach(fakeClient);
+
+  const store: Record<string, unknown> = { schedule: [] };
+  const settings: Record<string, unknown> = {
+    minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdW: 14000,
+  };
+  let availableCount = 0;
+  let unavailableMsg: string | null = null;
+  const logs: string[] = [];
+  const host: ControllerHost = {
+    identity: 'X',
+    setCapability: () => {},
+    getSetting: <T>(k: string) => settings[k] as T,
+    getStore: <T>(k: string) => store[k] as T,
+    setStore: async (k, v) => {
+      store[k] = v;
+    },
+    setAvailable: () => {
+      availableCount += 1;
+    },
+    setUnavailable: (msg) => {
+      unavailableMsg = msg;
+    },
+    setWarning: () => {},
+    log: (...a) => {
+      logs.push(a.join(' '));
+    },
+    error: () => {},
+  };
+  class FakeCentralSystem extends EventEmitter {
+    getChargePoint(): ChargePoint | undefined {
+      return undefined; // nothing connected yet at init() time
+    }
+  }
+  const cs = new FakeCentralSystem() as unknown as CentralSystem;
+  const c = new ChargeController(host, cs);
+  c.init();
+  assert.equal(availableCount, 0, 'no charge point connected at init - not bound yet');
+
+  cs.emit('connect', cp);
+  assert.equal(availableCount, 1, 'bind() marks the device available');
+  assert.ok(logs.some((l) => l.includes('Controller bound to')));
+
+  calls.length = 0;
+  logs.length = 0;
+  cs.emit('connect', cp); // the same ChargePoint object reconnecting (client swapped)
+  assert.ok(logs.some((l) => l.includes('reconnected')), 'a rebind of the same ChargePoint logs distinctly from a fresh bind');
+  assert.ok(calls.includes('TriggerMessage'), 'a reconnect still requests a fresh status/meter read');
+  assert.equal(logs.filter((l) => l.includes('Controller bound to')).length, 0, 'not treated as a fresh bind a second time');
+
+  cs.emit('disconnect', cp);
+  assert.equal(unavailableMsg, 'Charger offline');
+  assert.ok(logs.some((l) => l.includes('[charger] disconnected')));
+});
+
+// ---------------------------------------------------------------------------
+// configureCharger() (boot-triggered) and its catch branch
+// ---------------------------------------------------------------------------
+
+test('a boot event triggers configureCharger(), which logs rather than throws on a rejected write', async () => {
+  const calls: string[] = [];
+  let rejectConfig = false;
+  const fakeClient: RpcClient = {
+    identity: 'X',
+    handle: () => {},
+    call: async (method: string) => {
+      calls.push(method);
+      if (method === 'ChangeConfiguration' && rejectConfig) throw new Error('NotSupported');
+      return { status: 'Accepted' };
+    },
+    close: async () => {},
+    on: () => {},
+  };
+  const cp = new ChargePoint({ identity: 'X', authorize: () => true, nextTransactionId: () => 1 });
+  cp.attach(fakeClient);
+
+  const store: Record<string, unknown> = { schedule: [] };
+  const settings: Record<string, unknown> = {
+    minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdW: 14000,
+  };
+  const logs: string[] = [];
+  const host: ControllerHost = {
+    identity: 'X',
+    setCapability: () => {},
+    getSetting: <T>(k: string) => settings[k] as T,
+    getStore: <T>(k: string) => store[k] as T,
+    setStore: async (k, v) => {
+      store[k] = v;
+    },
+    setAvailable: () => {},
+    setUnavailable: () => {},
+    setWarning: () => {},
+    log: (...a) => {
+      logs.push(a.join(' '));
+    },
+    error: () => {},
+  };
+  const cs = { getChargePoint: () => cp, on: () => {} } as unknown as CentralSystem;
+  const c = new ChargeController(host, cs);
+  c.init();
+  calls.length = 0;
+
+  cp.emit('boot', { chargePointVendor: 'Wallbox', chargePointModel: 'Pulsar Max' });
+  await new Promise((r) => setTimeout(r, 0)); // let configureCharger()'s awaited calls settle
+  assert.ok(calls.filter((m) => m === 'ChangeConfiguration').length >= 1);
+
+  rejectConfig = true;
+  calls.length = 0;
+  cp.emit('boot', { chargePointVendor: 'Wallbox', chargePointModel: 'Pulsar Max' });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.ok(logs.some((l) => l.includes('Charger rejected MeterValues config')),
+    'a rejected ChangeConfiguration is caught and logged, not left to crash the controller');
+});
+
+// ---------------------------------------------------------------------------
+// Error-handling catch branches around outbound OCPP writes
+// ---------------------------------------------------------------------------
+
+test('a failed remote start attempt resets awaitingStart and reports the error, without throwing', async () => {
+  const fakeClient: RpcClient = {
+    identity: 'X',
+    handle: () => {},
+    call: async (method: string) => {
+      if (method === 'RemoteStartTransaction') throw new Error('boom');
+      return { status: 'Accepted' };
+    },
+    close: async () => {},
+    on: () => {},
+  };
+  const cp = new ChargePoint({ identity: 'X', authorize: () => true, nextTransactionId: () => 1 });
+  cp.attach(fakeClient);
+
+  const store: Record<string, unknown> = { schedule: [] };
+  const settings: Record<string, unknown> = {
+    minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdW: 14000,
+  };
+  const errors: unknown[][] = [];
+  const host: ControllerHost = {
+    identity: 'X',
+    setCapability: () => {},
+    getSetting: <T>(k: string) => settings[k] as T,
+    getStore: <T>(k: string) => store[k] as T,
+    setStore: async (k, v) => {
+      store[k] = v;
+    },
+    setAvailable: () => {},
+    setUnavailable: () => {},
+    setWarning: () => {},
+    log: () => {},
+    error: (...a) => {
+      errors.push(a);
+    },
+  };
+  const cs = { getChargePoint: () => cp, on: () => {} } as unknown as CentralSystem;
+  const c = new ChargeController(host, cs);
+  c.init();
+  await c.startManual(16);
+
+  cp.emit('status', { connectorId: 1, errorCode: 'NoError', status: 'Preparing' });
+  await new Promise((r) => setTimeout(r, 0));
+
+  assert.ok(errors.some((e) => e[0] === 'remoteStart'), 'the failure is reported via host.error, not thrown');
+});
+
+test('a failed SetChargingProfile write is caught and reported, not thrown', async () => {
+  const fakeClient: RpcClient = {
+    identity: 'X',
+    handle: () => {},
+    call: async (method: string) => {
+      if (method === 'SetChargingProfile') throw new Error('rejected by charger');
+      return { status: 'Accepted' };
+    },
+    close: async () => {},
+    on: () => {},
+  };
+  const cp = new ChargePoint({ identity: 'X', authorize: () => true, nextTransactionId: () => 1 });
+  cp.attach(fakeClient);
+
+  const store: Record<string, unknown> = { schedule: [] };
+  const settings: Record<string, unknown> = {
+    minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdW: 14000, writeThrottleMs: 0,
+  };
+  const errors: unknown[][] = [];
+  const host: ControllerHost = {
+    identity: 'X',
+    setCapability: () => {},
+    getSetting: <T>(k: string) => settings[k] as T,
+    getStore: <T>(k: string) => store[k] as T,
+    setStore: async (k, v) => {
+      store[k] = v;
+    },
+    setAvailable: () => {},
+    setUnavailable: () => {},
+    setWarning: () => {},
+    log: () => {},
+    error: (...a) => {
+      errors.push(a);
+    },
+  };
+  const cs = { getChargePoint: () => cp, on: () => {} } as unknown as CentralSystem;
+  const c = new ChargeController(host, cs);
+  c.init();
+  cp.emit('status', { connectorId: 1, errorCode: 'NoError', status: 'Charging' }); // plugged -> eligible to write
+  await c.startManual(16);
+  await new Promise((r) => setTimeout(r, 0));
+
+  assert.ok(errors.some((e) => e[0] === 'SetChargingProfile failed:'),
+    'a rejected profile write is caught and reported, not left to crash the controller');
+});
+
+// ---------------------------------------------------------------------------
+// scheduleWrite()'s throttled (deferred) path
+// ---------------------------------------------------------------------------
+
+test('scheduleWrite() defers a write until writeThrottleMs has elapsed since the last one', async () => {
+  const calls: string[] = [];
+  const fakeClient: RpcClient = {
+    identity: 'X',
+    handle: () => {},
+    call: async (method: string) => {
+      calls.push(method); return { status: 'Accepted' };
+    },
+    close: async () => {},
+    on: () => {},
+  };
+  const cp = new ChargePoint({ identity: 'X', authorize: () => true, nextTransactionId: () => 1 });
+  cp.attach(fakeClient);
+
+  const store: Record<string, unknown> = { schedule: [] };
+  const settings: Record<string, unknown> = {
+    minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdW: 14000, writeThrottleMs: 200,
+  };
+  const host: ControllerHost = {
+    identity: 'X',
+    setCapability: () => {},
+    getSetting: <T>(k: string) => settings[k] as T,
+    getStore: <T>(k: string) => store[k] as T,
+    setStore: async (k, v) => {
+      store[k] = v;
+    },
+    setAvailable: () => {},
+    setUnavailable: () => {},
+    setWarning: () => {},
+    log: () => {},
+    error: () => {},
+  };
+  const cs = { getChargePoint: () => cp, on: () => {} } as unknown as CentralSystem;
+  const c = new ChargeController(host, cs);
+  c.init();
+  cp.emit('status', { connectorId: 1, errorCode: 'NoError', status: 'Charging' });
+  await c.startManual(16);
+  await new Promise((r) => setTimeout(r, 0));
+  assert.ok(calls.includes('SetChargingProfile'), 'first write goes through immediately (no prior write to throttle against)');
+
+  calls.length = 0;
+  await c.setCurrentLimit(20); // a genuine target change, immediately after the first write
+  assert.ok(!calls.includes('SetChargingProfile'), 'throttled - deferred rather than sent immediately');
+
+  await new Promise((r) => setTimeout(r, 250));
+  assert.ok(calls.includes('SetChargingProfile'), 'the deferred write eventually fires once the throttle window elapses');
 });
