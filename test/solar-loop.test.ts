@@ -95,3 +95,15 @@ test('omitting batteryW behaves exactly as before (no battery present)', () => {
   assert.equal(r.availableW, 2300);
   assert.equal(r.target, 10);
 });
+
+test('setConfig() replaces the config used by subsequent evaluate() calls', () => {
+  const l = new SolarLoop(cfg());
+  assert.equal(l.evaluate({ gridSignedW: -1150, chargerPowerW: 0, now: T }).target, null,
+    'below the original minAmps (6A ~ 1380W)');
+
+  const lowered = cfg();
+  lowered.minAmps = 3;
+  l.setConfig(lowered);
+  assert.equal(l.evaluate({ gridSignedW: -1150, chargerPowerW: 0, now: T + 2000 }).target, 5,
+    'the same surplus now clears the lowered minAmps threshold');
+});
