@@ -664,6 +664,99 @@ test('an unknown status with no known transaction id still nets as a confirmed 0
     'surplus is computed (not skipped) - a never-connected/idle charger is confirmed 0, not "unknown"');
 });
 
+test('household cap is unavailable, not a guessed-low value, on a transient Available report while a transaction is still on record', () => {
+  // Mirrors a real restart log: a lone Available report flipped back to
+  // Charging just over a second later (the same reconnect-blip quirk
+  // onStatus() already debounces via IDLE_RECONCILE_DELAY_MS for transaction
+  // reconciliation) - trusting it as confirmed-0 drove a real, wrong,
+  // artificially-low household cap write that then sat throttled for a full
+  // writeThrottleMs before self-correcting.
+  const fakeClient: RpcClient = {
+    identity: 'X', handle: () => {}, call: async () => ({ status: 'Accepted' }), close: async () => {}, on: () => {},
+  };
+  const cp = new ChargePoint({ identity: 'X', authorize: () => true, nextTransactionId: () => 1 });
+  cp.attach(fakeClient);
+
+  const sched: ScheduleWindow[] = [{
+    days: [0, 1, 2, 3, 4, 5, 6], start: '00:00', end: '23:59', currentA: 16,
+  }];
+  const store: Record<string, unknown> = { schedule: sched, transactionId: 29 };
+  const settings: Record<string, unknown> = {
+    minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdW: 14200,
+  };
+  const logs: string[] = [];
+  const host: ControllerHost = {
+    identity: 'X',
+    setCapability: () => {},
+    getSetting: <T>(k: string) => settings[k] as T,
+    getStore: <T>(k: string) => store[k] as T,
+    setStore: async (k, v) => {
+      store[k] = v;
+    },
+    setAvailable: () => {},
+    setUnavailable: () => {},
+    setWarning: () => {},
+    log: (...a) => {
+      logs.push(a.join(' '));
+    },
+    error: () => {},
+  };
+  const cs = { getChargePoint: () => cp, on: () => {} } as unknown as CentralSystem;
+  const c = new ChargeController(host, cs);
+  c.init(); // loads transactionId=29 from store
+  c.onSolarSample({ gridSignedW: 13330, pvW: 80, batteryW: 3290 }); // primes solar data
+  logs.length = 0;
+
+  // grid=13330W would leave almost no headroom (household cap -> pause) if the charger's own
+  // draw were wrongly netted as 0 during this reconnect-blip Available.
+  cp.emit('status', { connectorId: 1, errorCode: 'NoError', status: 'Available' });
+  const line = logs.filter((l) => l.startsWith('[decision:')).pop();
+  assert.ok(line?.includes('-> 16A'), `expected the schedule floor to pass through uncapped, got: ${line}`);
+  assert.ok(!line?.includes('household cap'), 'household cap note is absent (unavailable), not a wrongly-computed drop');
+});
+
+test('a genuinely idle Available (no known transaction) still nets as a confirmed 0, not stuck unavailable forever', () => {
+  const fakeClient: RpcClient = {
+    identity: 'X', handle: () => {}, call: async () => ({ status: 'Accepted' }), close: async () => {}, on: () => {},
+  };
+  const cp = new ChargePoint({ identity: 'X', authorize: () => true, nextTransactionId: () => 1 });
+  cp.attach(fakeClient);
+
+  const sched: ScheduleWindow[] = [{
+    days: [0, 1, 2, 3, 4, 5, 6], start: '00:00', end: '23:59', currentA: 16,
+  }];
+  const store: Record<string, unknown> = { schedule: sched }; // no persisted transactionId - genuinely idle
+  const settings: Record<string, unknown> = {
+    minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdW: 14200,
+  };
+  const logs: string[] = [];
+  const host: ControllerHost = {
+    identity: 'X',
+    setCapability: () => {},
+    getSetting: <T>(k: string) => settings[k] as T,
+    getStore: <T>(k: string) => store[k] as T,
+    setStore: async (k, v) => {
+      store[k] = v;
+    },
+    setAvailable: () => {},
+    setUnavailable: () => {},
+    setWarning: () => {},
+    log: (...a) => {
+      logs.push(a.join(' '));
+    },
+    error: () => {},
+  };
+  const cs = { getChargePoint: () => cp, on: () => {} } as unknown as CentralSystem;
+  const c = new ChargeController(host, cs);
+  c.init();
+  c.onSolarSample({ gridSignedW: 13330, pvW: 80, batteryW: 3290 });
+  logs.length = 0;
+
+  cp.emit('status', { connectorId: 1, errorCode: 'NoError', status: 'Available' });
+  const line = logs.filter((l) => l.startsWith('[decision:')).pop();
+  assert.ok(line?.includes('household cap'), `household cap should apply normally with no session on record, got: ${line}`);
+});
+
 test('profile writes reach the charger (TxDefaultProfile) even without a known transaction id, once Charging', async () => {
   const calls: string[] = [];
   const fakeClient: RpcClient = {
@@ -1356,23 +1449,30 @@ test('a fresh solar sample clears the stale warning latch, so a later re-staling
 // getModeInfo() / getDiagnostics()
 // ---------------------------------------------------------------------------
 
-test('getModeInfo() detail text for manual mode: charging vs stopped', async () => {
+test('getModeInfo() for manual mode with no schedule: only mode is populated', async () => {
   const { c } = makeController([]);
   await c.startManual(16);
-  assert.deepEqual(c.getModeInfo(), { mode: 'manual', detail: 'charging' });
+  assert.deepEqual(c.getModeInfo(), {
+    mode: 'manual', scheduleEndAt: null, nextScheduleStartAt: null, boostActive: false, solarEnough: null,
+  });
 
   await c.stop();
-  assert.deepEqual(c.getModeInfo(), { mode: 'manual', detail: 'stopped' });
+  assert.deepEqual(c.getModeInfo(), {
+    mode: 'manual', scheduleEndAt: null, nextScheduleStartAt: null, boostActive: false, solarEnough: null,
+  }, 'manual on/off no longer changes the shape - the widget gets that from evcharger_charging_state instead');
 });
 
-test('getModeInfo() detail text for manual mode appends the next schedule start time when one exists', async () => {
+test('getModeInfo() for manual mode includes the next schedule start time when one exists', async () => {
   const { c } = makeController(SCHED);
   await c.startManual(10);
-  const { detail } = c.getModeInfo();
-  assert.ok(detail.startsWith('charging · schedule '), `expected a schedule suffix, got: ${detail}`);
+  const info = c.getModeInfo();
+  assert.equal(info.mode, 'manual');
+  assert.equal(info.scheduleEndAt, null);
+  assert.ok(info.nextScheduleStartAt, 'expected a next-schedule-start ISO timestamp');
+  assert.ok(!Number.isNaN(Date.parse(info.nextScheduleStartAt as string)));
 });
 
-test('getModeInfo() detail text for scheduled mode shows the window end time', () => {
+test('getModeInfo() for scheduled mode includes the window end time, not a next-start', () => {
   // All-day, every-day window so this isn't tied to exactly when the test happens to run.
   const allDay: ScheduleWindow[] = [{
     days: [0, 1, 2, 3, 4, 5, 6], start: '00:00', end: '23:59', currentA: 16,
@@ -1381,19 +1481,35 @@ test('getModeInfo() detail text for scheduled mode shows the window end time', (
   c.tick();
   const info = c.getModeInfo();
   assert.equal(info.mode, 'scheduled');
-  assert.match(info.detail, /^until \d{1,2}:\d{2}/, `expected an end time, got: ${info.detail}`);
+  assert.equal(info.nextScheduleStartAt, null);
+  assert.ok(info.scheduleEndAt, 'expected a window-end ISO timestamp');
+  assert.ok(!Number.isNaN(Date.parse(info.scheduleEndAt as string)));
 });
 
-test('getModeInfo() detail text for solar mode: charging / paused / idle', () => {
+test('getModeInfo() boostActive reflects real-time boosting, not just the window\'s boostToCap config', () => {
+  const allDayBoost: ScheduleWindow[] = [{
+    days: [0, 1, 2, 3, 4, 5, 6], start: '00:00', end: '23:59', currentA: 16, boostToCap: true,
+  }];
+  const { c } = makeController(allDayBoost, { sharedCircuitA: 32, sharedCircuitBufferA: 2 });
+  c.onSolarSample({ gridSignedW: 0, pvW: 0, batteryW: 0 }); // idle battery, no solar -> cap = 30, above the 16A floor
+  assert.equal(c.getModeInfo().boostActive, true);
+
+  c.onSolarSample({ gridSignedW: 0, pvW: 0, batteryW: 4600 }); // cap = 10, below the 16A floor -> nothing to boost with
+  assert.equal(c.getModeInfo().boostActive, false);
+});
+
+test('getModeInfo() for solar mode: solarEnough tracks whether the target meets minAmps', () => {
   const { c } = makeController([]);
   c.setSolarTarget(10);
-  assert.deepEqual(c.getModeInfo(), { mode: 'solar', detail: 'charging 10A' });
+  assert.deepEqual(c.getModeInfo(), {
+    mode: 'solar', scheduleEndAt: null, nextScheduleStartAt: null, boostActive: false, solarEnough: true,
+  });
 
   c.setSolarTarget(0);
-  assert.deepEqual(c.getModeInfo(), { mode: 'solar', detail: 'paused (low excess)' });
+  assert.equal(c.getModeInfo().solarEnough, false, 'paused (low excess) counts as not-enough');
 
   c.setSolarTarget(null);
-  assert.deepEqual(c.getModeInfo(), { mode: 'solar', detail: 'idle (low excess)' });
+  assert.equal(c.getModeInfo().solarEnough, false, 'idle (never started) also counts as not-enough');
 });
 
 test('getDiagnostics() reflects the live solar loop state, target, and available surplus', () => {

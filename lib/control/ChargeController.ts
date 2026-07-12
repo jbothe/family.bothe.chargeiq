@@ -143,10 +143,6 @@ export function toChargingState(status: OcppStatus): string {
   }
 }
 
-function fmtTime(d: Date, timezone?: string): string {
-  return d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: timezone });
-}
-
 /**
  * Owns charging behaviour for one charge point. Binds to its {@link ChargePoint},
  * reflects OCPP state onto capabilities, and each tick resolves a derived mode:
@@ -603,8 +599,25 @@ export class ChargeController {
    */
   private nettedChargerW(): number | null {
     if (this.lastStatusValue == null) return this.transactionId != null ? null : 0;
+    // A lone 'Available' report right after reconnect can be the same
+    // transient false report onStatus() already debounces via
+    // IDLE_RECONCILE_DELAY_MS before trusting it to end a still-tracked
+    // transaction - confirmed on real hardware to flip back to Charging
+    // over a second later, having briefly driven a genuine wrong (too-low)
+    // household-cap write that then sat throttled for a full
+    // writeThrottleMs before self-correcting. Mirror that same caution here:
+    // don't trust it as confirmed-0 either while transactionId is still on
+    // record (i.e. not yet reconciled away as genuinely idle).
+    if (this.lastStatusValue === 'Available' && this.transactionId != null) return null;
     if (!this.isDeliveringPower()) return 0;
     return this.lastPowerW;
+  }
+
+  /** Human-readable reason nettedChargerW() returned null - see there. Log-only. */
+  private chargerPowerUnknownReason(): string {
+    if (this.lastStatusValue == null) return 'no status received yet this connection';
+    if (this.lastStatusValue === 'Available') return 'Available but a transaction is still on record, not yet reconciled';
+    return 'Charging but no MeterValues yet this connection';
   }
 
   isWithinSchedule(now: Date = new Date()): boolean {
@@ -642,13 +655,12 @@ export class ChargeController {
     if (!this.solarLoop) return;
     const chargerPowerW = this.nettedChargerW();
     if (chargerPowerW == null) {
-      // Charging but no MeterValues yet this connection - can't net the
-      // charger's own draw out of the grid reading, so skip this sample's
-      // surplus evaluation rather than crediting/debiting an unknown amount.
-      // solarTargetAmps/lastAvailableW are left as they were; the next
-      // sample (moments away, given the ~10s cadence) resolves this once a
-      // real reading lands.
-      this.host.log('[solar] charger reports Charging but no MeterValues yet this connection - skipping evaluation');
+      // Can't net the charger's own draw out of the grid reading, so skip
+      // this sample's surplus evaluation rather than crediting/debiting an
+      // unknown amount. solarTargetAmps/lastAvailableW are left as they
+      // were; the next sample (moments away, given the ~10s cadence)
+      // resolves this once nettedChargerW() has a real answer.
+      this.host.log(`[solar] charger power unknown (${this.chargerPowerUnknownReason()}) - skipping evaluation`);
       this.tick(new Date(now), 'solar');
       return;
     }
@@ -720,29 +732,42 @@ export class ChargeController {
     return this.currentMode ?? this.resolve(new Date()).mode;
   }
 
-  /** Mode + a short human status detail for the widget/metrics. */
-  getModeInfo(): { mode: ChargeMode; detail: string } {
+  /**
+   * Mode + the raw semantic facts the widget's shorthand status line needs -
+   * deliberately not pre-formatted strings (formatting/timezone belongs to
+   * the client, which runs on the user's phone in its own local timezone, not
+   * the Homey Pro's UTC OS clock - see the class doc). Only the field(s)
+   * relevant to the current mode are populated; the rest are null/false.
+   */
+  getModeInfo(): {
+    mode: ChargeMode;
+    scheduleEndAt: string | null;
+    nextScheduleStartAt: string | null;
+    boostActive: boolean;
+    solarEnough: boolean | null;
+    } {
     const now = new Date();
     const mode = this.currentMode ?? this.resolve(now).mode;
-    let detail = '';
-    if (mode === 'manual') {
-      const base = this.manualLatch?.intent === 'off' ? 'stopped' : 'charging';
-      const ns = this.scheduler.nextStart(now);
-      detail = base + (ns ? ` · schedule ${fmtTime(ns, this.timezone)}` : '');
-    } else if (mode === 'scheduled') {
+    let scheduleEndAt: string | null = null;
+    let nextScheduleStartAt: string | null = null;
+    let boostActive = false;
+    let solarEnough: boolean | null = null;
+    if (mode === 'scheduled') {
       const end = this.scheduler.currentEnd(now);
-      detail = end ? `until ${fmtTime(end, this.timezone)}` : 'charging';
-    } else { // solar
-      const t = this.solarTargetAmps;
-      if (t != null && t >= this.cfg.minAmps) {
-        detail = `charging ${t}A`;
-      } else if (t === 0) {
-        detail = 'paused (low excess)';
-      } else {
-        detail = 'idle (low excess)';
+      scheduleEndAt = end ? end.toISOString() : null;
+      const floor = this.scheduleOrMax(now);
+      boostActive = this.scheduledAmpsDetail(now).amps > floor;
+    } else {
+      const ns = this.scheduler.nextStart(now);
+      nextScheduleStartAt = ns ? ns.toISOString() : null;
+      if (mode === 'solar') {
+        const t = this.solarTargetAmps;
+        solarEnough = t != null && t >= this.cfg.minAmps;
       }
     }
-    return { mode, detail };
+    return {
+      mode, scheduleEndAt, nextScheduleStartAt, boostActive, solarEnough,
+    };
   }
 
   getDiagnostics(): { availableW: number; solarState: string; targetA: number | null; mode: ChargeMode } {

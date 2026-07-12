@@ -134,7 +134,21 @@ beyond the configured floor, only genuine spare circuit capacity may.
   unknown too, but **only when a `transactionId` is already known** (persisted from store at
   `init()` - the actual signal a session may be live) - without one, a null status is trusted as "no
   session, nothing to net out" (confirmed `0`), since a charger that's simply never connected
-  otherwise leaves every solar/household calc permanently unavailable for no reason.
+  otherwise leaves every solar/household calc permanently unavailable for no reason. **A third
+  variant of the same gap: a single, *confirmed* `Available` report right after reconnect isn't
+  reliable either** - this is the identical transient-`Available`-on-reconnect quirk described two
+  bullets down (`onStatus()` already debounces it via `IDLE_RECONCILE_DELAY_MS` before trusting it to
+  end a still-tracked transaction), just not previously applied to the power-netting side too.
+  Confirmed on real hardware: a lone `Available` flipped back to `Charging` ~1.3s later, but in that
+  window `nettedChargerW()` still trusted it as confirmed-`0`, driving a real (accepted)
+  artificially-low `SetChargingProfile` write - and because *recovering* from a too-tight cap is a
+  plain increase, not a cap tightening, it wasn't eligible for the urgent-write bypass either, so the
+  wrong value sat in effect for a full `writeThrottleMs` (confirmed: correction landed exactly
+  15.006s later) before self-correcting. `nettedChargerW()` now treats `lastStatusValue === 'Available'`
+  as unknown too, but again only while `transactionId` is still on record (not yet reconciled away) -
+  once `applyIdleReconciliation()` actually clears it (or there was never a transaction to begin
+  with), a subsequent `Available` nets as a normal confirmed `0` rather than being stuck "unavailable"
+  forever.
 - **The controller never issues `RemoteStopTransaction`.** Every "don't charge" decision (manual
   off, no schedule/solar target, stale solar feed, disconnected latch) resolves to `amps: 0` (pause)
   in `ChargeController.resolve()`/`tick()`, never a hard stop. The Wallbox holds `Finishing` until a
