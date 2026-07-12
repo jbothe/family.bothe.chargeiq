@@ -11,7 +11,13 @@ const DEFAULT_PORT = 9000;
 interface ChargerDeviceLike {
   hasCapability(id: string): boolean;
   getCapabilityValue(id: string): unknown;
-  getDiagnostics?(): { availableW: number; solarState: string; targetA: number | null; mode: string };
+  getDiagnostics?(): {
+    availableW: number; solarState: string; targetA: number | null; mode: string;
+    limits: {
+      chargerMaxW: number; gridMaxW: number;
+      batteryChargePeakW: number; batteryDischargePeakW: number; solarPeakW: number;
+    };
+  };
   getModeInfo?(): {
     mode: string | null;
     scheduleEndAt: string | null;
@@ -141,6 +147,9 @@ module.exports = class ChargeIQApp extends Homey.App {
       nextScheduleStartAt: modeInfo.nextScheduleStartAt,
       boostActive: modeInfo.boostActive,
       solarEnough: modeInfo.solarEnough,
+      limits: diag?.limits ?? {
+        chargerMaxW: 0, gridMaxW: 0, batteryChargePeakW: 0, batteryDischargePeakW: 0, solarPeakW: 0,
+      },
       charger: {
         available: !!dev,
         powerW: (cap('measure_power') as number) ?? 0,

@@ -539,6 +539,53 @@
               "max": 600
             }
           ]
+        },
+        {
+          "type": "group",
+          "label": {
+            "en": "Dashboard meters"
+          },
+          "children": [
+            {
+              "id": "peakSolarW",
+              "type": "number",
+              "label": {
+                "en": "Peak solar production (W)"
+              },
+              "hint": {
+                "en": "Your system's peak PV output, used only to show a % capacity meter on the dashboard widget's Solar tile. Set 0 to hide that meter."
+              },
+              "value": 0,
+              "min": 0,
+              "max": 100000
+            },
+            {
+              "id": "peakBatteryChargeW",
+              "type": "number",
+              "label": {
+                "en": "Peak battery charge (W)"
+              },
+              "hint": {
+                "en": "Your battery's peak charge power, used only to show a % capacity meter on the dashboard widget's Battery tile while charging. Set 0 to hide that meter."
+              },
+              "value": 0,
+              "min": 0,
+              "max": 100000
+            },
+            {
+              "id": "peakBatteryDischargeW",
+              "type": "number",
+              "label": {
+                "en": "Peak battery discharge (W)"
+              },
+              "hint": {
+                "en": "Your battery's peak discharge power, used only to show a % capacity meter on the dashboard widget's Battery tile while discharging. Set 0 to hide that meter."
+              },
+              "value": 0,
+              "min": 0,
+              "max": 100000
+            }
+          ]
         }
       ]
     }

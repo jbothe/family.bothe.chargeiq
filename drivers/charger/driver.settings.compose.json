@@ -38,5 +38,14 @@
       { "id": "minOffSec", "type": "number", "label": { "en": "Minimum off time (s)" }, "hint": { "en": "Once paused (or before a first start), surplus must stay sufficient for at least this long before charging (re)starts. Prevents rapid pause/resume cycling." }, "value": 180, "min": 0, "max": 3600 },
       { "id": "solarStaleSec", "type": "number", "label": { "en": "Solar feed stale timeout (s)" }, "hint": { "en": "If no solar reading arrives for this long, solar charging pauses as a fail-safe until fresh data returns." }, "value": 60, "min": 10, "max": 600 }
     ]
+  },
+  {
+    "type": "group",
+    "label": { "en": "Dashboard meters" },
+    "children": [
+      { "id": "peakSolarW", "type": "number", "label": { "en": "Peak solar production (W)" }, "hint": { "en": "Your system's peak PV output, used only to show a % capacity meter on the dashboard widget's Solar tile. Set 0 to hide that meter." }, "value": 0, "min": 0, "max": 100000 },
+      { "id": "peakBatteryChargeW", "type": "number", "label": { "en": "Peak battery charge (W)" }, "hint": { "en": "Your battery's peak charge power, used only to show a % capacity meter on the dashboard widget's Battery tile while charging. Set 0 to hide that meter." }, "value": 0, "min": 0, "max": 100000 },
+      { "id": "peakBatteryDischargeW", "type": "number", "label": { "en": "Peak battery discharge (W)" }, "hint": { "en": "Your battery's peak discharge power, used only to show a % capacity meter on the dashboard widget's Battery tile while discharging. Set 0 to hide that meter." }, "value": 0, "min": 0, "max": 100000 }
+    ]
   }
 ]

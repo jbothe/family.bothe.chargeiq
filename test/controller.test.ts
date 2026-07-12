@@ -1522,6 +1522,34 @@ test('getDiagnostics() reflects the live solar loop state, target, and available
   assert.equal(diag.availableW, 2300);
 });
 
+test('getDiagnostics().limits resolves dashboard capacity-meter peaks from config, defaulting to 0', () => {
+  const { c: defaultC } = makeController([]);
+  assert.deepEqual(defaultC.getDiagnostics().limits, {
+    chargerMaxW: 31 * 230, // maxAmps * voltage * phases, from makeController's default settings
+    gridMaxW: 14000,
+    batteryChargePeakW: 0,
+    batteryDischargePeakW: 0,
+    solarPeakW: 0,
+  }, 'dashboard-only peaks default to 0 (meter hidden) when not configured');
+
+  const { c } = makeController([], {
+    maxAmps: 16,
+    phases: 3,
+    voltage: 230,
+    maxHouseholdW: 10000,
+    peakSolarW: 6000,
+    peakBatteryChargeW: 3000,
+    peakBatteryDischargeW: 2600,
+  });
+  assert.deepEqual(c.getDiagnostics().limits, {
+    chargerMaxW: 16 * 230 * 3,
+    gridMaxW: 10000,
+    batteryChargePeakW: 3000,
+    batteryDischargePeakW: 2600,
+    solarPeakW: 6000,
+  });
+});
+
 // ---------------------------------------------------------------------------
 // destroy()
 // ---------------------------------------------------------------------------

@@ -156,3 +156,148 @@ test('showBoost: true only in scheduled mode with boostActive set', () => {
   assert.equal(PF.showBoost({ mode: 'scheduled', boostActive: false }), false);
   assert.equal(PF.showBoost({ mode: 'manual', boostActive: true }), false, 'boost only applies to scheduled mode');
 });
+
+test('meter: ev uses live charger power against chargerMaxW, hidden when no charger or no cap', () => {
+  const limits = {
+    chargerMaxW: 7360, gridMaxW: 14000, batteryChargePeakW: 3000, batteryDischargePeakW: 2600, solarPeakW: 6000,
+  };
+  assert.deepEqual(
+    PF.meter('ev', { charger: { available: true, powerW: 3680 }, limits }),
+    { pct: 0.5, color: 'var(--green)' },
+  );
+  assert.equal(
+    PF.meter('ev', { charger: { available: false, powerW: 3680 }, limits }), null,
+    'no charger paired',
+  );
+  assert.equal(
+    PF.meter('ev', { charger: { available: true, powerW: 3680 }, limits: { ...limits, chargerMaxW: 0 } }), null,
+    'cap disabled',
+  );
+});
+
+test('meter: solar against solarPeakW, hidden when no peak configured', () => {
+  const limits = {
+    chargerMaxW: 7360, gridMaxW: 14000, batteryChargePeakW: 3000, batteryDischargePeakW: 2600, solarPeakW: 6000,
+  };
+  assert.deepEqual(PF.meter('solar', { solarW: 3000, limits }), { pct: 0.5, color: 'var(--green)' });
+  assert.equal(PF.meter('solar', { solarW: 3000, limits: { ...limits, solarPeakW: 0 } }), null);
+});
+
+test('meter: battery picks charge peak when charging, discharge peak when discharging', () => {
+  const limits = {
+    chargerMaxW: 7360, gridMaxW: 14000, batteryChargePeakW: 3000, batteryDischargePeakW: 2600, solarPeakW: 6000,
+  };
+  assert.deepEqual(
+    PF.meter('battery', { batteryW: 1500, limits }), { pct: 0.5, color: 'var(--purple)' },
+    'charging (positive) uses batteryChargePeakW',
+  );
+  assert.deepEqual(
+    PF.meter('battery', { batteryW: -1300, limits }), { pct: 0.5, color: 'var(--purple)' },
+    'discharging (negative) uses batteryDischargePeakW',
+  );
+  assert.equal(
+    PF.meter('battery', { batteryW: -1300, limits: { ...limits, batteryDischargePeakW: 0 } }), null,
+    'hidden when the relevant peak is 0, even if the other direction has one configured',
+  );
+});
+
+test('meter: grid turns red within 5% of gridMaxW, purple below, hidden when cap disabled', () => {
+  const limits = {
+    chargerMaxW: 7360, gridMaxW: 14000, batteryChargePeakW: 3000, batteryDischargePeakW: 2600, solarPeakW: 6000,
+  };
+  assert.deepEqual(PF.meter('grid', { gridW: 1400, limits }), { pct: 0.1, color: 'var(--purple)' });
+  assert.deepEqual(PF.meter('grid', { gridW: -13300, limits }), { pct: 0.95, color: '#ef4444' }, 'exactly at threshold');
+  assert.deepEqual(PF.meter('grid', { gridW: 13000, limits }), { pct: 13000 / 14000, color: 'var(--purple)' });
+  assert.equal(PF.meter('grid', { gridW: 1000, limits: { ...limits, gridMaxW: 0 } }), null);
+});
+
+test('meter: pct clamps at 1 when current exceeds the configured peak', () => {
+  const limits = {
+    chargerMaxW: 7360, gridMaxW: 14000, batteryChargePeakW: 3000, batteryDischargePeakW: 2600, solarPeakW: 6000,
+  };
+  assert.deepEqual(PF.meter('solar', { solarW: 9000, limits }), { pct: 1, color: 'var(--green)' });
+  assert.deepEqual(PF.meter('grid', { gridW: 20000, limits }), { pct: 1, color: '#ef4444' });
+});
+
+test('meter: null/missing state and unknown kind both yield null', () => {
+  assert.equal(PF.meter('ev', undefined), null);
+  assert.equal(PF.meter('solar', {}), null, 'no limits object at all');
+  assert.equal(PF.meter('house', { limits: { gridMaxW: 14000 } }), null, 'house is never metered');
+});
+
+test('meter: a missing/zero reading is a real 0% fill, not treated as absent', () => {
+  const limits = {
+    chargerMaxW: 7360, gridMaxW: 14000, batteryChargePeakW: 3000, batteryDischargePeakW: 2600, solarPeakW: 6000,
+  };
+  assert.deepEqual(PF.meter('ev', { charger: { available: true }, limits }), { pct: 0, color: 'var(--green)' });
+  assert.deepEqual(PF.meter('solar', { limits }), { pct: 0, color: 'var(--green)' });
+  assert.deepEqual(PF.meter('grid', { limits }), { pct: 0, color: 'var(--purple)' });
+  assert.deepEqual(
+    PF.meter('battery', { limits }), { pct: 0, color: 'var(--purple)' },
+    'batteryW defaults to 0, which is >=0 so it reads against the charge peak',
+  );
+});
+
+test('meter: pct never goes negative even for an out-of-range negative reading', () => {
+  const limits = {
+    chargerMaxW: 7360, gridMaxW: 14000, batteryChargePeakW: 3000, batteryDischargePeakW: 2600, solarPeakW: 6000,
+  };
+  assert.deepEqual(PF.meter('solar', { solarW: -500, limits }), { pct: 0, color: 'var(--green)' });
+});
+
+test('meterHtml: renders "" for a null (hidden) meter', () => {
+  assert.equal(PF.meterHtml(null, 'top'), '');
+});
+
+test('meterHtml: exactly 0% renders a real 0px fill - genuinely empty, not a floored sliver', () => {
+  const html = PF.meterHtml({ pct: 0, color: 'var(--purple)' }, 'top') as string;
+  assert.match(html, /class="meter top"/);
+  assert.match(html, /width:0px/);
+});
+
+test('meterHtml: exactly 100% renders the tile\'s full 44px width, flush into the corner', () => {
+  const html = PF.meterHtml({ pct: 1, color: '#ef4444' }, 'top') as string;
+  assert.match(html, /width:44px/);
+});
+
+test('meterHtml: a low nonzero reading is rescaled up to a visible floor', () => {
+  // Regression: confirmed on real hardware that a ~6.3% grid reading (900W / 14200W)
+  // rendered as fully invisible - .tile's overflow:hidden clips the meter strip to its
+  // corner radius, and a fill under the corner's own dead-zone threshold is entirely
+  // swallowed by that curve at every row of the strip, not just thinned out.
+  const html = PF.meterHtml({ pct: 900 / 14200, color: 'var(--purple)' }, 'top') as string;
+  // EDGE_PX(8) + pct*(44-2*EDGE_PX) = 8 + 0.0634*28 = 9.77 -> rounds to 10px.
+  assert.match(html, /width:10px/);
+});
+
+test('meterHtml: a high-but-not-full reading is rescaled down, staying visibly short of 100%', () => {
+  // Regression: confirmed on real hardware that both 92% and 96% readings were visually
+  // indistinguishable from a full 100% fill, because all three extended past the same
+  // corner-clip boundary - a bigger EDGE_PX widens the margin so the gap before 100% reads
+  // as unmistakable, not just technically present.
+  const html92 = PF.meterHtml({ pct: 0.92, color: '#ef4444' }, 'top') as string;
+  // 8 + 0.92*28 = 33.76 -> 34px, clearly short of the true 44px full width.
+  assert.match(html92, /width:34px/);
+
+  const html96 = PF.meterHtml({ pct: 0.96, color: '#ef4444' }, 'top') as string;
+  // 8 + 0.96*28 = 34.88 -> 35px - distinct from both 92% (34px) and 100% (44px), not
+  // collapsed into the same rendered width as either.
+  assert.match(html96, /width:35px/);
+});
+
+test('meterHtml: the rescale is monotonic and reaches both true endpoints only at 0 and 1', () => {
+  const widths = [0, 0.063, 0.5, 0.92, 0.96, 1].map((pct) => {
+    const html = PF.meterHtml({ pct, color: 'var(--purple)' }, 'top') as string;
+    return Number(/width:(\d+)px/.exec(html)![1]);
+  });
+  for (let i = 1; i < widths.length; i += 1) {
+    assert.ok(widths[i] > widths[i - 1], `width must strictly increase: ${widths}`);
+  }
+  assert.equal(widths[0], 0);
+  assert.equal(widths[widths.length - 1], 44);
+});
+
+test('meterHtml: edge class selects which tile side the strip bleeds to', () => {
+  assert.match(PF.meterHtml({ pct: 0.5, color: 'var(--green)' }, 'bottom') as string, /class="meter bottom"/);
+  assert.match(PF.meterHtml({ pct: 0.5, color: 'var(--green)' }, 'top') as string, /class="meter top"/);
+});

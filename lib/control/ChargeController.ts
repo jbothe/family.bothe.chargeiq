@@ -79,6 +79,10 @@ interface ControllerConfig {
   maxHouseholdW: number;
   sharedCircuitA: number;
   sharedCircuitBufferA: number;
+  // Dashboard capacity-meter peaks (0 = meter hidden); no bearing on control decisions.
+  peakSolarW: number;
+  peakBatteryChargeW: number;
+  peakBatteryDischargeW: number;
 }
 
 const DEFAULTS: ControllerConfig = {
@@ -98,6 +102,9 @@ const DEFAULTS: ControllerConfig = {
   maxHouseholdW: 14000,
   sharedCircuitA: 0,
   sharedCircuitBufferA: 0,
+  peakSolarW: 0,
+  peakBatteryChargeW: 0,
+  peakBatteryDischargeW: 0,
 };
 
 const PROFILE_ID = 1;
@@ -290,6 +297,9 @@ export class ChargeController {
       maxHouseholdW: g('maxHouseholdW', DEFAULTS.maxHouseholdW),
       sharedCircuitA: g('sharedCircuitA', DEFAULTS.sharedCircuitA),
       sharedCircuitBufferA: g('sharedCircuitBufferA', DEFAULTS.sharedCircuitBufferA),
+      peakSolarW: g('peakSolarW', DEFAULTS.peakSolarW),
+      peakBatteryChargeW: g('peakBatteryChargeW', DEFAULTS.peakBatteryChargeW),
+      peakBatteryDischargeW: g('peakBatteryDischargeW', DEFAULTS.peakBatteryDischargeW),
     };
     this.solarLoop?.setConfig(this.solarLoopConfig());
     this.timezone = this.host.getTimezone?.();
@@ -770,12 +780,25 @@ export class ChargeController {
     };
   }
 
-  getDiagnostics(): { availableW: number; solarState: string; targetA: number | null; mode: ChargeMode } {
+  getDiagnostics(): {
+    availableW: number; solarState: string; targetA: number | null; mode: ChargeMode;
+    limits: {
+      chargerMaxW: number; gridMaxW: number;
+      batteryChargePeakW: number; batteryDischargePeakW: number; solarPeakW: number;
+    };
+    } {
     return {
       availableW: this.lastAvailableW,
       solarState: this.solarLoop?.getState() ?? 'off',
       targetA: this.solarTargetAmps,
       mode: this.getMode(),
+      limits: {
+        chargerMaxW: this.cfg.maxAmps * this.cfg.voltage * this.cfg.phases,
+        gridMaxW: this.cfg.maxHouseholdW,
+        batteryChargePeakW: this.cfg.peakBatteryChargeW,
+        batteryDischargePeakW: this.cfg.peakBatteryDischargeW,
+        solarPeakW: this.cfg.peakSolarW,
+      },
     };
   }
 
