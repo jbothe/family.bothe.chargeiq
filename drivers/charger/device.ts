@@ -110,7 +110,7 @@ module.exports = class ChargerDevice extends Homey.Device {
     return this.controller.getDiagnostics();
   }
 
-  /** Derived mode + short status detail (for the widget). */
+  /** Derived mode + the raw facts behind it (for the widget's shorthand status). */
   getModeInfo() {
     return this.controller.getModeInfo();
   }

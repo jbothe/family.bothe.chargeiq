@@ -12,7 +12,13 @@ interface ChargerDeviceLike {
   hasCapability(id: string): boolean;
   getCapabilityValue(id: string): unknown;
   getDiagnostics?(): { availableW: number; solarState: string; targetA: number | null; mode: string };
-  getModeInfo?(): { mode: string | null; detail: string };
+  getModeInfo?(): {
+    mode: string | null;
+    scheduleEndAt: string | null;
+    nextScheduleStartAt: string | null;
+    boostActive: boolean;
+    solarEnough: boolean | null;
+  };
   getSchedule?(): unknown[];
   setSchedule?(windows: unknown[]): Promise<void>;
 }
@@ -118,7 +124,9 @@ module.exports = class ChargeIQApp extends Homey.App {
     const dev = this.getChargerDevice();
     const cap = (id: string) => (dev && dev.hasCapability(id) ? dev.getCapabilityValue(id) : null);
     const diag = dev?.getDiagnostics?.();
-    const modeInfo = dev?.getModeInfo?.() ?? { mode: null, detail: '' };
+    const modeInfo = dev?.getModeInfo?.() ?? {
+      mode: null, scheduleEndAt: null, nextScheduleStartAt: null, boostActive: false, solarEnough: null,
+    };
     // Excess solar available to the car: from the loop when present, else grid export.
     const surplusW = diag ? diag.availableW : Math.max(0, -solar.gridSignedW);
     return {
@@ -129,7 +137,10 @@ module.exports = class ChargeIQApp extends Homey.App {
       batterySoc: solar.batterySoc,
       surplusW,
       mode: modeInfo.mode,
-      modeDetail: modeInfo.detail,
+      scheduleEndAt: modeInfo.scheduleEndAt,
+      nextScheduleStartAt: modeInfo.nextScheduleStartAt,
+      boostActive: modeInfo.boostActive,
+      solarEnough: modeInfo.solarEnough,
       charger: {
         available: !!dev,
         powerW: (cap('measure_power') as number) ?? 0,

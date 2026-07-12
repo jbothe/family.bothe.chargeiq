@@ -77,7 +77,8 @@ test('batteryVisual: color/fill tiers by charge percent', () => {
 test('evChip: label + style class from evcharger_charging_state, null when no charger paired', () => {
   assert.deepEqual(
     PF.evChip({ charger: { available: true, chargingState: 'plugged_in_charging' } }),
-    { label: 'CHARGING', cls: 'charging' },
+    { cls: 'charging' },
+    'charging carries no label - render() fills it with a bolt icon + live amps instead',
   );
   assert.deepEqual(
     PF.evChip({ charger: { available: true, chargingState: 'plugged_in' } }),
@@ -113,15 +114,45 @@ test('chargeAmps: shows the commanded limit while actively charging, 0A otherwis
   );
 });
 
-test('mode line shows derived mode + detail', () => {
+test('modeIconKey: scheduled/manual are literal, solar splits on solarEnough', () => {
+  assert.equal(PF.modeIconKey({ mode: 'scheduled' }), 'scheduled');
+  assert.equal(PF.modeIconKey({ mode: 'manual' }), 'manual');
+  assert.equal(PF.modeIconKey({ mode: 'solar', solarEnough: true }), 'solar-enough');
+  assert.equal(PF.modeIconKey({ mode: 'solar', solarEnough: false }), 'solar-low');
+  assert.equal(PF.modeIconKey({ mode: null }), null);
+});
+
+test('modeStatusText: -> window end while scheduled, -> next schedule start otherwise, empty with nothing to point to', () => {
+  // Constructed from local Date components (not an ISO literal) so the round-trip through
+  // toISOString()/new Date() and back to toLocaleTimeString() lands on the same wall-clock
+  // time regardless of which timezone this test happens to run in.
+  const end = new Date(2024, 0, 1, 14, 0);
+  const nextStart = new Date(2024, 0, 1, 9, 0);
+  // Matches modeStatusText's own formatting: lowercase, no space before am/pm.
+  const fmt = (d: Date) => d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })
+    .replace(' ', '').toLowerCase();
+
   assert.equal(
-    PF.modeText({ mode: 'manual', modeDetail: 'stopped · schedule 9:00 AM', charger: { available: true } }),
-    'Mode: Manual · stopped · schedule 9:00 AM',
+    PF.modeStatusText({ mode: 'scheduled', scheduleEndAt: end.toISOString(), nextScheduleStartAt: null }),
+    `→ ${fmt(end)}`,
   );
   assert.equal(
-    PF.modeText({ mode: 'solar', modeDetail: 'idle (low excess)', charger: { available: true } }),
-    'Mode: Solar · idle (low excess)',
+    PF.modeStatusText({ mode: 'manual', scheduleEndAt: null, nextScheduleStartAt: nextStart.toISOString() }),
+    `→ ${fmt(nextStart)}`,
   );
-  assert.equal(PF.modeText({ mode: 'scheduled', charger: { available: true } }), 'Mode: Scheduled');
-  assert.equal(PF.modeText({ charger: { available: false } }), 'No charger paired');
+  assert.equal(
+    PF.modeStatusText({ mode: 'solar', scheduleEndAt: null, nextScheduleStartAt: nextStart.toISOString() }),
+    `→ ${fmt(nextStart)}`,
+  );
+  assert.equal(
+    PF.modeStatusText({ mode: 'solar', scheduleEndAt: null, nextScheduleStartAt: null }),
+    '',
+    'no schedule configured at all - nothing to point to',
+  );
+});
+
+test('showBoost: true only in scheduled mode with boostActive set', () => {
+  assert.equal(PF.showBoost({ mode: 'scheduled', boostActive: true }), true);
+  assert.equal(PF.showBoost({ mode: 'scheduled', boostActive: false }), false);
+  assert.equal(PF.showBoost({ mode: 'manual', boostActive: true }), false, 'boost only applies to scheduled mode');
 });

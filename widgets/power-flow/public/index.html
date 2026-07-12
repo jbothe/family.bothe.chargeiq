@@ -64,14 +64,21 @@
              position: absolute; top: 0; }
     .hcol.ev .hicon { left: 25%; transform: translateX(-50%); }
     .hcol.solar .hicon { left: 75%; transform: translateX(-50%); }
-    /* height is pinned to the value row's own line height (not the val+lbl block's combined
-       height) so translateY(-50%) centers .val itself at top:20px — the label just flows
-       below, uncentered. .mode-stack mirrors this exactly so its first row (icon+amps) lands
-       on the same y as .val regardless of how tall the CHARGING/READY/UNPLUGGED chip is. */
-    .htext { display: flex; flex-direction: column; gap: 1px;
-              position: absolute; top: 20px; height: 19px; transform: translateY(-50%); }
-    .hcol.ev .htext { right: calc(75% + 30px); align-items: flex-end; text-align: right; }
-    .hcol.solar .htext { left: calc(75% + 30px); align-items: flex-start; text-align: left; }
+    /* top:0 (not a translateY(-50%) center) - the literal top edge of the first child
+       (.lbl, or .chip). Both .htext and .mode-stack use the same top, and their total
+       height (.lbl/.chip's 16px + the 4px gap + .val's/.mode-row's 20px = 40px) exactly
+       matches .tile's own 40px, so the whole 2-line block spans the same 0-40 band as the
+       icon and is centered with it as a unit - not just its first or second line. Both
+       children have an explicit height so the gap between them - and each one's alignment
+       with its counterpart in the other stack - is deterministic box-model math, not a
+       font-metrics guess. This has to be an explicit height + align-items:center flex box,
+       not line-height: mixing two font-sizes on one line (e.g. .val's bold number next to
+       its smaller .unit span) makes the browser's own line-box taller than a specified
+       line-height, so line-height alone doesn't actually clamp the rendered height -
+       confirmed via getBoundingClientRect (a 20px line-height still measured 23px tall). */
+    .htext { display: flex; flex-direction: column; gap: 4px; position: absolute; top: 0; }
+    .hcol.ev .htext { right: calc(75% + 30px); align-items: flex-end; }
+    .hcol.solar .htext { left: calc(75% + 30px); align-items: flex-start; }
 
     /* position:relative (no z-index needed) lifts tiles and the bus into the positioned
        paint layer, so they're always drawn over the plain in-flow connectors — letting a
@@ -88,34 +95,53 @@
     .conn.active.dir-down { animation: flowDown .5s linear infinite; }
     .conn.active.dir-up { animation: flowUp .5s linear infinite; }
 
-    .val { font-size: 17px; font-weight: 700; font-variant-numeric: tabular-nums; letter-spacing: -0.01em; }
+    /* align-items:baseline (not center) so the smaller .unit span sits on the same text
+       baseline as the number, not vertically centered against it - the explicit height
+       still keeps the box itself deterministic (see .htext comment). gap is the space
+       between the number and unit: kept in CSS rather than a literal space character in
+       the markup so it survives regardless of how flex handles whitespace text nodes. */
+    .val { display: flex; align-items: baseline; gap: 2px; height: 20px;
+           font-size: 17px; font-weight: 700; font-variant-numeric: tabular-nums; letter-spacing: -0.01em; }
     .val .unit { font-size: 11px; color: var(--muted); font-weight: 600; } /* de-emphasized so the number reads first */
-    .lbl { font-size: 10px; font-weight: 600; letter-spacing: 0.05em; color: var(--muted); text-transform: uppercase; }
+    /* Explicit height (not line-height/padding) gives .lbl the same rendered height as
+       .chip, so the two align by center - see .mode-stack and the .htext comment above on
+       why this can't just be line-height. */
+    .lbl { display: flex; align-items: center; height: 16px;
+           font-size: 10px; font-weight: 600; letter-spacing: 0.05em; color: var(--muted); text-transform: uppercase; }
 
     .tile-wrap { position: relative; }
 
-    /* Mode icon + EV status chip, stacked to the right of the EV icon. Anchored at the same
-       top/transform as .htext so the icon lines up with the power value's baseline band on
-       the other side, and the chip lines up with that side's label. */
-    .mode-stack { position: absolute; left: 100%; top: 20px; height: 19px; transform: translateY(-50%); margin-left: 6px;
-                  display: flex; flex-direction: column; align-items: flex-start; gap: 2px; }
-    .mode-row { display: flex; align-items: center; gap: 4px; }
-    .mode-icon { width: 17px; height: 17px; color: var(--text); }
+    /* EV chip + mode icon/shorthand status, stacked to the right of the EV icon (chip on
+       top, icon+time beneath - mirrors .htext's label-above-value order). Anchored at the
+       same top as .htext (see there) so the chip lines up with the label on the other
+       side, and the icon+time row lines up with the power value. */
+    .mode-stack { position: absolute; left: 100%; top: 0; margin-left: 6px;
+                  display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
+    .mode-row { display: flex; align-items: center; gap: 4px; height: 20px; }
+    .mode-icon { width: 19.5px; height: 19.5px; color: var(--text); }
     .mode-icon svg { display: block; width: 100%; height: 100%; }
     .mode-icon:empty { display: none; }
-    .mode-amps { white-space: nowrap; }
+    /* "→ 2:00pm" - the mode's next relevant transition (schedule window end while
+       Scheduled, else the next window start). Empty (no schedule configured) collapses
+       to zero width on its own, same as .mode-icon:empty. Styled to match .val .unit
+       (small/muted) rather than .val itself - it's a secondary hint, not a metric. */
+    .mode-time { white-space: nowrap; font-size: 11px; font-weight: 600; color: var(--muted); }
+    .boost-icon { width: 15px; height: 15px; color: #f59e0b; }
+    .boost-icon svg { display: block; width: 100%; height: 100%; }
+    .boost-icon:empty { display: none; }
 
-    /* Chips: EV state (CHARGING / READY / UNPLUGGED) and Battery SoC%. Sized/tracked to
-       match .lbl. .tile-chip floats a chip beside a tile (used for the standalone Battery
-       SoC chip); the EV chip instead sits statically inside .mode-stack. */
-    .chip { white-space: nowrap; font-size: 10px; font-weight: 700; letter-spacing: 0.05em;
-            text-transform: uppercase; padding: 2px 6px; border-radius: 999px; }
+    /* EV state chip. inline-flex + gap lets the charging chip mix an icon with its amps
+       reading; plain-text chips (READY / UNPLUGGED) are unaffected since they're a single
+       text-node child. Explicit height (not line-height/padding) matches .lbl's for
+       center-alignment - see .mode-stack. */
+    .chip { display: inline-flex; align-items: center; height: 16px; gap: 3px; white-space: nowrap;
+            font-size: 10px; font-weight: 700; letter-spacing: 0.05em;
+            text-transform: uppercase; padding: 0 6px; border-radius: 999px; }
     .chip:empty { display: none; }
+    .chip svg { display: block; }
     .chip.charging { color: var(--green); background: color-mix(in srgb, var(--green) 18%, transparent); }
     .chip.ready { color: var(--purple); background: color-mix(in srgb, var(--purple) 18%, transparent); }
     .chip.unplugged { color: var(--muted); background: color-mix(in srgb, var(--muted) 18%, transparent); }
-    .chip.soc { color: var(--purple); background: color-mix(in srgb, var(--purple) 18%, transparent); }
-    .tile-chip { position: absolute; left: 100%; top: 50%; transform: translateY(-50%); margin-left: 6px; }
 
     /* Power bus: negative top/bottom margins pull it into both rows' connectors. Gradient
        reflects live grid state (see PF.busState). */
@@ -128,9 +154,9 @@
     /* Device tile row: Grid / Battery / House */
     .tilerow { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
     .tcol { display: flex; flex-direction: column; align-items: center; gap: 4px; text-align: center; }
-    .tcol .val { margin-top: 2px; }
-
-    .modeline { margin-top: 9px; text-align: center; font-size: 11.5px; color: var(--muted); }
+    /* Value-to-label gap kept separate from the icon-to-value gap above (.tcol's own gap) so
+       it can be tuned independently - slightly tighter than the icon spacing reads better. */
+    .tcol-text { display: flex; flex-direction: column; align-items: center; gap: 1px; margin-top: 2px; }
   </style>
 </head>
 <body>
@@ -138,18 +164,19 @@
     <div class="headrow">
       <div class="hcol ev">
         <div class="htext">
-          <div class="val" id="ev-val">–</div>
           <div class="lbl">EV</div>
+          <div class="val" id="ev-val">–</div>
         </div>
         <div class="hicon">
           <div class="tile-wrap">
             <div class="tile" id="ev-tile"></div>
             <div class="mode-stack">
+              <div class="chip" id="ev-chip"></div>
               <div class="mode-row">
                 <div class="mode-icon" id="mode-icon"></div>
-                <div class="mode-amps val" id="mode-amps"></div>
+                <div class="mode-time" id="mode-time"></div>
+                <div class="boost-icon" id="mode-boost"></div>
               </div>
-              <div class="chip" id="ev-chip"></div>
             </div>
           </div>
           <div class="conn" id="ev-conn"></div>
@@ -161,8 +188,8 @@
           <div class="conn" id="solar-conn"></div>
         </div>
         <div class="htext">
-          <div class="val" id="solar-val">–</div>
           <div class="lbl">Solar</div>
+          <div class="val" id="solar-val">–</div>
         </div>
       </div>
     </div>
@@ -173,44 +200,51 @@
       <div class="tcol">
         <div class="conn" id="grid-conn"></div>
         <div class="tile" id="grid-tile"></div>
-        <div class="val" id="grid-val">–</div>
-        <div class="lbl">Grid</div>
+        <div class="tcol-text">
+          <div class="val" id="grid-val">–</div>
+          <div class="lbl">Grid</div>
+        </div>
       </div>
       <div class="tcol">
         <div class="conn" id="battery-conn"></div>
-        <div class="tile-wrap">
-          <div class="tile" id="battery-tile"></div>
-          <div class="chip soc tile-chip" id="battery-chip"></div>
+        <div class="tile" id="battery-tile"></div>
+        <div class="tcol-text">
+          <div class="val" id="battery-val">–</div>
+          <div class="lbl">Battery</div>
         </div>
-        <div class="val" id="battery-val">–</div>
-        <div class="lbl">Battery</div>
       </div>
       <div class="tcol">
         <div class="conn" id="house-conn"></div>
         <div class="tile" id="house-tile"></div>
-        <div class="val" id="house-val">–</div>
-        <div class="lbl">House</div>
+        <div class="tcol-text">
+          <div class="val" id="house-val">–</div>
+          <div class="lbl">House</div>
+        </div>
       </div>
     </div>
-
-    <div class="modeline" id="status">–</div>
   </div>
 
   <script type="text/javascript">
     var ICONS = {
-      ev: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 16v-3.5a1 1 0 0 1 .4-.8l2.2-1.7a2 2 0 0 1 1.2-.4h8.4a2 2 0 0 1 1.2.4l2.2 1.7a1 1 0 0 1 .4.8V16"/><path d="M3 16h18"/><path d="M6 10.5 7.5 6.5A1.5 1.5 0 0 1 9 5.5h6a1.5 1.5 0 0 1 1.5 1l1.5 4"/><circle cx="7.5" cy="16.3" r="1.6"/><circle cx="16.5" cy="16.3" r="1.6"/></svg>',
-      solar: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="12" rx="1.5"/><path d="M3 8h18M3 12h18M9 4v12M15 4v12"/><path d="M9 20l1.5-4M15 20l-1.5-4"/></svg>',
-      grid: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l7 20M12 2L5 22M9 22l1.5-6h3L15 22"/><path d="M7 14h10M8.3 8h7.4"/></svg>',
-      house: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11l9-7 9 7"/><path d="M5 9.5V21h14V9.5"/></svg>',
+      ev: '<svg width="25.3" height="25.3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 16v-3.5a1 1 0 0 1 .4-.8l2.2-1.7a2 2 0 0 1 1.2-.4h8.4a2 2 0 0 1 1.2.4l2.2 1.7a1 1 0 0 1 .4.8V16"/><path d="M3 16h18"/><path d="M6 10.5 7.5 6.5A1.5 1.5 0 0 1 9 5.5h6a1.5 1.5 0 0 1 1.5 1l1.5 4"/><circle cx="7.5" cy="16.3" r="1.6"/><circle cx="16.5" cy="16.3" r="1.6"/></svg>',
+      solar: '<svg width="25.3" height="25.3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="12" rx="1.5"/><path d="M3 8h18M3 12h18M9 4v12M15 4v12"/><path d="M9 20l1.5-4M15 20l-1.5-4"/></svg>',
+      grid: '<svg width="25.3" height="25.3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l7 20M12 2L5 22M9 22l1.5-6h3L15 22"/><path d="M7 14h10M8.3 8h7.4"/></svg>',
+      house: '<svg width="25.3" height="25.3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11l9-7 9 7"/><path d="M5 9.5V21h14V9.5"/></svg>',
+      // Lightning bolt used inline inside the EV chip when actively charging.
+      bolt: '<svg width="11.5" height="11.5" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M13 2 3 14h7l-1 8 10-12h-7l1-8Z"/></svg>',
+      // Small "boost active" badge, shown next to the clock icon in scheduled mode.
+      boost: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M7 15l5-5 5 5"/><path d="M7 9l5-5 5 5"/></svg>',
     };
-    // Mode icons shown above the EV chip: which derived mode is currently driving the charger.
+    // Mode icons: which derived mode is currently driving the charger, and (for solar)
+    // whether there's currently enough excess to actually charge on it.
     var MODE_ICONS = {
-      solar: '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4.5"/><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/></svg>',
-      scheduled: '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/></svg>',
-      manual: '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="6" y1="4" x2="6" y2="20"/><circle cx="6" cy="9" r="2" fill="currentColor" stroke="none"/><line x1="12" y1="4" x2="12" y2="20"/><circle cx="12" cy="15" r="2" fill="currentColor" stroke="none"/><line x1="18" y1="4" x2="18" y2="20"/><circle cx="18" cy="7" r="2" fill="currentColor" stroke="none"/></svg>',
+      'solar-enough': '<svg width="19.5" height="19.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4.5"/><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/></svg>',
+      'solar-low': '<svg width="19.5" height="19.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="7" r="4.5"/><path d="M8 0.5v2M2.5 3.5l1.4 1.4M0.5 9h2"/><path d="M9 20.5h10.5a4 4 0 0 0 .4-7.96 5 5 0 0 0-9.6-1.7A4.3 4.3 0 0 0 9 20.5Z"/></svg>',
+      scheduled: '<svg width="19.5" height="19.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/></svg>',
+      manual: '<svg width="19.5" height="19.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="6" y1="4" x2="6" y2="20"/><circle cx="6" cy="9" r="2" fill="currentColor" stroke="none"/><line x1="12" y1="4" x2="12" y2="20"/><circle cx="12" cy="15" r="2" fill="currentColor" stroke="none"/><line x1="18" y1="4" x2="18" y2="20"/><circle cx="18" cy="7" r="2" fill="currentColor" stroke="none"/></svg>',
     };
     function batterySvg(v) {
-      return '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="' + v.color + '" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">' +
+      return '<svg width="25.3" height="25.3" viewBox="0 0 24 24" fill="none" stroke="' + v.color + '" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">' +
         '<rect x="7" y="4" width="10" height="17" rx="2.5"/>' +
         '<rect x="10.5" y="1.5" width="3" height="2.5" rx="1" fill="' + v.color + '" stroke="none"/>' +
         '<rect x="8.5" y="' + v.fillY + '" width="7" height="' + v.fillHeight + '" rx="1" fill="' + v.color + '" stroke="none"/>' +
@@ -275,32 +309,60 @@
       },
       // EV status chip, from the same evcharger_charging_state enum Homey's own UI uses
       // (computed once in ChargeController.toChargingState, just passed through here).
+      // Charging carries no label - the render layer fills it with a bolt icon + live
+      // amps (via chargeAmps) instead of static text.
       evChip: function (s) {
         s = s || {};
         var c = s.charger || {};
         if (!c.available) return null;
-        if (c.chargingState === 'plugged_in_charging') return { label: 'CHARGING', cls: 'charging' };
+        if (c.chargingState === 'plugged_in_charging') return { cls: 'charging' };
         if (c.chargingState === 'plugged_in') return { label: 'READY', cls: 'ready' };
         if (c.chargingState === 'plugged_out') return { label: 'UNPLUGGED', cls: 'unplugged' };
         return null;
       },
-      // Commanded charge current, next to the mode icon. charge_current_limit is a target the
-      // controller only rewrites on a fresh positive value (see ChargeController) - it does
-      // *not* reset to 0 on pause - so paused/not-actively-charging is gated here instead of
-      // trusting the raw capability value.
+      // Commanded charge current, shown in the EV chip while charging. charge_current_limit
+      // is a target the controller only rewrites on a fresh positive value (see
+      // ChargeController) - it does *not* reset to 0 on pause - so paused/not-actively-
+      // charging is gated here instead of trusting the raw capability value.
       chargeAmps: function (s) {
         s = s || {};
         var c = s.charger || {};
         if (!c.available || c.chargingState !== 'plugged_in_charging') return 0;
         return c.limitA != null ? c.limitA : 0;
       },
-      // Bottom caption, e.g. "Mode: Manual · schedule 9:00 AM" / "Mode: Solar · idle (low excess)".
-      modeText: function (s) {
+      // Which icon represents the current mode - solar splits into two glyphs depending on
+      // whether there's currently enough excess to actually charge on it.
+      modeIconKey: function (s) {
         s = s || {};
-        var c = s.charger || {};
-        if (!c.available) return 'No charger paired';
-        if (!s.mode) return 'Idle';
-        return 'Mode: ' + PF.cap(s.mode) + (s.modeDetail ? ' · ' + s.modeDetail : '');
+        if (s.mode === 'scheduled') return 'scheduled';
+        if (s.mode === 'manual') return 'manual';
+        if (s.mode === 'solar') return s.solarEnough ? 'solar-enough' : 'solar-low';
+        return null;
+      },
+      // The Date the mode's shorthand status should point to: the active window's end while
+      // Scheduled (it's already running - what matters is when it stops), otherwise the next
+      // schedule window's start (also the moment a manual override auto-clears, per
+      // ChargeController's latch rule). null when there's nothing to point to, e.g. no
+      // schedule windows configured at all.
+      modeTime: function (s) {
+        s = s || {};
+        var iso = s.mode === 'scheduled' ? s.scheduleEndAt : s.nextScheduleStartAt;
+        return iso ? new Date(iso) : null;
+      },
+      // "→ 2:00pm" next to the mode icon, or '' when modeTime() has nothing to show.
+      // Lowercase with no space before am/pm - shorthand, not a clock face.
+      modeStatusText: function (s) {
+        var d = PF.modeTime(s);
+        if (!d) return '';
+        var t = d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+        return '→ ' + t.replace(' ', '').toLowerCase();
+      },
+      // The small boost badge: only while a scheduled window is actively raising current
+      // above its floor right now (see ChargeController.getModeInfo), not merely whenever
+      // the window has boost-to-cap enabled.
+      showBoost: function (s) {
+        s = s || {};
+        return s.mode === 'scheduled' && !!s.boostActive;
       },
     };
     // === POWERFLOW-LOGIC-END ===
@@ -312,15 +374,13 @@
     }
 
     // Wraps the "kW"/"W" suffix of a PF.fmtW() string in a <span> so it can be de-emphasized.
+    // No space character here - the gap between number and unit is .val's own CSS `gap`
+    // (sized to the unit's smaller font), not a literal space in the markup.
     function valHtml(w) {
       var str = PF.fmtW(w);
       var i = str.lastIndexOf(' ');
       if (i < 0) return str;
       return str.slice(0, i) + '<span class="unit">' + str.slice(i + 1) + '</span>';
-    }
-
-    function ampsHtml(a) {
-      return Math.round(a) + '<span class="unit">A</span>';
     }
 
     function render(s) {
@@ -343,11 +403,16 @@
 
       var chip = PF.evChip(s);
       var chipEl = document.getElementById('ev-chip');
-      chipEl.textContent = chip ? chip.label : '';
+      if (chip && chip.cls === 'charging') {
+        chipEl.innerHTML = ICONS.bolt + Math.round(PF.chargeAmps(s)) + 'A';
+      } else {
+        chipEl.textContent = chip ? chip.label : '';
+      }
       chipEl.className = 'chip' + (chip ? ' ' + chip.cls : '');
 
-      document.getElementById('mode-icon').innerHTML = MODE_ICONS[s.mode] || '';
-      document.getElementById('mode-amps').innerHTML = ampsHtml(PF.chargeAmps(s));
+      document.getElementById('mode-icon').innerHTML = MODE_ICONS[PF.modeIconKey(s)] || '';
+      document.getElementById('mode-time').textContent = PF.modeStatusText(s);
+      document.getElementById('mode-boost').innerHTML = PF.showBoost(s) ? ICONS.boost : '';
 
       document.getElementById('ev-val').innerHTML = valHtml(ev.mag);
       document.getElementById('solar-val').innerHTML = valHtml(solar.mag);
@@ -357,9 +422,6 @@
 
       var bv = PF.batteryVisual(s.batterySoc);
       document.getElementById('battery-tile').innerHTML = batterySvg(bv);
-      var soc = s.batterySoc;
-      document.getElementById('battery-chip').textContent =
-        (soc == null || isNaN(soc)) ? '' : Math.round(soc) + '%';
 
       document.getElementById('bus').className = 'bus bus-' + PF.busState(s.gridW);
 
@@ -370,8 +432,6 @@
       setConn(document.getElementById('grid-conn'), 'var(--flow)', grid);
       setConn(document.getElementById('house-conn'), 'var(--flow)', house);
       setConn(document.getElementById('battery-conn'), 'var(--flow)', battery);
-
-      document.getElementById('status').textContent = PF.modeText(s);
     }
 
     var CHECK_MS = 5000;   // how often we re-check staleness
