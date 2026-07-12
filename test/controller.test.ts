@@ -1604,8 +1604,14 @@ test('a hard cap tightening further jumps the write throttle instead of waiting 
   }];
   const store: Record<string, unknown> = { schedule: sched };
   const settings: Record<string, unknown> = {
-    minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdW: 14000,
-    sharedCircuitA: 30, sharedCircuitBufferA: 0, writeThrottleMs: 5000,
+    minAmps: 6,
+    maxAmps: 32,
+    phases: 1,
+    voltage: 230,
+    maxHouseholdW: 14000,
+    sharedCircuitA: 30,
+    sharedCircuitBufferA: 0,
+    writeThrottleMs: 5000,
   };
   const host: ControllerHost = {
     identity: 'X',
@@ -1688,4 +1694,80 @@ test('a routine decrease with no cap tightening still respects the write throttl
 
   await new Promise((r) => setTimeout(r, 250));
   assert.ok(calls.includes('SetChargingProfile'), 'the deferred write eventually fires once the throttle window elapses');
+});
+
+test('an urgent cap-tightening write cancels an already-pending throttled write, not just a future one', async () => {
+  const writes: number[] = [];
+  const fakeClient: RpcClient = {
+    identity: 'X',
+    handle: () => {},
+    call: async (method: string, params?: unknown) => {
+      if (method === 'SetChargingProfile') {
+        writes.push((params as { csChargingProfiles: { chargingSchedule: { chargingSchedulePeriod: [{ limit: number }] } } })
+          .csChargingProfiles.chargingSchedule.chargingSchedulePeriod[0].limit);
+      }
+      return { status: 'Accepted' };
+    },
+    close: async () => {},
+    on: () => {},
+  };
+  const cp = new ChargePoint({ identity: 'X', authorize: () => true, nextTransactionId: () => 1 });
+  cp.attach(fakeClient);
+
+  const store: Record<string, unknown> = { schedule: [] };
+  const settings: Record<string, unknown> = {
+    minAmps: 6,
+    maxAmps: 32,
+    phases: 1,
+    voltage: 230,
+    maxHouseholdW: 14000,
+    sharedCircuitA: 25,
+    sharedCircuitBufferA: 0,
+    writeThrottleMs: 300,
+  };
+  const host: ControllerHost = {
+    identity: 'X',
+    setCapability: () => {},
+    getSetting: <T>(k: string) => settings[k] as T,
+    getStore: <T>(k: string) => store[k] as T,
+    setStore: async (k, v) => {
+      store[k] = v;
+    },
+    setAvailable: () => {},
+    setUnavailable: () => {},
+    setWarning: () => {},
+    log: () => {},
+    error: () => {},
+  };
+  const cs = { getChargePoint: () => cp, on: () => {} } as unknown as CentralSystem;
+  const c = new ChargeController(host, cs);
+  c.init();
+  // Latch the manual target before the charger is plugged in, so the only
+  // write that ever fires is the eventual 16A one - not a spurious 0A write
+  // off the bare Charging status alone.
+  await c.startManual(16);
+  cp.emit('status', { connectorId: 1, errorCode: 'NoError', status: 'Charging' });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(writes, [16], 'first write goes through immediately (no prior write to throttle against)');
+
+  // Establishes lastSharedCircuitCapAmps (25A, idle battery) without itself
+  // tightening anything yet - there's no prior sample to compare against.
+  c.onSolarSample({ gridSignedW: 0, pvW: 0, batteryW: 0 });
+
+  // A genuine target change lands right after the first write - throttled,
+  // so it only queues a deferred write rather than sending immediately.
+  await c.setCurrentLimit(20);
+  assert.deepEqual(writes, [16], 'the 20A write is deferred, not sent yet - still inside writeThrottleMs');
+
+  // The battery ramps up hard before that deferred write fires -> shared
+  // circuit cap collapses 25A -> 5A, below the 20A just requested.
+  c.onSolarSample({ gridSignedW: 0, pvW: 0, batteryW: 4600 });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(writes, [16, 0],
+    'the urgent write cancels the still-pending 20A write and sends the freshly-capped 0A instead');
+
+  // The original deferred write's timer must actually have been cancelled -
+  // nothing further arrives once it would have fired.
+  await new Promise((r) => setTimeout(r, 350));
+  assert.deepEqual(writes, [16, 0], 'no stale 20A write leaks out once the original throttle window passes');
 });
