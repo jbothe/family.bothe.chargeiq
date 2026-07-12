@@ -1577,3 +1577,115 @@ test('scheduleWrite() defers a write until writeThrottleMs has elapsed since the
   await new Promise((r) => setTimeout(r, 250));
   assert.ok(calls.includes('SetChargingProfile'), 'the deferred write eventually fires once the throttle window elapses');
 });
+
+test('a hard cap tightening further jumps the write throttle instead of waiting it out', async () => {
+  const writes: number[] = [];
+  const fakeClient: RpcClient = {
+    identity: 'X',
+    handle: () => {},
+    call: async (method: string, params?: unknown) => {
+      if (method === 'SetChargingProfile') {
+        writes.push((params as { csChargingProfiles: { chargingSchedule: { chargingSchedulePeriod: [{ limit: number }] } } })
+          .csChargingProfiles.chargingSchedule.chargingSchedulePeriod[0].limit);
+      }
+      return { status: 'Accepted' };
+    },
+    close: async () => {},
+    on: () => {},
+  };
+  const cp = new ChargePoint({ identity: 'X', authorize: () => true, nextTransactionId: () => 1 });
+  cp.attach(fakeClient);
+
+  // Spans every day/hour so onSolarSample's own real-time tick lands inside
+  // it regardless of when the test actually runs - avoids juggling a
+  // fictional schedule-window clock against onSolarSample's real one.
+  const sched: ScheduleWindow[] = [{
+    days: [0, 1, 2, 3, 4, 5, 6], start: '00:00', end: '23:59', currentA: 12, boostToCap: true,
+  }];
+  const store: Record<string, unknown> = { schedule: sched };
+  const settings: Record<string, unknown> = {
+    minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdW: 14000,
+    sharedCircuitA: 30, sharedCircuitBufferA: 0, writeThrottleMs: 5000,
+  };
+  const host: ControllerHost = {
+    identity: 'X',
+    setCapability: () => {},
+    getSetting: <T>(k: string) => settings[k] as T,
+    getStore: <T>(k: string) => store[k] as T,
+    setStore: async (k, v) => {
+      store[k] = v;
+    },
+    setAvailable: () => {},
+    setUnavailable: () => {},
+    setWarning: () => {},
+    log: () => {},
+    error: () => {},
+  };
+  const cs = { getChargePoint: () => cp, on: () => {} } as unknown as CentralSystem;
+  const c = new ChargeController(host, cs);
+  c.init();
+  // Solar data primed before the transaction exists, so desiredAmps is
+  // already the boosted 30A by the time onStartTransaction's own write fires
+  // (rather than that write firing early off the pre-solar-data 12A floor).
+  c.onSolarSample({ gridSignedW: 0, pvW: 0, batteryW: 0 }); // idle battery -> circuit cap 30A
+  cp.emit('startTransaction', 1, { idTag: 'x', meterStart: 0 });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(writes, [30],
+    'boosted floor 12A -> 30A, first write goes through immediately (no prior write to throttle against)');
+
+  // Battery ramps up hard on the shared circuit -> cap tightens 30A -> 10A,
+  // well within the 5s throttle window of the write above.
+  c.onSolarSample({ gridSignedW: 0, pvW: 0, batteryW: 4600 });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(writes, [30, 10],
+    'the tightened cap is written immediately instead of waiting out writeThrottleMs');
+});
+
+test('a routine decrease with no cap tightening still respects the write throttle', async () => {
+  const calls: string[] = [];
+  const fakeClient: RpcClient = {
+    identity: 'X',
+    handle: () => {},
+    call: async (method: string) => {
+      calls.push(method); return { status: 'Accepted' };
+    },
+    close: async () => {},
+    on: () => {},
+  };
+  const cp = new ChargePoint({ identity: 'X', authorize: () => true, nextTransactionId: () => 1 });
+  cp.attach(fakeClient);
+
+  const store: Record<string, unknown> = { schedule: [] };
+  const settings: Record<string, unknown> = {
+    minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdW: 14000, writeThrottleMs: 200,
+  };
+  const host: ControllerHost = {
+    identity: 'X',
+    setCapability: () => {},
+    getSetting: <T>(k: string) => settings[k] as T,
+    getStore: <T>(k: string) => store[k] as T,
+    setStore: async (k, v) => {
+      store[k] = v;
+    },
+    setAvailable: () => {},
+    setUnavailable: () => {},
+    setWarning: () => {},
+    log: () => {},
+    error: () => {},
+  };
+  const cs = { getChargePoint: () => cp, on: () => {} } as unknown as CentralSystem;
+  const c = new ChargeController(host, cs);
+  c.init();
+  cp.emit('status', { connectorId: 1, errorCode: 'NoError', status: 'Charging' });
+  await c.startManual(20);
+  await new Promise((r) => setTimeout(r, 0));
+  assert.ok(calls.includes('SetChargingProfile'), 'first write goes through immediately (no prior write to throttle against)');
+
+  calls.length = 0;
+  await c.setCurrentLimit(10); // a manual decrease, not driven by a cap tightening
+  assert.ok(!calls.includes('SetChargingProfile'),
+    'still throttled - a plain decrease is not treated as urgent, only a cap getting tighter is');
+
+  await new Promise((r) => setTimeout(r, 250));
+  assert.ok(calls.includes('SetChargingProfile'), 'the deferred write eventually fires once the throttle window elapses');
+});

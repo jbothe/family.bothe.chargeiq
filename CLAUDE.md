@@ -77,7 +77,20 @@ beyond the configured floor, only genuine spare circuit capacity may.
   generation late, only taking effect on the *next* settings save or app restart.
 - `SetChargingProfile` uses a **stable** `chargingProfileId`/`stackLevel` so each write replaces the
   last; writes are throttled (`writeThrottleMs`). `TxProfile` while a transaction is live, else
-  `TxDefaultProfile`. `limit: 0` = pause (keep the session).
+  `TxDefaultProfile`. `limit: 0` = pause (keep the session). **A hard cap (`householdCapAmps()` /
+  `sharedCircuitCapAmps()`) getting tighter than it was on the previous tick jumps this throttle** -
+  found via a real-hardware log where the shared-circuit cap tightened twice in ~20s as a home
+  battery ramped its charge rate, but the flat 15s-per-write throttle left the charger running under
+  the previous, now-too-high limit for several seconds each time (confirmed: 22.5A actually flowing
+  ~9.5s after the true cap had already dropped to 16A). `tick()` tracks each cap's own value
+  tick-over-tick (`lastHouseholdCapAmps`/`lastSharedCircuitCapAmps`) - regardless of which code path
+  ends up applying it, including the schedule boost-to-cap in `scheduledAmpsDetail()`, which uses the
+  same `sharedCircuitCapAmps()` internally - and `ensureCharging()` only treats the resulting write as
+  urgent (bypass/preempt any pending throttled write) when that tightening also means less current
+  than was previously requested (`target < this.desiredAmps`). Routine decreases with no cap
+  involved - `SolarLoop` backing off on lower surplus, a schedule's own floor stepping down, a manual
+  amps decrease - are deliberately **not** urgent and stay on the normal throttled cadence; only a
+  hard safety ceiling actually shrinking justifies skipping it.
 - **A charge point can be genuinely mid-session without ever granting a `transactionId`** - confirmed
   on real hardware: a Wallbox already `Charging` (e.g. across an app restart) rejects a redundant
   `RemoteStartTransaction` outright and never sends `StartTransaction`, so waiting for one can leave
@@ -164,14 +177,24 @@ When adding behaviour, prefer a pure function + a node:test over needing the Hom
 ## Not yet verified on hardware
 `SetChargingProfile` behaviour at exactly 6A (as opposed to 0A, confirmed below), and a live schedule
 window actually *starting* a charge from cold (`Preparing` → accepted `RemoteStartTransaction` →
-`StartTransaction`). Confirmed on-device: OCPP port bind (`:9000`), charger connect/bind, SolarFeed
-discovery, realtime widget, **`TxDefaultProfile` writes (no transaction id known) are genuinely
-obeyed** - a real Wallbox with no known transaction id went `Charging` → `SuspendedEVSE` → `0A` within
-~1.2s of a `limit: 0` `TxDefaultProfile` write being accepted, so OCPP profile precedence was not the
-blocker it might have been - and that a Wallbox already `Charging` rejects a redundant
-`RemoteStartTransaction` without ever sending `StartTransaction` - *why* it never grants one for a
-session it's already running remains unconfirmed (idTag mismatch? `AuthorizeRemoteTxRequests` config?
-firmware quirk?), but is no longer load-bearing since `TxDefaultProfile` writes work regardless.
+`StartTransaction`) — plausibly untestable on this charger at all, see below. Confirmed on-device:
+OCPP port bind (`:9000`), charger connect/bind, SolarFeed discovery, realtime widget,
+**`TxDefaultProfile` writes (no transaction id known) are genuinely obeyed** - a real Wallbox with no
+known transaction id went `Charging` → `SuspendedEVSE` → `0A` within ~1.2s of a `limit: 0`
+`TxDefaultProfile` write being accepted, so OCPP profile precedence was not the blocker it might have
+been - and that a Wallbox already `Charging` rejects a redundant `RemoteStartTransaction` without ever
+sending `StartTransaction` - *why* it never grants one for a session it's already running remains
+unconfirmed (idTag mismatch? `AuthorizeRemoteTxRequests` config? firmware quirk?), but is no longer
+load-bearing since `TxDefaultProfile` writes work regardless.
+
+On a plain unplug→replug (no schedule/solar target active), the same Wallbox went straight
+`Available` → `SuspendedEV`, never reporting `Preparing` at all - confirmed on real hardware. It
+self-authorized and started a transaction on its own (`StartTransaction` idTag `NoAuthorization`)
+without the app ever issuing `RemoteStartTransaction` (gated on `lastStatusValue === 'Preparing'`,
+which never occurred). Harmless here since `TxDefaultProfile` already had it pinned to the desired
+current before the transaction existed, but it means this charger may just never route through the
+app's `RemoteStartTransaction` call in practice - the schedule-starts-a-charge-from-cold path above
+may be unverifiable on this hardware in its current local-auth config, not merely untested.
 
 ## Conventions
 - Match the surrounding style. `'use strict'` + `import` + `module.exports = class …` for

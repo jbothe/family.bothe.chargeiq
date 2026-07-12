@@ -220,6 +220,11 @@ export class ChargeController {
 
   private pendingWrite: NodeJS.Timeout | null = null;
 
+  /** Previous tick's hard-cap ceilings, used only to detect a cap tightening further - see tick(). */
+  private lastHouseholdCapAmps: number | null = null;
+
+  private lastSharedCircuitCapAmps: number | null = null;
+
   private tickTimer: NodeJS.Timeout | null = null;
 
   /** Debounces idle-reconciliation on an Available report - see IDLE_RECONCILE_DELAY_MS. */
@@ -830,10 +835,22 @@ export class ChargeController {
     // circuit-capped, or both.
     let { amps } = decision;
     const capNotes: string[] = [];
+    // Set when a hard cap's *own ceiling* has dropped further than it was on
+    // the previous tick - regardless of whether it's this block or a mode's
+    // own logic (e.g. the schedule boost-to-cap in scheduledAmpsDetail) that
+    // ends up applying it. Passed through to ensureCharging() so a resulting
+    // decrease can jump the write throttle: the throttle exists to space out
+    // routine adjustments (solar tracking, schedule floors), not to leave the
+    // charger over a shrinking safety ceiling for up to writeThrottleMs.
+    let capTightened = false;
 
     if (amps > 0) {
       const requested = amps;
       const cap = this.householdCapAmps();
+      if (cap != null) {
+        if (this.lastHouseholdCapAmps != null && cap < this.lastHouseholdCapAmps) capTightened = true;
+        this.lastHouseholdCapAmps = cap;
+      }
       if (cap != null && cap < amps) {
         const capped = cap < this.cfg.minAmps ? 0 : cap;
         capNotes.push(`household cap ${this.cfg.maxHouseholdW}W -> ${capped === 0 ? 'pause' : `${capped}A`} `
@@ -850,6 +867,10 @@ export class ChargeController {
     if (amps > 0) {
       const requested = amps;
       const circuitCap = this.sharedCircuitCapAmps();
+      if (circuitCap != null) {
+        if (this.lastSharedCircuitCapAmps != null && circuitCap < this.lastSharedCircuitCapAmps) capTightened = true;
+        this.lastSharedCircuitCapAmps = circuitCap;
+      }
       if (circuitCap != null && circuitCap < amps) {
         const capped = circuitCap < this.cfg.minAmps ? 0 : circuitCap;
         capNotes.push(`shared circuit cap ${this.cfg.sharedCircuitA}A -> ${capped === 0 ? 'pause' : `${capped}A`} `
@@ -864,7 +885,7 @@ export class ChargeController {
     this.host.log(`[decision:${trigger}] ${decision.reason}${
       capNotes.length ? ` | ${capNotes.join('; ')}` : ''} -> ${finalDesc}`);
 
-    this.ensureCharging(amps);
+    this.ensureCharging(amps, capTightened);
 
     // Backstop: guarantee a re-resolve at least every TICK_MS even with no
     // reactive trigger (status/solar/manual/schedule) - but every tick, from
@@ -892,8 +913,14 @@ export class ChargeController {
     }
   }
 
-  /** amps: 0 = pause (hold 0A, keep the transaction), >0 = charge at that current. */
-  private ensureCharging(amps: number): void {
+  /**
+   * amps: 0 = pause (hold 0A, keep the transaction), >0 = charge at that
+   * current. capTightened: a hard cap's ceiling dropped further this tick
+   * (see tick()) - if that also means less current than we last asked for,
+   * the resulting write jumps the throttle rather than leaving the charger
+   * over a shrinking safety ceiling for up to writeThrottleMs.
+   */
+  private ensureCharging(amps: number, capTightened = false): void {
     const target = amps <= 0 ? 0 : this.clampAmps(amps);
     // Genuinely plugged in and mid-session from the charger's own point of
     // view, whether or not *we* hold a transaction id for it.
@@ -908,6 +935,7 @@ export class ChargeController {
     // session.
     const eligible = this.transactionId != null || plugged;
     const ampsChanged = this.desiredAmps !== target;
+    const urgent = capTightened && this.desiredAmps != null && target < this.desiredAmps;
     if (ampsChanged) {
       this.desiredAmps = target;
       if (target > 0) this.host.setCapability('charge_current_limit', target);
@@ -916,7 +944,7 @@ export class ChargeController {
     // across that transition (e.g. the charger only just reported a plugged
     // status) - otherwise a target that happens not to move at that exact
     // moment would never actually reach the charger.
-    if (eligible && (ampsChanged || !this.wasWriteEligible)) this.scheduleWrite();
+    if (eligible && (ampsChanged || !this.wasWriteEligible)) this.scheduleWrite(urgent);
     this.wasWriteEligible = eligible;
     // Only attempt a fresh start while the charger is genuinely waiting for
     // one (Preparing: cable connected, no session yet) - not once a session
@@ -947,7 +975,19 @@ export class ChargeController {
     return Math.max(this.cfg.minAmps, Math.min(this.cfg.maxAmps, Math.floor(amps)));
   }
 
-  private scheduleWrite(): void {
+  private scheduleWrite(urgent = false): void {
+    // Urgent (a hard cap tightened below what we last asked for): jump the
+    // queue rather than waiting out - or continuing to wait out - the usual
+    // throttle. Cancels any deferred write already pending so this one, with
+    // the freshest (lower) desiredAmps, goes out immediately instead.
+    if (urgent) {
+      if (this.pendingWrite) {
+        clearTimeout(this.pendingWrite);
+        this.pendingWrite = null;
+      }
+      this.writeProfile().catch(this.host.error);
+      return;
+    }
     if (this.pendingWrite) return;
     const wait = Math.max(0, this.cfg.writeThrottleMs - (Date.now() - this.lastWriteAt));
     if (wait === 0) {
