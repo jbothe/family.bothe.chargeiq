@@ -616,6 +616,54 @@ test('solar surplus evaluation is skipped, not zeroed, while Charging with no Me
   assert.ok(logs.some((l) => l.includes('no MeterValues yet this connection')), 'the gap is visible in the log');
 });
 
+test('household cap is unavailable, not a guessed pause, before any status arrives with a transaction id already known from a persisted restart', () => {
+  // Mirrors a real restart log: SolarFeed produced its first sample several
+  // seconds before OCPP even reconnected, so no StatusNotification had been
+  // received at all yet - but transactionId=29 was already loaded from
+  // store at init(), the signal that a session may already be live.
+  const sched: ScheduleWindow[] = [{
+    days: [0, 1, 2, 3, 4, 5, 6], start: '00:00', end: '23:59', currentA: 16,
+  }];
+  const store: Record<string, unknown> = { schedule: sched, transactionId: 29 };
+  const settings: Record<string, unknown> = {
+    minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdW: 14200,
+  };
+  const logs: string[] = [];
+  const host: ControllerHost = {
+    identity: 'X',
+    setCapability: () => {},
+    getSetting: <T>(k: string) => settings[k] as T,
+    getStore: <T>(k: string) => store[k] as T,
+    setStore: async (k, v) => {
+      store[k] = v;
+    },
+    setAvailable: () => {},
+    setUnavailable: () => {},
+    setWarning: () => {},
+    log: (...a) => {
+      logs.push(a.join(' '));
+    },
+    error: () => {},
+  };
+  const cs = { getChargePoint: () => undefined, on: () => {} } as unknown as CentralSystem;
+  const c = new ChargeController(host, cs);
+  c.init(); // loads transactionId=29 from store - no status has ever been received yet
+
+  // grid=13330W would leave almost no headroom (household cap -> pause) if the charger's own
+  // draw were wrongly netted as 0 while its status simply isn't known yet.
+  c.onSolarSample({ gridSignedW: 13330, pvW: 80, batteryW: 3290 });
+  const line = logs.filter((l) => l.startsWith('[decision:')).pop();
+  assert.ok(line?.includes('-> 16A'), `the schedule's floor should pass through uncapped, got: ${line}`);
+  assert.ok(!line?.includes('household cap'), 'household cap note is absent (unavailable), not a wrongly-computed pause');
+});
+
+test('an unknown status with no known transaction id still nets as a confirmed 0 (no session to hide a draw)', () => {
+  const { c, caps } = makeController([]);
+  c.onSolarSample({ gridSignedW: 2000, pvW: 0, batteryW: 0 }); // no status, no transaction id ever set
+  assert.equal(caps.measure_solar_surplus, 0,
+    'surplus is computed (not skipped) - a never-connected/idle charger is confirmed 0, not "unknown"');
+});
+
 test('profile writes reach the charger (TxDefaultProfile) even without a known transaction id, once Charging', async () => {
   const calls: string[] = [];
   const fakeClient: RpcClient = {

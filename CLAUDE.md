@@ -120,7 +120,21 @@ beyond the configured floor, only genuine spare circuit capacity may.
   returns `null` (cap unavailable, trust the configured ceiling - the existing convention for stale
   data) and `onSolarSample()` skips that sample's surplus evaluation entirely (leaving
   `solarTargetAmps`/`measure_solar_surplus` as they were) rather than crediting/debiting an unknown
-  amount - both self-resolve within moments once a real reading lands.
+  amount - both self-resolve within moments once a real reading lands. **The same "don't guess" gap
+  exists one layer earlier too: `lastStatusValue === null`** (no `StatusNotification` received *at
+  all* yet this connection, e.g. immediately after an app restart before OCPP has even reconnected -
+  confirmed to lag SolarFeed's first sample by several more seconds on real hardware) **also isn't
+  the same as confirmed-not-charging**, since `isDeliveringPower()` (`lastStatusValue === 'Charging'`)
+  evaluates `false` for null exactly like it does for a genuine non-charging status. This one bit even
+  though nothing could be written to a still-disconnected charger during that window: the wrongly-low
+  `desiredAmps` it computes gets recorded regardless, and if it doesn't happen to change again once
+  the connection *does* come up, `ensureCharging()`'s change-triggered write never fires to correct
+  it - so a stale wrong pause from before `bind()` can end up being exactly what a newly-connected,
+  already-charging session sees applied. `nettedChargerW()` treats `lastStatusValue == null` as
+  unknown too, but **only when a `transactionId` is already known** (persisted from store at
+  `init()` - the actual signal a session may be live) - without one, a null status is trusted as "no
+  session, nothing to net out" (confirmed `0`), since a charger that's simply never connected
+  otherwise leaves every solar/household calc permanently unavailable for no reason.
 - **The controller never issues `RemoteStopTransaction`.** Every "don't charge" decision (manual
   off, no schedule/solar target, stale solar feed, disconnected latch) resolves to `amps: 0` (pause)
   in `ChargeController.resolve()`/`tick()`, never a hard stop. The Wallbox holds `Finishing` until a

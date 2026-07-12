@@ -576,17 +576,33 @@ export class ChargeController {
   /**
    * The charger's own draw (W) to net out of grid-based calcs (solar surplus,
    * household cap) - 0 when confirmed not delivering, the last MeterValues
-   * reading when delivering and known, or null when delivering but genuinely
-   * unknown (e.g. right after an app restart/reconnect onto an already-live
-   * session, before the first MeterValues has come back - confirmed on real
-   * hardware to take a few seconds via the triggered-MeterValues round trip,
-   * since a fresh ChargePoint instance has no cached reading to replay).
+   * reading when delivering and known, or null when genuinely unknown either
+   * way. Two distinct unknown-window cases collapse to the same null result:
+   * (a) `lastStatusValue` is still null (no StatusNotification received yet
+   * this connection) *and* a `transactionId` is already known (persisted
+   * from store at init - a session may already be live, e.g. restart onto
+   * an already-charging car, confirmed on real hardware to take several
+   * seconds to reconnect) - and (b) status confirms `Charging` but no
+   * MeterValues has come back yet (confirmed to lag status by a couple more
+   * seconds via the triggered-MeterValues round trip, since a fresh
+   * ChargePoint instance has no cached reading to replay). Without a known
+   * transactionId, a null status is instead trusted as "no session, nothing
+   * to net out" (0) - otherwise a charger that's simply never connected
+   * would leave every solar/household calc permanently unavailable, which
+   * is what the plain SolarLoop-only tests correctly assume. Case (a)
+   * matters even though a write can't reach a disconnected charger: the
+   * resulting `desiredAmps` is still recorded, and if it happens to *not*
+   * change again once the connection comes up (a real restart log showed
+   * exactly this), `ensureCharging()`'s change-triggered write never fires
+   * to correct it - so a wrongly-computed pause from this window can end up
+   * being what a newly-connected, already-charging session sees applied.
    * Callers must NOT default a null result to 0 - that's the bug this exists
-   * to prevent: it would treat the charger's own draw as competing
-   * "other" household/grid load, understating available headroom right when
-   * a session is already mid-charge, rather than honestly reporting unknown.
+   * to prevent: it would treat the charger's own draw as competing "other"
+   * household/grid load, understating available headroom right when a
+   * session is already mid-charge, rather than honestly reporting unknown.
    */
   private nettedChargerW(): number | null {
+    if (this.lastStatusValue == null) return this.transactionId != null ? null : 0;
     if (!this.isDeliveringPower()) return 0;
     return this.lastPowerW;
   }
