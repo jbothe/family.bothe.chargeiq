@@ -427,24 +427,31 @@
       // tile's capacity meter does. rate is meter(kind, s)'s pct as a 0-100 percent when a
       // capacity is configured; nodes with no configured cap (House always, or any of
       // EV/Solar/Grid/Battery when their peak setting is left at 0) fall back to BASE_RATE
-      // (50%) since there's no capacity to scale against. Linear in *speed*, not duration:
-      // BASE_DURATION_S is the 50%-rate reference point, and speed doubles by 100% rate
-      // (half the duration), so duration = BASE_DURATION_S * (BASE_RATE / rate). rate is
-      // floored to MIN_RATE (not 0) so a barely-nonzero reading is a slow crawl rather than
-      // a division by zero. Both constants started at the widget's original fixed speed
-      // (BASE_DURATION_S 0.5s, MIN_RATE 1) and have been tuned up repeatedly on real
-      // hardware feedback that every tier still read as too sluggish: MIN_RATE 1 -> 2 -> 4;
-      // BASE_DURATION_S 0.5 -> 0.25 (scales the whole curve at once, so the 50% default,
-      // the 100% top speed, and the MIN_RATE floor all sped up together, keeping their
-      // ratios to each other exactly as before: 100% = half of 50%'s duration, floor =
-      // BASE_RATE/MIN_RATE times 50%'s duration).
+      // (50%) since there's no capacity to scale against - which lands exactly on
+      // BASE_DURATION_S below, so the fallback needs no special-casing.
+      //
+      // Three named reference points, each independently tuned on real-hardware feedback
+      // (a single "linear in speed" formula couldn't hit all three at once, so this is
+      // piecewise-linear in rate instead - two straight segments meeting at (BASE_RATE,
+      // BASE_DURATION_S), each interpolated directly, not derived from the other):
+      //   rate <= MIN_RATE  -> FLOOR_DURATION_S (3s)    the slowest crawl
+      //   rate == BASE_RATE -> BASE_DURATION_S (0.5s)   the default/no-capacity-configured speed
+      //   rate == 100       -> TOP_DURATION_S (0.1s)    full capacity, top speed
+      // rate itself is floored to MIN_RATE (not 0) so a barely-nonzero reading crawls
+      // rather than sitting exactly at the floor's boundary or dividing by zero.
       connSpeed: function (kind, s) {
         var m = PF.meter(kind, s);
-        var BASE_RATE = 50;
-        var BASE_DURATION_S = 0.25;
         var MIN_RATE = 4;
+        var BASE_RATE = 50;
+        var FLOOR_DURATION_S = 3;
+        var BASE_DURATION_S = 0.5;
+        var TOP_DURATION_S = 0.1;
         var rate = m && m.pct > 0 ? Math.max(MIN_RATE, m.pct * 100) : BASE_RATE;
-        return (BASE_DURATION_S * BASE_RATE) / rate;
+        if (rate <= BASE_RATE) {
+          return FLOOR_DURATION_S
+            + (BASE_DURATION_S - FLOOR_DURATION_S) * (rate - MIN_RATE) / (BASE_RATE - MIN_RATE);
+        }
+        return BASE_DURATION_S + (TOP_DURATION_S - BASE_DURATION_S) * (rate - BASE_RATE) / (100 - BASE_RATE);
       },
       // Renders a meter() result (or '' when null/hidden) as the tile-edge strip markup.
       // edge is 'bottom' for the header row (EV/Solar, connector runs below) or 'top' for

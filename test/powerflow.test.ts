@@ -265,45 +265,35 @@ test('meter: pct never goes negative even for an out-of-range negative reading',
   assert.deepEqual(PF.meter('solar', { solarW: -500, limits }), { pct: 0, color: 'var(--green)' });
 });
 
-test('connSpeed: 50% capacity is the BASE_DURATION_S reference point', () => {
+test('connSpeed: the three named reference points land exactly on their target durations', () => {
   const limits = {
-    chargerMaxW: 8000, gridMaxW: 0, batteryChargePeakW: 0, batteryDischargePeakW: 0, solarPeakW: 0,
+    chargerMaxW: 10000, gridMaxW: 10000, batteryChargePeakW: 0, batteryDischargePeakW: 0, solarPeakW: 0,
   };
-  const s = { charger: { available: true, powerW: 4000 }, limits }; // 4000/8000 = 50%
-  assert.equal(PF.connSpeed('ev', s), 0.25);
+  // rate == MIN_RATE (4%): the slowest crawl.
+  assert.equal(PF.connSpeed('grid', { gridW: 400, limits }), 3);
+  // rate == BASE_RATE (50%): the default/no-capacity-configured speed.
+  assert.equal(PF.connSpeed('grid', { gridW: 5000, limits }), 0.5);
+  // rate == 100%: full capacity, top speed. Tolerance, not exact equality - the
+  // interpolation's floating-point arithmetic lands on 0.09999999999999998, not a clean
+  // 0.1 (the same class of rounding as 0.1 + 0.2 !== 0.3 in IEEE 754).
+  assert.ok(Math.abs((PF.connSpeed('grid', { gridW: 10000, limits }) as number) - 0.1) < 1e-9);
 });
 
-test('connSpeed: 100% capacity is about double the base speed (half the duration)', () => {
-  const limits = {
-    chargerMaxW: 8000, gridMaxW: 0, batteryChargePeakW: 0, batteryDischargePeakW: 0, solarPeakW: 0,
-  };
-  const s = { charger: { available: true, powerW: 8000 }, limits };
-  assert.equal(PF.connSpeed('ev', s), 0.125);
-});
-
-test('connSpeed: a low reading is a slow crawl, far longer than the base duration', () => {
-  const limits = {
-    chargerMaxW: 0, gridMaxW: 14000, batteryChargePeakW: 0, batteryDischargePeakW: 0, solarPeakW: 0,
-  };
-  const s = { gridW: 560, limits }; // 560/14000 = 4%, right at MIN_RATE - not floored further
-  assert.equal(PF.connSpeed('grid', s), 3.125);
-});
-
-test('connSpeed: the rate floor caps the crawl - readings below it all animate at the same duration', () => {
+test('connSpeed: the rate floor caps the crawl - readings below it all animate at the same 3s duration', () => {
   const limits = {
     chargerMaxW: 0, gridMaxW: 14000, batteryChargePeakW: 0, batteryDischargePeakW: 0, solarPeakW: 0,
   };
   // Both below the 4% floor (140/14000 = 1%, 14/14000 = 0.1%) - MIN_RATE clamps both to the
-  // same 3.125s crawl rather than letting the duration keep growing toward a slower value.
-  assert.equal(PF.connSpeed('grid', { gridW: 140, limits }), 3.125);
-  assert.equal(PF.connSpeed('grid', { gridW: 14, limits }), 3.125);
+  // same 3s crawl rather than letting the duration keep growing toward a slower value.
+  assert.equal(PF.connSpeed('grid', { gridW: 140, limits }), 3);
+  assert.equal(PF.connSpeed('grid', { gridW: 14, limits }), 3);
 });
 
-test('connSpeed: scales monotonically between the low-end crawl and the 100% double-speed', () => {
+test('connSpeed: scales monotonically across both segments (crawl -> default -> top speed)', () => {
   const limits = {
     chargerMaxW: 0, gridMaxW: 10000, batteryChargePeakW: 0, batteryDischargePeakW: 0, solarPeakW: 0,
   };
-  const durations = [4, 10, 25, 50, 75, 100].map(
+  const durations = [4, 10, 25, 50, 75, 90, 100].map(
     (pct) => PF.connSpeed('grid', { gridW: pct * 100, limits }) as number,
   );
   for (let i = 1; i < durations.length; i += 1) {
@@ -311,11 +301,12 @@ test('connSpeed: scales monotonically between the low-end crawl and the 100% dou
   }
 });
 
-test('connSpeed: falls back to the BASE_DURATION_S speed when there is no configured capacity to scale against', () => {
+test('connSpeed: falls back to the 0.5s default speed when there is no configured capacity to scale against', () => {
   // House never has a meter (see meter's kind switch), and a raw power value alone -
-  // with no peak setting - gives no rate to scale by either way.
-  assert.equal(PF.connSpeed('house', { houseW: 5000, limits: { gridMaxW: 14000 } }), 0.25);
-  assert.equal(PF.connSpeed('solar', { solarW: 3000, limits: { solarPeakW: 0 } }), 0.25);
+  // with no peak setting - gives no rate to scale by either way. This lands exactly on
+  // the BASE_RATE/BASE_DURATION_S reference point, so no special-casing is needed.
+  assert.equal(PF.connSpeed('house', { houseW: 5000, limits: { gridMaxW: 14000 } }), 0.5);
+  assert.equal(PF.connSpeed('solar', { solarW: 3000, limits: { solarPeakW: 0 } }), 0.5);
 });
 
 test('meterHtml: renders "" for a null (hidden) meter', () => {
