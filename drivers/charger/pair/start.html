@@ -29,17 +29,13 @@
 
   <script type="text/javascript">
     function onHomeyReady(Homey) {
-      console.log('[chargeiq-pair] onHomeyReady fired');
       Homey.ready();
-      console.log('[chargeiq-pair] emitting getConnectionInfo');
       Homey.emit('getConnectionInfo', null).then(function (info) {
-        console.log('[chargeiq-pair] getConnectionInfo resolved:', info);
         var ip = (info && info.ip) || '<homey-ip>';
         var port = (info && info.port) || 9000;
         document.getElementById('url').innerHTML =
           'ws://' + ip + ':' + port + '/<b>&lt;charge-point-id&gt;</b>';
       }).catch(function (err) {
-        console.error('[chargeiq-pair] getConnectionInfo rejected:', err);
         document.getElementById('url').innerHTML =
           'ws://&lt;homey-ip&gt;:9000/<b>&lt;charge-point-id&gt;</b>';
       });
