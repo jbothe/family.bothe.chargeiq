@@ -13,14 +13,21 @@
        active theme regardless of the OS (--homey-text-color et al; see
        https://apps.developer.homey.app/the-basics/widgets/styling) - `.homey-dark-mode` from
        that same doc is a separate, opt-in class for forcing dark mode, not something Homey
-       sets automatically, so it's not usable for detection. --text/--muted below prefer
-       Homey's live variable and only fall through to a literal when it's unset (i.e. when
-       this file is opened outside the Homey app, such as for the preview screenshots below);
-       --tile/--conn-static/--meter-track are then derived from --text via color-mix rather
-       than hand-tuned per theme, so they can never drift out of sync with it again. */
+       sets automatically, so it's not usable for detection. --text/--muted/--bg below prefer
+       Homey's live variables and only fall through to a literal when unset (i.e. when this
+       file is opened outside the Homey app, such as for the preview screenshots below);
+       --tile/--conn-static are then derived from --text blended toward --bg via color-mix
+       rather than hand-tuned per theme, so they can never drift out of sync with it again.
+       They're blended toward --bg rather than transparent so they stay fully opaque - .tile
+       and .conn rely on that opacity to hide the connector's intentional negative-margin
+       bleed under the tile (see .hicon .conn / .tcol .conn below); a translucent tile lets
+       that bleed show through into the icon instead of stopping at its edge. --meter-track
+       has no such bleed to hide (it's a strip painted on top of the already-opaque tile, not
+       something else bleeding under it), so it's left blended toward transparent. */
     :root {
       --text: var(--homey-text-color, #0b1220);
       --muted: var(--homey-text-color-light, #6b7280);
+      --bg: var(--homey-background-color, #ffffff);
       --green: #16a34a;
       --purple: #8b5cf6;
       --flow: #2563eb;
@@ -35,13 +42,14 @@
       :root {
         --text: var(--homey-text-color, #ffffff);
         --muted: var(--homey-text-color-light, #8b93a1);
+        --bg: var(--homey-background-color, #0b0d12);
         --green: #3ddc97; --purple: #a78bfa;
         --flow: #60a5fa;
       }
     }
     :root {
-      --tile: color-mix(in srgb, var(--text) 13%, transparent);
-      --conn-static: color-mix(in srgb, var(--text) 9%, transparent);
+      --tile: color-mix(in srgb, var(--text) 13%, var(--bg));
+      --conn-static: color-mix(in srgb, var(--text) 9%, var(--bg));
       --meter-track: color-mix(in srgb, var(--text) 15%, transparent);
     }
 
