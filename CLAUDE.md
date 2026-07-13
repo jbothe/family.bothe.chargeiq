@@ -5,6 +5,14 @@ Central System** for one **Wallbox Pulsar Max** (single-phase, 230 V, 6–32 A) 
 charging across three derived modes, plus a live power-flow dashboard widget. App id
 `family.bothe.chargeiq`, compatibility `>=12.4.5`, platform `local`.
 
+**Single-charger by design (for now).** The OCPP/control layers are per-identity and would run
+several chargers, but the shared electrical limits (household grid cap, shared-circuit cap, solar
+surplus) are enforced per-controller with no cross-charger coordination, so pairing is capped at one
+device (`lib/pairing.ts` → `resolvePairList`, enforced in `drivers/charger/driver.ts`'s `list_devices`
+pair handler). The app→widget→schedule glue also assumes `devices[0]`. See `docs/MULTI_DEVICE.md` for
+the full gap analysis and what lifting the cap would require — don't add a second driver/device path
+without reading it.
+
 ## Commands
 - `npm run build` — `tsc` → `.homeybuild/` (the run/publish output).
 - `npm test` — `tsc && node --test .homeybuild/test/*.test.js` (node:test; no framework dep).

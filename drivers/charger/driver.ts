@@ -2,6 +2,7 @@
 
 import Homey from 'homey';
 import { CentralSystem } from '../../lib/ocpp/CentralSystem';
+import { resolvePairList } from '../../lib/pairing';
 
 interface ChargeIQApp extends Homey.App {
   getCentralSystem(): CentralSystem;
@@ -54,12 +55,13 @@ module.exports = class ChargerDriver extends Homey.Driver {
     });
 
     // List charge points that have connected to the Central System this session.
+    // ChargeIQ is single-charger for now (see lib/pairing.ts / docs/MULTI_DEVICE.md):
+    // refuse a second pairing rather than give uncoordinated grid/circuit limits.
     session.setHandler('list_devices', async () => {
       const cs = (this.homey.app as ChargeIQApp).getCentralSystem();
-      return cs.listIdentities().map((identity) => ({
-        name: `EV Charger (${identity})`,
-        data: { id: identity },
-      }));
+      const result = resolvePairList(this.getDevices().length, cs.listIdentities());
+      if ('error' in result) throw new Error(result.error);
+      return result.devices;
     });
   }
 
