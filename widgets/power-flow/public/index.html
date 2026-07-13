@@ -51,7 +51,9 @@
     html, body { margin: 0; padding: 0; background: transparent; }
     body { font-family: -apple-system, "Segoe UI", Roboto, Helvetica, sans-serif; color: var(--text);
            -webkit-font-smoothing: antialiased; }
-    .card { padding: 12px 14px 10px; transition: opacity .5s ease, filter .5s ease; }
+    /* Top/bottom padding was previously 12px/10px (not actually uniform); now equal and
+       ~1.5x the old average (11px -> 17px), per widget.compose.json's declared height. */
+    .card { padding: 17px 14px; transition: opacity .5s ease, filter .5s ease; }
     /* Stale: data hasn't refreshed recently (network/wifi blip). Dim, keep last values, auto-recover. */
     .card.stale { opacity: 0.4; filter: grayscale(0.85); }
 
@@ -109,8 +111,10 @@
             background-color: var(--conn-static); background-size: 100% 6px; }
     .hicon .conn { margin: -10px 0 0; }  /* bleeds up into the tile above it */
     .tcol .conn { margin: 0 0 -10px; }   /* bleeds down into the tile below it */
-    .conn.active.dir-down { animation: flowDown .5s linear infinite; }
-    .conn.active.dir-up { animation: flowUp .5s linear infinite; }
+    /* Duration deliberately left out of this shorthand - it's set per-element via
+       animation-duration inline style (see setConn/PF.connSpeed), scaled by flow rate. */
+    .conn.active.dir-down { animation-name: flowDown; animation-timing-function: linear; animation-iteration-count: infinite; }
+    .conn.active.dir-up { animation-name: flowUp; animation-timing-function: linear; animation-iteration-count: infinite; }
 
     /* align-items:baseline (not center) so the smaller .unit span sits on the same text
        baseline as the number, not vertically centered against it - the explicit height
@@ -175,8 +179,13 @@
     .tilerow { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
     .tcol { display: flex; flex-direction: column; align-items: center; gap: 4px; text-align: center; }
     /* Value-to-label gap kept separate from the icon-to-value gap above (.tcol's own gap) so
-       it can be tuned independently - slightly tighter than the icon spacing reads better. */
-    .tcol-text { display: flex; flex-direction: column; align-items: center; gap: 1px; margin-top: 2px; }
+       it can be tuned independently - bottom row only (.lbl/.val themselves are shared with
+       the header row's .htext, so they stay untouched). No CSS gap: .lbl's own line box
+       already reserves ~2px above its capital letters (confirmed via Range.getBoundingClientRect
+       on the glyphs, not just the box), so a literal 0 gap here still reads as a small,
+       intentional ~2px visual gap - about 2/3 of the previous 1px-gap + 2px-reserve (3px)
+       total, not a true zero. */
+    .tcol-text { display: flex; flex-direction: column; align-items: center; gap: 0; margin-top: 2px; }
   </style>
 </head>
 <body>
@@ -413,6 +422,30 @@
         }
         return null;
       },
+      // Connector dash-scroll animation duration (seconds), driven by flow rate so a
+      // connector's motion communicates "how hard is this node working" the same way the
+      // tile's capacity meter does. rate is meter(kind, s)'s pct as a 0-100 percent when a
+      // capacity is configured; nodes with no configured cap (House always, or any of
+      // EV/Solar/Grid/Battery when their peak setting is left at 0) fall back to BASE_RATE
+      // (50%) since there's no capacity to scale against. Linear in *speed*, not duration:
+      // BASE_DURATION_S is the 50%-rate reference point, and speed doubles by 100% rate
+      // (half the duration), so duration = BASE_DURATION_S * (BASE_RATE / rate). rate is
+      // floored to MIN_RATE (not 0) so a barely-nonzero reading is a slow crawl rather than
+      // a division by zero. Both constants started at the widget's original fixed speed
+      // (BASE_DURATION_S 0.5s, MIN_RATE 1) and have been tuned up repeatedly on real
+      // hardware feedback that every tier still read as too sluggish: MIN_RATE 1 -> 2 -> 4;
+      // BASE_DURATION_S 0.5 -> 0.25 (scales the whole curve at once, so the 50% default,
+      // the 100% top speed, and the MIN_RATE floor all sped up together, keeping their
+      // ratios to each other exactly as before: 100% = half of 50%'s duration, floor =
+      // BASE_RATE/MIN_RATE times 50%'s duration).
+      connSpeed: function (kind, s) {
+        var m = PF.meter(kind, s);
+        var BASE_RATE = 50;
+        var BASE_DURATION_S = 0.25;
+        var MIN_RATE = 4;
+        var rate = m && m.pct > 0 ? Math.max(MIN_RATE, m.pct * 100) : BASE_RATE;
+        return (BASE_DURATION_S * BASE_RATE) / rate;
+      },
       // Renders a meter() result (or '' when null/hidden) as the tile-edge strip markup.
       // edge is 'bottom' for the header row (EV/Solar, connector runs below) or 'top' for
       // the device row (Grid/Battery, connector runs above) - see the .meter CSS comment.
@@ -448,21 +481,26 @@
       // Wraps the "kW"/"W" suffix of an fmtW() string in a <span> so it can be
       // de-emphasized. The separating space is placed inside that span (not as a CSS gap
       // on .val) so it renders at the unit's own smaller font-size rather than the
-      // number's. Used only for the primary power value/unit text (EV/Solar/Grid/
-      // Battery/House's .val) - not the EV chip's amps text or any other unit-like text.
+      // number's - and it has to be `&nbsp;`, not a plain space: .val is a flex container,
+      // and .unit (a flex item) trims a leading *collapsible* space from its own content
+      // the same way a block box would, so a literal " " was silently disappearing.
+      // &nbsp; isn't collapsible, so it survives. Used only for the primary power
+      // value/unit text (EV/Solar/Grid/Battery/House's .val) - not the EV chip's amps
+      // text or any other unit-like text.
       valHtml: function (w) {
         var str = PF.fmtW(w);
         var i = str.lastIndexOf(' ');
         if (i < 0) return str;
-        return str.slice(0, i) + '<span class="unit"> ' + str.slice(i + 1) + '</span>';
+        return str.slice(0, i) + '<span class="unit">&nbsp;' + str.slice(i + 1) + '</span>';
       },
     };
     // === POWERFLOW-LOGIC-END ===
 
-    function setConn(el, color, f) {
+    function setConn(el, color, f, speedS) {
       el.className = 'conn' + (f.dir ? ' active dir-' + f.dir : '');
       el.style.backgroundImage = f.dir
         ? 'repeating-linear-gradient(180deg, ' + color + ' 0 3px, transparent 3px 6px)' : '';
+      el.style.animationDuration = f.dir ? speedS + 's' : '';
     }
 
     function render(s) {
@@ -508,12 +546,13 @@
       document.getElementById('bus').className = 'bus bus-' + PF.busState(s.gridW);
 
       // All connectors flow in the same blue regardless of tile — the tile's own accent
-      // color (or, for Battery, its charge-tier color) stays on the icon itself.
-      setConn(document.getElementById('ev-conn'), 'var(--flow)', ev);
-      setConn(document.getElementById('solar-conn'), 'var(--flow)', solar);
-      setConn(document.getElementById('grid-conn'), 'var(--flow)', grid);
-      setConn(document.getElementById('house-conn'), 'var(--flow)', house);
-      setConn(document.getElementById('battery-conn'), 'var(--flow)', battery);
+      // color (or, for Battery, its charge-tier color) stays on the icon itself. Dash-scroll
+      // speed is driven by PF.connSpeed (flow rate relative to capacity, when configured).
+      setConn(document.getElementById('ev-conn'), 'var(--flow)', ev, PF.connSpeed('ev', s));
+      setConn(document.getElementById('solar-conn'), 'var(--flow)', solar, PF.connSpeed('solar', s));
+      setConn(document.getElementById('grid-conn'), 'var(--flow)', grid, PF.connSpeed('grid', s));
+      setConn(document.getElementById('house-conn'), 'var(--flow)', house, PF.connSpeed('house', s));
+      setConn(document.getElementById('battery-conn'), 'var(--flow)', battery, PF.connSpeed('battery', s));
     }
 
     var CHECK_MS = 5000;   // how often we re-check staleness

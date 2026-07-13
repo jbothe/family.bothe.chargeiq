@@ -31,9 +31,12 @@ test('fmtW formats W / kW, always stripping a trailing .0', () => {
   assert.equal(PF.fmtW(null), '–');
 });
 
-test('valHtml: wraps the unit in a span with a leading space, so the space picks up the unit\'s smaller size', () => {
-  assert.equal(PF.valHtml(850), '850<span class="unit"> W</span>');
-  assert.equal(PF.valHtml(2300), '2.3<span class="unit"> kW</span>');
+test('valHtml: wraps the unit in a span with a leading &nbsp;, so the space picks up the unit\'s smaller size', () => {
+  // A plain " " gets silently trimmed here - .val is a flex container, and a leading
+  // collapsible space at the start of a flex item's own content is dropped just like at
+  // the start of a block box. &nbsp; isn't collapsible, so it's what actually renders.
+  assert.equal(PF.valHtml(850), '850<span class="unit">&nbsp;W</span>');
+  assert.equal(PF.valHtml(2300), '2.3<span class="unit">&nbsp;kW</span>');
 });
 
 test('valHtml: no separator string is left between the number and the unit span', () => {
@@ -260,6 +263,59 @@ test('meter: pct never goes negative even for an out-of-range negative reading',
     chargerMaxW: 7360, gridMaxW: 14000, batteryChargePeakW: 3000, batteryDischargePeakW: 2600, solarPeakW: 6000,
   };
   assert.deepEqual(PF.meter('solar', { solarW: -500, limits }), { pct: 0, color: 'var(--green)' });
+});
+
+test('connSpeed: 50% capacity is the BASE_DURATION_S reference point', () => {
+  const limits = {
+    chargerMaxW: 8000, gridMaxW: 0, batteryChargePeakW: 0, batteryDischargePeakW: 0, solarPeakW: 0,
+  };
+  const s = { charger: { available: true, powerW: 4000 }, limits }; // 4000/8000 = 50%
+  assert.equal(PF.connSpeed('ev', s), 0.25);
+});
+
+test('connSpeed: 100% capacity is about double the base speed (half the duration)', () => {
+  const limits = {
+    chargerMaxW: 8000, gridMaxW: 0, batteryChargePeakW: 0, batteryDischargePeakW: 0, solarPeakW: 0,
+  };
+  const s = { charger: { available: true, powerW: 8000 }, limits };
+  assert.equal(PF.connSpeed('ev', s), 0.125);
+});
+
+test('connSpeed: a low reading is a slow crawl, far longer than the base duration', () => {
+  const limits = {
+    chargerMaxW: 0, gridMaxW: 14000, batteryChargePeakW: 0, batteryDischargePeakW: 0, solarPeakW: 0,
+  };
+  const s = { gridW: 560, limits }; // 560/14000 = 4%, right at MIN_RATE - not floored further
+  assert.equal(PF.connSpeed('grid', s), 3.125);
+});
+
+test('connSpeed: the rate floor caps the crawl - readings below it all animate at the same duration', () => {
+  const limits = {
+    chargerMaxW: 0, gridMaxW: 14000, batteryChargePeakW: 0, batteryDischargePeakW: 0, solarPeakW: 0,
+  };
+  // Both below the 4% floor (140/14000 = 1%, 14/14000 = 0.1%) - MIN_RATE clamps both to the
+  // same 3.125s crawl rather than letting the duration keep growing toward a slower value.
+  assert.equal(PF.connSpeed('grid', { gridW: 140, limits }), 3.125);
+  assert.equal(PF.connSpeed('grid', { gridW: 14, limits }), 3.125);
+});
+
+test('connSpeed: scales monotonically between the low-end crawl and the 100% double-speed', () => {
+  const limits = {
+    chargerMaxW: 0, gridMaxW: 10000, batteryChargePeakW: 0, batteryDischargePeakW: 0, solarPeakW: 0,
+  };
+  const durations = [4, 10, 25, 50, 75, 100].map(
+    (pct) => PF.connSpeed('grid', { gridW: pct * 100, limits }) as number,
+  );
+  for (let i = 1; i < durations.length; i += 1) {
+    assert.ok(durations[i] < durations[i - 1], `duration must strictly decrease as rate rises: ${durations}`);
+  }
+});
+
+test('connSpeed: falls back to the BASE_DURATION_S speed when there is no configured capacity to scale against', () => {
+  // House never has a meter (see meter's kind switch), and a raw power value alone -
+  // with no peak setting - gives no rate to scale by either way.
+  assert.equal(PF.connSpeed('house', { houseW: 5000, limits: { gridMaxW: 14000 } }), 0.25);
+  assert.equal(PF.connSpeed('solar', { solarW: 3000, limits: { solarPeakW: 0 } }), 0.25);
 });
 
 test('meterHtml: renders "" for a null (hidden) meter', () => {
