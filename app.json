@@ -310,7 +310,7 @@
         {
           "type": "group",
           "label": {
-            "en": "Electrical"
+            "en": "EV charger electrical"
           },
           "children": [
             {
@@ -402,7 +402,7 @@
               "id": "writeThrottleMs",
               "type": "number",
               "label": {
-                "en": "Min ms between profile writes"
+                "en": "Min delay between profile writes (ms)"
               },
               "hint": {
                 "en": "Minimum spacing between charging-profile (current limit) writes sent to the charger. Prevents a fast-moving solar target from flooding the charger with SetChargingProfile calls; it also delays how quickly a new target actually reaches the charger."
