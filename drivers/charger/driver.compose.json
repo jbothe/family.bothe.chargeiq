@@ -6,14 +6,14 @@
     "charge_current_limit",
     "charge_mode",
     "evcharger_charging_state",
-    "alarm_generic",
+    "session_duration",
+    "meter_power.session",
     "measure_solar_surplus",
     "measure_power",
     "measure_current",
     "measure_voltage",
     "meter_power",
-    "meter_power.session",
-    "session_duration"
+    "alarm_generic"
   ],
   "capabilitiesOptions": {
     "evcharger_charging_state": {

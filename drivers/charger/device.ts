@@ -14,9 +14,9 @@ interface ChargeIQApp extends Homey.App {
 }
 
 const CAPABILITIES = [
-  'charge_mode', 'evcharger_charging', 'evcharger_charging_state', 'alarm_generic',
-  'measure_power', 'measure_current', 'measure_voltage', 'meter_power', 'meter_power.session',
-  'session_duration', 'charge_current_limit', 'measure_solar_surplus',
+  'evcharger_charging', 'charge_current_limit', 'charge_mode', 'evcharger_charging_state',
+  'session_duration', 'meter_power.session', 'measure_solar_surplus', 'measure_power',
+  'measure_current', 'measure_voltage', 'meter_power', 'alarm_generic',
 ];
 
 // Capabilities from earlier versions to strip from already-paired devices.
