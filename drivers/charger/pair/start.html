@@ -11,8 +11,6 @@
            font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 14px; word-break: break-all; }
     .url b { color: #fbbf24; }
     .note { font-size: 13px; color: #6b7280; }
-    button { margin-top: 18px; width: 100%; font-size: 15px; padding: 12px; border: 0; border-radius: 10px;
-             background: #16a34a; color: #fff; cursor: pointer; }
   </style>
 </head>
 <body>
@@ -29,19 +27,17 @@
   <div class="url" id="url">ws://…</div>
   <p class="note">The last path segment is your charger's own identity (Charge Point ID). Once it connects it will appear on the next screen.</p>
 
-  <button id="continue">My charger is connected →</button>
-
   <script type="text/javascript">
     function onHomeyReady(Homey) {
       Homey.ready();
-      Homey.emit('getConnectionInfo', null, function (err, info) {
+      Homey.emit('getConnectionInfo', null).then(function (info) {
         var ip = (info && info.ip) || '<homey-ip>';
         var port = (info && info.port) || 9000;
         document.getElementById('url').innerHTML =
           'ws://' + ip + ':' + port + '/<b>&lt;charge-point-id&gt;</b>';
-      });
-      document.getElementById('continue').addEventListener('click', function () {
-        Homey.showView('list_devices');
+      }).catch(function (err) {
+        document.getElementById('url').innerHTML =
+          'ws://&lt;homey-ip&gt;:9000/<b>&lt;charge-point-id&gt;</b>';
       });
     }
   </script>
