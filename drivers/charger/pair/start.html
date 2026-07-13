@@ -15,31 +15,28 @@
 </head>
 <body>
   <h2>Connect your charger</h2>
-  <p>ChargeIQ is the OCPP 1.6J Central System for your charger. Point the charger's OCPP client at this Homey:</p>
+  <p>Connect your charger and point your charger's OCPP client at this Homey:</p>
 
   <ol>
-    <li>Open your charger's OCPP settings (e.g. Wallbox installer app).</li>
-    <li>Set the Central System / OCPP URL to the address below.</li>
-    <li>Use OCPP <b>1.6J</b> over WebSocket. Leave the charge point identity as-is.</li>
-    <li>Save &amp; let the charger connect, then continue.</li>
+    <li>Open your charger's OCPP settings.</li>
+    <li>Set the OCPP URL to the address below.</li>
+    <li>Use OCPP <b>1.6J</b> over WebSocket. Leave the charge point identity as is.</li>
+    <li>Save and let the charger connect, then continue.</li>
   </ol>
 
   <div class="url" id="url">ws://…</div>
   <p class="note">The last path segment is your charger's own identity (Charge Point ID). Once it connects it will appear on the next screen.</p>
 
-  <script type="text/javascript">
-    function onHomeyReady(Homey) {
-      Homey.ready();
-      Homey.emit('getConnectionInfo', null).then(function (info) {
-        var ip = (info && info.ip) || '<homey-ip>';
-        var port = (info && info.port) || 9000;
-        document.getElementById('url').innerHTML =
-          'ws://' + ip + ':' + port + '/<b>&lt;charge-point-id&gt;</b>';
-      }).catch(function (err) {
-        document.getElementById('url').innerHTML =
-          'ws://&lt;homey-ip&gt;:9000/<b>&lt;charge-point-id&gt;</b>';
-      });
-    }
+  <script type="application/javascript">
+    Homey.emit('getConnectionInfo', null).then(function (info) {
+      var ip = (info && info.ip) || '<homey-ip>';
+      var port = (info && info.port) || 9000;
+      document.getElementById('url').innerHTML =
+        'ws://' + ip + ':' + port + '/<b>&lt;charge-point-id&gt;</b>';
+    }).catch(function () {
+      document.getElementById('url').innerHTML =
+        'ws://&lt;homey-ip&gt;:9000/<b>&lt;charge-point-id&gt;</b>';
+    });
   </script>
 </body>
 </html>
