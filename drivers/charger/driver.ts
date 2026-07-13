@@ -1,8 +1,20 @@
 'use strict';
 
+import os from 'os';
 import Homey from 'homey';
 import { CentralSystem } from '../../lib/ocpp/CentralSystem';
 import { resolvePairList } from '../../lib/pairing';
+
+/** Homey's own LAN IPv4 address (first non-internal interface), or null if none found. */
+function findLocalIPv4(): string | null {
+  const interfaces = os.networkInterfaces();
+  for (const name of Object.keys(interfaces)) {
+    for (const iface of interfaces[name] ?? []) {
+      if (iface.family === 'IPv4' && !iface.internal) return iface.address;
+    }
+  }
+  return null;
+}
 
 interface ChargeIQApp extends Homey.App {
   getCentralSystem(): CentralSystem;
@@ -46,15 +58,20 @@ module.exports = class ChargerDriver extends Homey.Driver {
   async onPair(session: Homey.Driver.PairSession) {
     // Instructions view: tell the user where to point the charger.
     session.setHandler('getConnectionInfo', async () => {
-      let ip = '<homey-ip>';
-      try {
-        const address = await this.homey.cloud.getLocalAddress();
-        ip = String(address).split(':')[0];
-      } catch (err) {
-        this.error('Could not resolve Homey LAN address:', err);
+      let ip = findLocalIPv4();
+      if (!ip) {
+        // Fall back to the cloud manager's view of the address if no local
+        // interface was found (e.g. unusual network config).
+        try {
+          const address = await this.homey.cloud.getLocalAddress();
+          ip = String(address).split(':')[0];
+        } catch (err) {
+          this.error('Could not resolve Homey LAN address:', err);
+        }
       }
       const port = (this.homey.settings.get('ocppPort') as number) || 9000;
-      return { ip, port };
+      this.log(`[pair] connection info: ip=${ip ?? '<unresolved>'} port=${port}`);
+      return { ip: ip ?? '<homey-ip>', port };
     });
 
     // List charge points that have connected to the Central System this session.

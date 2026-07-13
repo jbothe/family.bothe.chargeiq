@@ -122,12 +122,12 @@ module.exports = class ChargerDevice extends Homey.Device {
 
   /** Excess-solar / loop diagnostics (for the widget + metrics). */
   getDiagnostics() {
-    return this.controller.getDiagnostics();
+    return this.controller?.getDiagnostics();
   }
 
   /** Derived mode + the raw facts behind it (for the widget's shorthand status). */
   getModeInfo() {
-    return this.controller.getModeInfo();
+    return this.controller?.getModeInfo();
   }
 
   // --- Flow card entry points -------------------------------------------------
