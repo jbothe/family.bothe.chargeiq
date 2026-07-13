@@ -266,48 +266,40 @@ test('meter: pct never goes negative even for an out-of-range negative reading',
   assert.deepEqual(PF.meter('solar', { solarW: -500, limits }), { pct: 0, color: 'var(--green)' });
 });
 
-test('connSpeed: the three named reference points land exactly on their target durations', () => {
-  const limits = {
-    chargerMaxW: 10000, gridMaxW: 10000, batteryChargePeakW: 0, batteryDischargePeakW: 0, solarPeakW: 0,
-  };
-  // rate == MIN_RATE (4%): the slowest crawl.
-  assert.equal(PF.connSpeed('grid', { gridW: 400, limits }), 3);
-  // rate == BASE_RATE (50%): the default/no-capacity-configured speed.
-  assert.equal(PF.connSpeed('grid', { gridW: 5000, limits }), 0.5);
-  // rate == 100%: full capacity, top speed. Tolerance, not exact equality - the
-  // interpolation's floating-point arithmetic lands on 0.09999999999999998, not a clean
-  // 0.1 (the same class of rounding as 0.1 + 0.2 !== 0.3 in IEEE 754).
-  assert.ok(Math.abs((PF.connSpeed('grid', { gridW: 10000, limits }) as number) - 0.1) < 1e-9);
+test('connSpeed: solar+grid each producing 1kW into a 2kW house each run at half the house\'s speed', () => {
+  const s = { solarW: 1000, gridW: 1000, houseW: 2000 };
+  const houseSpeed = PF.connSpeed('house', s) as number;
+  const solarSpeed = PF.connSpeed('solar', s) as number;
+  const gridSpeed = PF.connSpeed('grid', s) as number;
+  assert.equal(solarSpeed, houseSpeed * 2);
+  assert.equal(gridSpeed, houseSpeed * 2);
 });
 
-test('connSpeed: the rate floor caps the crawl - readings below it all animate at the same 3s duration', () => {
-  const limits = {
-    chargerMaxW: 0, gridMaxW: 14000, batteryChargePeakW: 0, batteryDischargePeakW: 0, solarPeakW: 0,
-  };
-  // Both below the 4% floor (140/14000 = 1%, 14/14000 = 0.1%) - MIN_RATE clamps both to the
-  // same 3s crawl rather than letting the duration keep growing toward a slower value.
-  assert.equal(PF.connSpeed('grid', { gridW: 140, limits }), 3);
-  assert.equal(PF.connSpeed('grid', { gridW: 14, limits }), 3);
+test('connSpeed: the busiest connector on the diagram always animates at FAST_S (0.4s)', () => {
+  assert.equal(PF.connSpeed('house', { houseW: 4000, solarW: 4000, gridW: 500 }), 0.4);
+  // Ties: more than one connector can simultaneously be "the" max.
+  assert.equal(PF.connSpeed('solar', { houseW: 4000, solarW: 4000, gridW: 500 }), 0.4);
 });
 
-test('connSpeed: scales monotonically across both segments (crawl -> default -> top speed)', () => {
-  const limits = {
-    chargerMaxW: 0, gridMaxW: 10000, batteryChargePeakW: 0, batteryDischargePeakW: 0, solarPeakW: 0,
-  };
+test('connSpeed: the share floor caps the crawl - a connector far below the busiest one animates at the same bounded duration', () => {
+  const s = { houseW: 10000, gridW: 10 };
+  // 10/10000 = 0.1%, well under MIN_RATE (8%) - clamped to the same floor duration
+  // (FAST_S / MIN_RATE = 5s) rather than crawling ever slower toward zero.
+  assert.equal(PF.connSpeed('grid', s), 0.4 / 0.08);
+  assert.equal(PF.connSpeed('grid', { houseW: 10000, gridW: 1 }), 0.4 / 0.08);
+});
+
+test('connSpeed: scales monotonically - duration shrinks (speed rises) as a connector\'s share of the busiest flow rises', () => {
   const durations = [4, 10, 25, 50, 75, 90, 100].map(
-    (pct) => PF.connSpeed('grid', { gridW: pct * 100, limits }) as number,
+    (pct) => PF.connSpeed('grid', { houseW: 10000, gridW: pct * 100 }) as number,
   );
   for (let i = 1; i < durations.length; i += 1) {
-    assert.ok(durations[i] < durations[i - 1], `duration must strictly decrease as rate rises: ${durations}`);
+    assert.ok(durations[i] < durations[i - 1], `duration must strictly decrease as share rises: ${durations}`);
   }
 });
 
-test('connSpeed: falls back to the 0.5s default speed when there is no configured capacity to scale against', () => {
-  // House never has a meter (see meter's kind switch), and a raw power value alone -
-  // with no peak setting - gives no rate to scale by either way. This lands exactly on
-  // the BASE_RATE/BASE_DURATION_S reference point, so no special-casing is needed.
-  assert.equal(PF.connSpeed('house', { houseW: 5000, limits: { gridMaxW: 14000 } }), 0.5);
-  assert.equal(PF.connSpeed('solar', { solarW: 3000, limits: { solarPeakW: 0 } }), 0.5);
+test('connSpeed: with nothing flowing, computes a defined (if unused) duration rather than dividing by zero', () => {
+  assert.equal(PF.connSpeed('house', {}), 0.4 / 0.08);
 });
 
 test('meterHtml: renders "" for a null (hidden) meter', () => {

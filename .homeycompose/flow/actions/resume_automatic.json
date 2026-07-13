@@ -1,0 +1,7 @@
+{
+  "title": { "en": "Resume automatic mode" },
+  "hint": { "en": "Clear a manual override so the charger returns to Scheduled/Solar/Idle" },
+  "args": [
+    { "type": "device", "name": "device", "filter": "driver_id=charger" }
+  ]
+}

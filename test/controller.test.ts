@@ -3,7 +3,7 @@
 import test from 'node:test';
 import assert from 'node:assert';
 import { EventEmitter } from 'events';
-import { ChargeController, ControllerHost } from '../lib/control/ChargeController';
+import { ChargeController, ControllerHost, ChargingTokens } from '../lib/control/ChargeController';
 import { CentralSystem } from '../lib/ocpp/CentralSystem';
 import { ChargePoint, RpcClient } from '../lib/ocpp/ChargePoint';
 import { ScheduleWindow } from '../lib/control/Scheduler';
@@ -1347,7 +1347,6 @@ test('onStartTransaction persists the transaction id/meter start, flips the capa
     minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdW: 14000, writeThrottleMs: 0,
   };
   const caps: Record<string, unknown> = {};
-  const chargingChanged: boolean[] = [];
   const host: ControllerHost = {
     identity: 'X',
     setCapability: (k, v) => {
@@ -1363,7 +1362,6 @@ test('onStartTransaction persists the transaction id/meter start, flips the capa
     setWarning: () => {},
     log: () => {},
     error: () => {},
-    onChargingChanged: (charging) => chargingChanged.push(charging),
   };
   const cs = { getChargePoint: () => cp, on: () => {} } as unknown as CentralSystem;
   const c = new ChargeController(host, cs);
@@ -1378,7 +1376,6 @@ test('onStartTransaction persists the transaction id/meter start, flips the capa
   assert.equal(store.transactionId, 42);
   assert.equal(store.meterStartWh, 100);
   assert.equal(caps.evcharger_charging, true);
-  assert.deepEqual(chargingChanged, [true]);
   assert.ok(c.isCharging());
   assert.ok(calls.includes('SetChargingProfile'),
     'a known desiredAmps writes immediately once a transaction id is finally granted');
@@ -1396,7 +1393,6 @@ test('onStopTransaction clears the transaction id and flips the charging capabil
     minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdW: 14000,
   };
   const caps: Record<string, unknown> = {};
-  const chargingChanged: boolean[] = [];
   const host: ControllerHost = {
     identity: 'X',
     setCapability: (k, v) => {
@@ -1412,7 +1408,6 @@ test('onStopTransaction clears the transaction id and flips the charging capabil
     setWarning: () => {},
     log: () => {},
     error: () => {},
-    onChargingChanged: (charging) => chargingChanged.push(charging),
   };
   const cs = { getChargePoint: () => cp, on: () => {} } as unknown as CentralSystem;
   const c = new ChargeController(host, cs);
@@ -1425,7 +1420,6 @@ test('onStopTransaction clears the transaction id and flips the charging capabil
 
   assert.equal(store.transactionId, null);
   assert.equal(caps.evcharger_charging, false);
-  assert.deepEqual(chargingChanged, [false]);
   assert.ok(!c.isCharging());
 });
 
@@ -2082,4 +2076,260 @@ test('an urgent cap-tightening write cancels an already-pending throttled write,
   // nothing further arrives once it would have fired.
   await new Promise((r) => setTimeout(r, 350));
   assert.deepEqual(writes, [16, 0], 'no stale 20A write leaks out once the original throttle window passes');
+});
+
+// ---------------------------------------------------------------------------
+// Unified started/paused/stopped Flow event, fault trigger, vehicle
+// connect/disconnect triggers, and resumeAutomatic()
+// ---------------------------------------------------------------------------
+
+function makeBoundController(extraStore: Record<string, unknown> = {}, extraSettings: Record<string, unknown> = {}): {
+  c: ChargeController; cp: ChargePoint; caps: Record<string, unknown>; store: Record<string, unknown>;
+  events: { event: string; tokens: ChargingTokens }[]; faults: string[];
+  connectEvents: true[]; disconnectEvents: true[];
+} {
+  const fakeClient: RpcClient = {
+    identity: 'X', handle: () => {}, call: async () => ({ status: 'Accepted' }), close: async () => {}, on: () => {},
+  };
+  const cp = new ChargePoint({ identity: 'X', authorize: () => true, nextTransactionId: () => 1 });
+  cp.attach(fakeClient);
+
+  const store: Record<string, unknown> = { schedule: [], ...extraStore };
+  const settings: Record<string, unknown> = {
+    minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdW: 14000, ...extraSettings,
+  };
+  const caps: Record<string, unknown> = {};
+  const events: { event: string; tokens: ChargingTokens }[] = [];
+  const faults: string[] = [];
+  const connectEvents: true[] = [];
+  const disconnectEvents: true[] = [];
+  const host: ControllerHost = {
+    identity: 'X',
+    setCapability: (k, v) => {
+      caps[k] = v;
+    },
+    getSetting: <T>(k: string) => settings[k] as T,
+    getStore: <T>(k: string) => store[k] as T,
+    setStore: async (k, v) => {
+      store[k] = v;
+    },
+    setAvailable: () => {},
+    setUnavailable: () => {},
+    setWarning: () => {},
+    log: () => {},
+    error: () => {},
+    onChargingEvent: (event, tokens) => {
+      events.push({ event, tokens });
+    },
+    onFault: (errorCode) => {
+      faults.push(errorCode);
+    },
+    onVehicleConnected: () => {
+      connectEvents.push(true);
+    },
+    onVehicleDisconnected: () => {
+      disconnectEvents.push(true);
+    },
+  };
+  const cs = { getChargePoint: () => cp, on: () => {} } as unknown as CentralSystem;
+  const c = new ChargeController(host, cs);
+  c.init();
+  return {
+    c, cp, caps, store, events, faults, connectEvents, disconnectEvents,
+  };
+}
+
+test('the unified charging event fires started/paused/started across Charging -> SuspendedEVSE -> Charging', () => {
+  const { cp, events } = makeBoundController();
+  cp.emit('status', { connectorId: 1, errorCode: 'NoError', status: 'Charging' });
+  cp.emit('status', { connectorId: 1, errorCode: 'NoError', status: 'SuspendedEVSE' });
+  cp.emit('status', { connectorId: 1, errorCode: 'NoError', status: 'Charging' });
+  assert.deepEqual(events.map((e) => e.event), ['started', 'paused', 'started']);
+});
+
+test('a repeated identical status does not re-emit the charging event', () => {
+  const { cp, events } = makeBoundController();
+  cp.emit('status', { connectorId: 1, errorCode: 'NoError', status: 'Charging' });
+  cp.emit('status', { connectorId: 1, errorCode: 'NoError', status: 'Charging' });
+  assert.deepEqual(events.map((e) => e.event), ['started']);
+});
+
+test('Charging -> Finishing emits a single stopped event', () => {
+  const { cp, events } = makeBoundController();
+  cp.emit('status', { connectorId: 1, errorCode: 'NoError', status: 'Charging' });
+  cp.emit('status', { connectorId: 1, errorCode: 'NoError', status: 'Finishing' });
+  assert.deepEqual(events.map((e) => e.event), ['started', 'stopped']);
+});
+
+test('a transient Available (reconnect blip) does not emit a stopped or a redundant started event', () => {
+  const realSetTimeout = global.setTimeout;
+  const realClearTimeout = global.clearTimeout;
+  const pending = new Set<() => void>();
+  (global as unknown as { setTimeout: unknown }).setTimeout = ((fn: () => void) => {
+    pending.add(fn);
+    return { fn } as unknown as NodeJS.Timeout;
+  }) as typeof setTimeout;
+  (global as unknown as { clearTimeout: unknown }).clearTimeout = ((handle: unknown) => {
+    const fn = (handle as { fn?: () => void } | undefined)?.fn;
+    if (fn) pending.delete(fn);
+  }) as typeof clearTimeout;
+
+  try {
+    const { cp, events } = makeBoundController({ transactionId: 55 });
+    cp.emit('status', { connectorId: 1, errorCode: 'NoError', status: 'Charging' });
+    pending.clear(); // isolate what this specific Available report schedules
+    cp.emit('status', { connectorId: 1, errorCode: 'NoError', status: 'Available' });
+    const idleReconcileFn = [...pending][0];
+    assert.ok(idleReconcileFn, 'a debounced reconcile was armed');
+
+    // The real Wallbox flips back to Charging well within the debounce window.
+    cp.emit('status', { connectorId: 1, errorCode: 'NoError', status: 'Charging' });
+    assert.ok(!pending.has(idleReconcileFn), 'the pending reconcile was cancelled by the Charging status');
+    assert.deepEqual(events.map((e) => e.event), ['started'],
+      'no stopped in between, and the repeat Charging is deduped against the still-current started event');
+  } finally {
+    global.setTimeout = realSetTimeout;
+    global.clearTimeout = realClearTimeout;
+  }
+});
+
+test('a genuinely sustained Available eventually emits a stopped event', () => {
+  const realSetTimeout = global.setTimeout;
+  const realClearTimeout = global.clearTimeout;
+  const pending = new Set<() => void>();
+  (global as unknown as { setTimeout: unknown }).setTimeout = ((fn: () => void) => {
+    pending.add(fn);
+    return { fn } as unknown as NodeJS.Timeout;
+  }) as typeof setTimeout;
+  (global as unknown as { clearTimeout: unknown }).clearTimeout = ((handle: unknown) => {
+    const fn = (handle as { fn?: () => void } | undefined)?.fn;
+    if (fn) pending.delete(fn);
+  }) as typeof clearTimeout;
+
+  try {
+    const { cp, events } = makeBoundController({ transactionId: 55 });
+    cp.emit('status', { connectorId: 1, errorCode: 'NoError', status: 'Charging' });
+    pending.clear();
+    cp.emit('status', { connectorId: 1, errorCode: 'NoError', status: 'Available' });
+    const idleReconcileFn = [...pending][0];
+    assert.ok(idleReconcileFn, 'a debounced reconcile was armed');
+
+    idleReconcileFn(); // simulate the debounce delay elapsing with no follow-up status
+    assert.deepEqual(events.map((e) => e.event), ['started', 'stopped']);
+  } finally {
+    global.setTimeout = realSetTimeout;
+    global.clearTimeout = realClearTimeout;
+  }
+});
+
+test('charging-event tokens include target current, mode, live surplus, and session energy', async () => {
+  const { c, cp, events } = makeBoundController();
+  await c.startManual(16);
+  cp.emit('status', { connectorId: 1, errorCode: 'NoError', status: 'Charging' });
+  cp.emit('startTransaction', 9, {
+    connectorId: 1, idTag: 'CHARGEIQ', meterStart: 1000000, timestamp: new Date().toISOString(),
+  });
+  c.onSolarSample({ gridSignedW: -500, pvW: 500, batteryW: 0 }); // primes lastAvailableW for the surplus token
+  cp.emit('meterValues', { energyKwh: 1002.5 }); // cumulative register reading; 2.5 kWh delivered this session
+
+  cp.emit('status', { connectorId: 1, errorCode: 'NoError', status: 'Finishing' });
+
+  const stopped = events.find((e) => e.event === 'stopped');
+  assert.ok(stopped);
+  assert.equal(stopped!.tokens.current, 16, 'target current at the moment charging stopped');
+  assert.equal(stopped!.tokens.mode, 'manual');
+  assert.ok(stopped!.tokens.surplus >= 0);
+  assert.equal(stopped!.tokens.sessionEnergy, 2.5);
+});
+
+test('a Faulted status fires onFault with the errorCode', () => {
+  const { cp, faults } = makeBoundController();
+  cp.emit('status', { connectorId: 1, errorCode: 'GroundFailure', status: 'Faulted' });
+  assert.deepEqual(faults, ['GroundFailure']);
+});
+
+test('a non-fault status does not fire onFault', () => {
+  const { cp, faults } = makeBoundController();
+  cp.emit('status', { connectorId: 1, errorCode: 'NoError', status: 'Charging' });
+  assert.deepEqual(faults, []);
+});
+
+test('a Faulted status raises alarm_generic, and it clears on recovery', () => {
+  const { cp, caps } = makeBoundController();
+  cp.emit('status', { connectorId: 1, errorCode: 'NoError', status: 'Charging' });
+  assert.equal(caps.alarm_generic, false);
+  cp.emit('status', { connectorId: 1, errorCode: 'GroundFailure', status: 'Faulted' });
+  assert.equal(caps.alarm_generic, true);
+  cp.emit('status', { connectorId: 1, errorCode: 'NoError', status: 'Charging' });
+  assert.equal(caps.alarm_generic, false);
+});
+
+test('session energy and duration capabilities update from a live transaction', () => {
+  const fiveMinAgo = Date.now() - 5 * 60_000;
+  const { cp, caps } = makeBoundController({
+    transactionId: 7, meterStartWh: 1_000_000, sessionStartMs: fiveMinAgo,
+  });
+  cp.emit('status', { connectorId: 1, errorCode: 'NoError', status: 'Charging' });
+  cp.emit('meterValues', { energyKwh: 1002.5 }); // cumulative register; 2.5 kWh this session
+  assert.equal(caps['meter_power.session'], 2.5);
+  assert.equal(caps.session_duration, 5);
+});
+
+test('session meters are not written without a live transaction', () => {
+  const { cp, caps } = makeBoundController(); // no transactionId in store
+  cp.emit('status', { connectorId: 1, errorCode: 'NoError', status: 'Charging' });
+  cp.emit('meterValues', { energyKwh: 5 });
+  assert.equal(caps['meter_power.session'], undefined);
+  assert.equal(caps.session_duration, undefined);
+});
+
+test('starting a new transaction re-bases the session meters to zero', () => {
+  const { cp, caps, store } = makeBoundController();
+  cp.emit('status', { connectorId: 1, errorCode: 'NoError', status: 'Charging' });
+  cp.emit('startTransaction', 11, {
+    connectorId: 1, idTag: 'x', meterStart: 500_000, timestamp: new Date().toISOString(),
+  });
+  assert.equal(caps['meter_power.session'], 0);
+  assert.equal(caps.session_duration, 0);
+  assert.equal(store.meterStartWh, 500_000);
+  assert.equal(typeof store.sessionStartMs, 'number');
+});
+
+test('a fresh plug-in fires onVehicleConnected exactly once, not on every subsequent plugged status', () => {
+  const { cp, connectEvents } = makeBoundController();
+  cp.emit('status', { connectorId: 1, errorCode: 'NoError', status: 'Available' }); // establishes prevPlugged=false
+  cp.emit('status', { connectorId: 1, errorCode: 'NoError', status: 'Preparing' });
+  assert.equal(connectEvents.length, 1);
+  cp.emit('status', { connectorId: 1, errorCode: 'NoError', status: 'Charging' });
+  assert.equal(connectEvents.length, 1, 'Preparing -> Charging is not a fresh plug-in');
+});
+
+test('booting straight into a plugged status fires neither connect nor disconnect (prevPlugged unknown)', () => {
+  const { cp, connectEvents, disconnectEvents } = makeBoundController();
+  cp.emit('status', { connectorId: 1, errorCode: 'NoError', status: 'Preparing' });
+  assert.equal(connectEvents.length, 0, 'prevPlugged was null (never observed idle), not a genuine edge');
+  assert.equal(disconnectEvents.length, 0);
+});
+
+test('an unplug fires onVehicleDisconnected', () => {
+  const { cp, connectEvents, disconnectEvents } = makeBoundController();
+  cp.emit('status', { connectorId: 1, errorCode: 'NoError', status: 'Available' }); // baseline
+  cp.emit('status', { connectorId: 1, errorCode: 'NoError', status: 'Preparing' });
+  assert.equal(connectEvents.length, 1);
+  cp.emit('status', { connectorId: 1, errorCode: 'NoError', status: 'Available' });
+  assert.equal(disconnectEvents.length, 1);
+});
+
+test('resumeAutomatic() clears a manual latch and re-resolves out of manual mode', async () => {
+  const { c } = makeBoundController();
+  await c.startManual(16);
+  assert.equal(c.getMode(), 'manual');
+  c.resumeAutomatic();
+  assert.equal(c.getMode(), 'solar', 'no schedule configured, so it falls back to the default Solar branch');
+});
+
+test('resumeAutomatic() is a no-op when no manual latch is set', () => {
+  const { c, store } = makeBoundController();
+  c.resumeAutomatic();
+  assert.equal(store.manualLatch, undefined, 'setStore was never called - nothing to clear');
 });

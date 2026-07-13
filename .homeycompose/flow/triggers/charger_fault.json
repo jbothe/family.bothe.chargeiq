@@ -1,0 +1,9 @@
+{
+  "title": { "en": "Charger fault" },
+  "tokens": [
+    { "name": "error_code", "type": "string", "title": { "en": "Error code" } }
+  ],
+  "args": [
+    { "type": "device", "name": "device", "filter": "driver_id=charger" }
+  ]
+}

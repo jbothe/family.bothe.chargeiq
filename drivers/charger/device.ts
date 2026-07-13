@@ -14,10 +14,13 @@ interface ChargeIQApp extends Homey.App {
 }
 
 const CAPABILITIES = [
-  'charge_mode', 'evcharger_charging', 'evcharger_charging_state', 'charger_status',
-  'measure_power', 'measure_current', 'measure_voltage', 'meter_power', 'charge_current_limit',
-  'measure_solar_surplus',
+  'charge_mode', 'evcharger_charging', 'evcharger_charging_state', 'alarm_generic',
+  'measure_power', 'measure_current', 'measure_voltage', 'meter_power', 'meter_power.session',
+  'session_duration', 'charge_current_limit', 'measure_solar_surplus',
 ];
+
+// Capabilities from earlier versions to strip from already-paired devices.
+const REMOVED_CAPABILITIES = ['charger_status'];
 
 module.exports = class ChargerDevice extends Homey.Device {
 
@@ -25,9 +28,17 @@ module.exports = class ChargerDevice extends Homey.Device {
 
   private startedTrigger!: Homey.FlowCardTriggerDevice;
 
+  private pausedTrigger!: Homey.FlowCardTriggerDevice;
+
   private stoppedTrigger!: Homey.FlowCardTriggerDevice;
 
   private modeTrigger!: Homey.FlowCardTriggerDevice;
+
+  private faultTrigger!: Homey.FlowCardTriggerDevice;
+
+  private vehicleConnectedTrigger!: Homey.FlowCardTriggerDevice;
+
+  private vehicleDisconnectedTrigger!: Homey.FlowCardTriggerDevice;
 
   private onSolarSample?: (s: SolarSample) => void;
 
@@ -47,8 +58,12 @@ module.exports = class ChargerDevice extends Homey.Device {
     await this.ensureCapabilities();
 
     this.startedTrigger = this.homey.flow.getDeviceTriggerCard('charging_started');
+    this.pausedTrigger = this.homey.flow.getDeviceTriggerCard('charging_paused');
     this.stoppedTrigger = this.homey.flow.getDeviceTriggerCard('charging_stopped');
     this.modeTrigger = this.homey.flow.getDeviceTriggerCard('mode_changed');
+    this.faultTrigger = this.homey.flow.getDeviceTriggerCard('charger_fault');
+    this.vehicleConnectedTrigger = this.homey.flow.getDeviceTriggerCard('vehicle_connected');
+    this.vehicleDisconnectedTrigger = this.homey.flow.getDeviceTriggerCard('vehicle_disconnected');
 
     const app = this.homey.app as ChargeIQApp;
     this.controller = new ChargeController(this.buildHost(), app.getCentralSystem());
@@ -141,6 +156,10 @@ module.exports = class ChargerDevice extends Homey.Device {
     return this.controller.isWithinSchedule();
   }
 
+  flowResumeAuto() {
+    return this.controller.resumeAutomatic();
+  }
+
   /** Used by the settings/widget editor to persist weekly windows. */
   setSchedule(windows: ScheduleWindow[]) {
     return this.controller.setSchedule(windows);
@@ -151,6 +170,9 @@ module.exports = class ChargerDevice extends Homey.Device {
   }
 
   private async ensureCapabilities() {
+    for (const cap of REMOVED_CAPABILITIES) {
+      if (this.hasCapability(cap)) await this.removeCapability(cap).catch(this.error);
+    }
     for (const cap of CAPABILITIES) {
       if (!this.hasCapability(cap)) await this.addCapability(cap).catch(this.error);
     }
@@ -184,12 +206,30 @@ module.exports = class ChargerDevice extends Homey.Device {
       // ([ChargeIQApp] …) instead of Homey's long [ManagerDrivers][Driver][Device:uuid].
       log: (...args) => this.homey.app.log(...args),
       error: (...args) => this.homey.app.error(...args),
-      onChargingChanged: (charging) => {
-        const card = charging ? this.startedTrigger : this.stoppedTrigger;
-        card.trigger(this, {}, {}).catch(this.error);
+      onChargingEvent: (event, tokens) => {
+        const card = {
+          started: this.startedTrigger,
+          paused: this.pausedTrigger,
+          stopped: this.stoppedTrigger,
+        }[event];
+        card.trigger(this, {
+          current: tokens.current,
+          mode: tokens.mode,
+          surplus: tokens.surplus,
+          session_energy: tokens.sessionEnergy,
+        }, {}).catch(this.error);
       },
       onModeChanged: (mode) => {
         this.modeTrigger.trigger(this, { mode }, {}).catch(this.error);
+      },
+      onFault: (errorCode) => {
+        this.faultTrigger.trigger(this, { error_code: errorCode }, {}).catch(this.error);
+      },
+      onVehicleConnected: () => {
+        this.vehicleConnectedTrigger.trigger(this, {}, {}).catch(this.error);
+      },
+      onVehicleDisconnected: () => {
+        this.vehicleDisconnectedTrigger.trigger(this, {}, {}).catch(this.error);
       },
       // Homey's underlying OS clock runs in UTC regardless of the timezone
       // configured in the Homey app, so schedule windows need this explicitly.

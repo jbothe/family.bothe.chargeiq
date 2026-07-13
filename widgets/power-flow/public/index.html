@@ -430,36 +430,43 @@
         }
         return null;
       },
-      // Connector dash-scroll animation duration (seconds), driven by flow rate so a
-      // connector's motion communicates "how hard is this node working" the same way the
-      // tile's capacity meter does. rate is meter(kind, s)'s pct as a 0-100 percent when a
-      // capacity is configured; nodes with no configured cap (House always, or any of
-      // EV/Solar/Grid/Battery when their peak setting is left at 0) fall back to BASE_RATE
-      // (50%) since there's no capacity to scale against - which lands exactly on
-      // BASE_DURATION_S below, so the fallback needs no special-casing.
-      //
-      // Three named reference points, each independently tuned on real-hardware feedback
-      // (a single "linear in speed" formula couldn't hit all three at once, so this is
-      // piecewise-linear in rate instead - two straight segments meeting at (BASE_RATE,
-      // BASE_DURATION_S), each interpolated directly, not derived from the other):
-      //   rate <= MIN_RATE  -> FLOOR_DURATION_S (3s)    the slowest crawl
-      //   rate == BASE_RATE -> BASE_DURATION_S (0.5s)   the default/no-capacity-configured speed
-      //   rate == 100       -> TOP_DURATION_S (0.1s)    full capacity, top speed
-      // rate itself is floored to MIN_RATE (not 0) so a barely-nonzero reading crawls
-      // rather than sitting exactly at the floor's boundary or dividing by zero.
-      connSpeed: function (kind, s) {
-        var m = PF.meter(kind, s);
-        var MIN_RATE = 4;
-        var BASE_RATE = 50;
-        var FLOOR_DURATION_S = 3;
-        var BASE_DURATION_S = 0.5;
-        var TOP_DURATION_S = 0.1;
-        var rate = m && m.pct > 0 ? Math.max(MIN_RATE, m.pct * 100) : BASE_RATE;
-        if (rate <= BASE_RATE) {
-          return FLOOR_DURATION_S
-            + (BASE_DURATION_S - FLOOR_DURATION_S) * (rate - MIN_RATE) / (BASE_RATE - MIN_RATE);
+      // The largest single connector magnitude currently on the diagram (W) - the
+      // reference every connector's share is measured against in connSpeed(). Deliberately
+      // the max of the five flows, not total generation/consumption on either side of the
+      // bus: that guarantees exactly one connector always reads as "full speed" at any
+      // instant, so the diagram never reads as universally sluggish just because power is
+      // spread across several sources/sinks at once.
+      maxFlowW: function (s) {
+        var kinds = ['ev', 'solar', 'grid', 'battery', 'house'];
+        var max = 0;
+        for (var i = 0; i < kinds.length; i++) {
+          var m = PF.flow(kinds[i], s).mag;
+          if (m > max) max = m;
         }
-        return BASE_DURATION_S + (TOP_DURATION_S - BASE_DURATION_S) * (rate - BASE_RATE) / (100 - BASE_RATE);
+        return max;
+      },
+      // Connector dash-scroll animation duration (seconds), driven by each connector's
+      // *share of the busiest flow on the diagram right now* - not, as before, its own
+      // power as a fraction of its own configured capacity (that's already what the
+      // tile-edge capacity meter shows via meter()/meterHtml(); using it for speed too was
+      // redundant, and left House - which has no meter - and any node with an unset peak
+      // permanently animating at the flat default). e.g. solar 1kW + grid 1kW feeding a
+      // 2kW house: house is the busiest flow (share 1.0, FAST_S), solar and grid each carry
+      // half the house's magnitude (share 0.5, so exactly double FAST_S's duration - half
+      // the visual speed).
+      //
+      // share is floored at MIN_RATE (not 0) so a connector that's barely moving still
+      // crawls at a bounded slowest duration (FAST_S / MIN_RATE) instead of stalling
+      // outright or dividing by zero when maxFlowW() itself is 0 (nothing flowing at all -
+      // setConn() never applies the duration in that case anyway, since dir is null below
+      // the 10W deadband in flow()).
+      connSpeed: function (kind, s) {
+        var FAST_S = 0.4;
+        var MIN_RATE = 0.08;
+        var max = PF.maxFlowW(s);
+        var share = max > 0 ? PF.flow(kind, s).mag / max : 0;
+        share = Math.max(MIN_RATE, Math.min(1, share));
+        return FAST_S / share;
       },
       // Renders a meter() result (or '' when null/hidden) as the tile-edge strip markup.
       // edge is 'bottom' for the header row (EV/Solar, connector runs below) or 'top' for
@@ -562,7 +569,8 @@
 
       // All connectors flow in the same blue regardless of tile — the tile's own accent
       // color (or, for Battery, its charge-tier color) stays on the icon itself. Dash-scroll
-      // speed is driven by PF.connSpeed (flow rate relative to capacity, when configured).
+      // speed is driven by PF.connSpeed (each connector's share of the busiest flow on the
+      // diagram right now - see connSpeed's own comment).
       setConn(document.getElementById('ev-conn'), 'var(--flow)', ev, PF.connSpeed('ev', s));
       setConn(document.getElementById('solar-conn'), 'var(--flow)', solar, PF.connSpeed('solar', s));
       setConn(document.getElementById('grid-conn'), 'var(--flow)', grid, PF.connSpeed('grid', s));

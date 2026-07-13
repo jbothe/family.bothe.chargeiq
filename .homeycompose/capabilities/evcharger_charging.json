@@ -1,0 +1,11 @@
+{
+  "type": "boolean",
+  "title": { "en": "Charging" },
+  "color": "#6DD400",
+  "getable": true,
+  "setable": true,
+  "insights": true,
+  "insightsTitleTrue": { "en": "Started charging" },
+  "insightsTitleFalse": { "en": "Stopped charging" },
+  "uiComponent": "toggle"
+}

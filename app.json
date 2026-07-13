@@ -44,8 +44,103 @@
     "triggers": [
       {
         "title": {
+          "en": "Charger fault"
+        },
+        "tokens": [
+          {
+            "name": "error_code",
+            "type": "string",
+            "title": {
+              "en": "Error code"
+            }
+          }
+        ],
+        "args": [
+          {
+            "type": "device",
+            "name": "device",
+            "filter": "driver_id=charger"
+          }
+        ],
+        "id": "charger_fault"
+      },
+      {
+        "title": {
+          "en": "Charging paused"
+        },
+        "tokens": [
+          {
+            "name": "current",
+            "type": "number",
+            "title": {
+              "en": "Target current (A)"
+            }
+          },
+          {
+            "name": "mode",
+            "type": "string",
+            "title": {
+              "en": "Mode"
+            }
+          },
+          {
+            "name": "surplus",
+            "type": "number",
+            "title": {
+              "en": "Solar surplus (W)"
+            }
+          },
+          {
+            "name": "session_energy",
+            "type": "number",
+            "title": {
+              "en": "Session energy (kWh)"
+            }
+          }
+        ],
+        "args": [
+          {
+            "type": "device",
+            "name": "device",
+            "filter": "driver_id=charger"
+          }
+        ],
+        "id": "charging_paused"
+      },
+      {
+        "title": {
           "en": "Charging started"
         },
+        "tokens": [
+          {
+            "name": "current",
+            "type": "number",
+            "title": {
+              "en": "Target current (A)"
+            }
+          },
+          {
+            "name": "mode",
+            "type": "string",
+            "title": {
+              "en": "Mode"
+            }
+          },
+          {
+            "name": "surplus",
+            "type": "number",
+            "title": {
+              "en": "Solar surplus (W)"
+            }
+          },
+          {
+            "name": "session_energy",
+            "type": "number",
+            "title": {
+              "en": "Session energy (kWh)"
+            }
+          }
+        ],
         "args": [
           {
             "type": "device",
@@ -59,6 +154,36 @@
         "title": {
           "en": "Charging stopped"
         },
+        "tokens": [
+          {
+            "name": "current",
+            "type": "number",
+            "title": {
+              "en": "Target current (A)"
+            }
+          },
+          {
+            "name": "mode",
+            "type": "string",
+            "title": {
+              "en": "Mode"
+            }
+          },
+          {
+            "name": "surplus",
+            "type": "number",
+            "title": {
+              "en": "Solar surplus (W)"
+            }
+          },
+          {
+            "name": "session_energy",
+            "type": "number",
+            "title": {
+              "en": "Session energy (kWh)"
+            }
+          }
+        ],
         "args": [
           {
             "type": "device",
@@ -89,6 +214,32 @@
           }
         ],
         "id": "mode_changed"
+      },
+      {
+        "title": {
+          "en": "Vehicle connected"
+        },
+        "args": [
+          {
+            "type": "device",
+            "name": "device",
+            "filter": "driver_id=charger"
+          }
+        ],
+        "id": "vehicle_connected"
+      },
+      {
+        "title": {
+          "en": "Vehicle disconnected"
+        },
+        "args": [
+          {
+            "type": "device",
+            "name": "device",
+            "filter": "driver_id=charger"
+          }
+        ],
+        "id": "vehicle_disconnected"
       }
     ],
     "conditions": [
@@ -166,6 +317,22 @@
       }
     ],
     "actions": [
+      {
+        "title": {
+          "en": "Resume automatic mode"
+        },
+        "hint": {
+          "en": "Clear a manual override so the charger returns to Scheduled/Solar/Idle"
+        },
+        "args": [
+          {
+            "type": "device",
+            "name": "device",
+            "filter": "driver_id=charger"
+          }
+        ],
+        "id": "resume_automatic"
+      },
       {
         "title": {
           "en": "Set current limit"
@@ -256,12 +423,14 @@
         "charge_current_limit",
         "charge_mode",
         "evcharger_charging_state",
+        "alarm_generic",
         "measure_solar_surplus",
-        "charger_status",
         "measure_power",
         "measure_current",
         "measure_voltage",
-        "meter_power"
+        "meter_power",
+        "meter_power.session",
+        "session_duration"
       ],
       "capabilitiesOptions": {
         "evcharger_charging_state": {
@@ -269,9 +438,19 @@
             "en": "Charging State"
           }
         },
+        "alarm_generic": {
+          "title": {
+            "en": "Fault"
+          }
+        },
         "meter_power": {
           "title": {
             "en": "Energy (total)"
+          }
+        },
+        "meter_power.session": {
+          "title": {
+            "en": "Energy (session)"
           }
         }
       },
@@ -677,74 +856,22 @@
         }
       ]
     },
-    "charger_status": {
-      "type": "enum",
+    "evcharger_charging": {
+      "type": "boolean",
       "title": {
-        "en": "Charger Status"
+        "en": "Charging"
       },
-      "desc": {
-        "en": "Raw OCPP StatusNotification state"
-      },
-      "icon": "/assets/capabilities/charger_status.svg",
+      "color": "#6DD400",
       "getable": true,
-      "setable": false,
-      "uiComponent": "sensor",
-      "values": [
-        {
-          "id": "Available",
-          "title": {
-            "en": "Available"
-          }
-        },
-        {
-          "id": "Preparing",
-          "title": {
-            "en": "Preparing"
-          }
-        },
-        {
-          "id": "Charging",
-          "title": {
-            "en": "Charging"
-          }
-        },
-        {
-          "id": "SuspendedEVSE",
-          "title": {
-            "en": "Suspended (EVSE)"
-          }
-        },
-        {
-          "id": "SuspendedEV",
-          "title": {
-            "en": "Suspended (EV)"
-          }
-        },
-        {
-          "id": "Finishing",
-          "title": {
-            "en": "Finishing"
-          }
-        },
-        {
-          "id": "Reserved",
-          "title": {
-            "en": "Reserved"
-          }
-        },
-        {
-          "id": "Unavailable",
-          "title": {
-            "en": "Unavailable"
-          }
-        },
-        {
-          "id": "Faulted",
-          "title": {
-            "en": "Faulted"
-          }
-        }
-      ]
+      "setable": true,
+      "insights": true,
+      "insightsTitleTrue": {
+        "en": "Started charging"
+      },
+      "insightsTitleFalse": {
+        "en": "Stopped charging"
+      },
+      "uiComponent": "toggle"
     },
     "measure_solar_surplus": {
       "type": "number",
@@ -758,6 +885,23 @@
         "en": "W"
       },
       "icon": "/assets/capabilities/measure_solar_surplus.svg",
+      "decimals": 0,
+      "getable": true,
+      "setable": false,
+      "uiComponent": "sensor"
+    },
+    "session_duration": {
+      "type": "number",
+      "title": {
+        "en": "Session Duration"
+      },
+      "desc": {
+        "en": "Elapsed time of the current charging session"
+      },
+      "units": {
+        "en": "min"
+      },
+      "icon": "/assets/capabilities/session_duration.svg",
       "decimals": 0,
       "getable": true,
       "setable": false,

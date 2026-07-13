@@ -1,0 +1,11 @@
+{
+  "type": "number",
+  "title": { "en": "Session Duration" },
+  "desc": { "en": "Elapsed time of the current charging session" },
+  "units": { "en": "min" },
+  "icon": "/assets/capabilities/session_duration.svg",
+  "decimals": 0,
+  "getable": true,
+  "setable": false,
+  "uiComponent": "sensor"
+}

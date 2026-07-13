@@ -1,5 +1,5 @@
 {
-  "title": { "en": "Charging stopped" },
+  "title": { "en": "Charging paused" },
   "tokens": [
     { "name": "current", "type": "number", "title": { "en": "Target current (A)" } },
     { "name": "mode", "type": "string", "title": { "en": "Mode" } },

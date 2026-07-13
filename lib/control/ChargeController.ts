@@ -17,6 +17,19 @@ import { SolarLoop, SolarLoopConfig } from './SolarLoop';
 /** Derived charging mode (not user-selected). */
 export type ChargeMode = 'manual' | 'scheduled' | 'solar' | 'idle';
 
+/** Unified charging-state event, driven off OCPP status rather than transaction bookkeeping. */
+export type ChargingEvent = 'started' | 'paused' | 'stopped';
+
+export interface ChargingTokens {
+  /** Target current (A) - what the controller is asking for, not a live measurement. */
+  current: number;
+  mode: ChargeMode;
+  /** Solar surplus (W) at the moment of the event. */
+  surplus: number;
+  /** Energy delivered this session (kWh), 0 if unknown. */
+  sessionEnergy: number;
+}
+
 /** Live power inputs from the solar feed (all in W; grid import + / export -). */
 export interface SolarSampleInput {
   gridSignedW: number;
@@ -49,9 +62,15 @@ export interface ControllerHost {
   setWarning(msg: string | null): void;
   log(...args: unknown[]): void;
   error(...args: unknown[]): void;
-  /** Fired when charging starts/stops so the device can trigger Flow cards. */
-  onChargingChanged?(charging: boolean): void;
+  /** Fired on a started/paused/stopped transition so the device can trigger Flow cards. */
+  onChargingEvent?(event: ChargingEvent, tokens: ChargingTokens): void;
   onModeChanged?(mode: ChargeMode): void;
+  /** Fired when the charger reports a Faulted status. */
+  onFault?(errorCode: string): void;
+  /** Fired on a genuine unplugged -> plugged-in edge. */
+  onVehicleConnected?(): void;
+  /** Fired on a genuine plugged-in -> unplugged edge. */
+  onVehicleDisconnected?(): void;
   /**
    * IANA timezone Homey is configured for (e.g. "Europe/Amsterdam"), via
    * `this.homey.clock.getTimezone()`. The underlying OS clock runs in UTC
@@ -200,6 +219,12 @@ export class ChargeController {
 
   /** null until the first MeterValues this connection - see nettedChargerW(). */
   private lastPowerW: number | null = null;
+
+  /** null until the first energy reading this connection - see chargingTokens(). */
+  private lastEnergyKwh: number | null = null;
+
+  /** Last emitted started/paused/stopped event, for change detection - see onChargingEvent. */
+  private lastChargingEvent: ChargingEvent | null = null;
 
   private lastAvailableW = 0;
 
@@ -407,16 +432,91 @@ export class ChargeController {
   // Inbound OCPP -> capabilities
   // ---------------------------------------------------------------------------
 
+  /** Maps a raw OCPP status to the unified started/paused/stopped Flow event, if any. */
+  private statusToChargingEvent(status: OcppStatus): ChargingEvent | null {
+    switch (status) {
+      case 'Charging':
+        return 'started';
+      case 'SuspendedEV':
+      case 'SuspendedEVSE':
+        return 'paused';
+      case 'Finishing':
+        return 'stopped';
+      default:
+        return null;
+    }
+  }
+
+  /** Fires the device's onChargingEvent callback, deduped against the last emitted event. */
+  private emitChargingEvent(event: ChargingEvent): void {
+    if (event === this.lastChargingEvent) return;
+    this.lastChargingEvent = event;
+    this.host.onChargingEvent?.(event, this.chargingTokens());
+  }
+
+  /**
+   * Energy delivered (kWh) and elapsed time (min) for the live transaction, or
+   * null when unknown (no reading / no start recorded yet). Both are
+   * transaction-scoped: `meterStartWh` and `sessionStartMs` are set on
+   * StartTransaction and read back from the store, so they survive an app
+   * restart onto an already-running session.
+   */
+  private sessionMetrics(now: number): { energyKwh: number | null; durationMin: number | null } {
+    const meterStartWh = this.host.getStore<number>('meterStartWh') ?? null;
+    const startMs = this.host.getStore<number>('sessionStartMs') ?? null;
+    const energyKwh = this.lastEnergyKwh != null && meterStartWh != null
+      ? Math.max(0, this.lastEnergyKwh - meterStartWh / 1000)
+      : null;
+    const durationMin = startMs != null
+      ? Math.max(0, Math.floor((now - startMs) / 60000))
+      : null;
+    return { energyKwh, durationMin };
+  }
+
+  /**
+   * Push the live session's energy/duration onto their capabilities. Gated on a
+   * tracked transaction so the values freeze at the final total between sessions
+   * (matching the session_energy Flow token) rather than the duration ticking
+   * up forever after the car unplugs.
+   */
+  private updateSessionCapabilities(now: number = Date.now()): void {
+    if (this.transactionId == null) return;
+    const { energyKwh, durationMin } = this.sessionMetrics(now);
+    if (energyKwh != null) {
+      this.host.setCapability('meter_power.session', Math.round(energyKwh * 100) / 100);
+    }
+    if (durationMin != null) this.host.setCapability('session_duration', durationMin);
+  }
+
+  /** Token payload for the started/paused/stopped Flow trigger family. */
+  private chargingTokens(): ChargingTokens {
+    const { energyKwh } = this.sessionMetrics(Date.now());
+    return {
+      current: this.desiredAmps ?? 0,
+      mode: this.getMode(),
+      surplus: Math.round(this.lastAvailableW),
+      sessionEnergy: Math.round((energyKwh ?? 0) * 100) / 100,
+    };
+  }
+
   private onStatus(info: StatusNotificationReq): void {
     const changed = info.status !== this.prevStatus;
     if (changed) {
       this.host.log(`[charger] status ${this.prevStatus ?? '?'} -> ${info.status}${
         info.errorCode && info.errorCode !== 'NoError' ? ` (${info.errorCode})` : ''}`);
       this.prevStatus = info.status;
+      // Captured before any of the branches below clear transactionId/desiredAmps,
+      // so a 'stopped' event's tokens reflect the current that was actually in
+      // effect, not the just-cleared value.
+      const event = this.statusToChargingEvent(info.status);
+      if (event) this.emitChargingEvent(event);
+      if (info.status === 'Faulted') this.host.onFault?.(info.errorCode ?? 'unknown');
     }
-    this.host.setCapability('charger_status', info.status);
     this.host.setCapability('evcharger_charging_state', toChargingState(info.status));
     this.host.setCapability('evcharger_charging', info.status === 'Charging');
+    // Persistent, condition-queryable fault state alongside the edge-only
+    // onFault Flow trigger and the setWarning banner - all off the one signal.
+    this.host.setCapability('alarm_generic', info.status === 'Faulted');
     this.host.setWarning(info.status === 'Faulted' ? `Charger fault: ${info.errorCode}` : null);
 
     // A fresh plug-in always clears the manual latch, so a newly-connected car
@@ -425,6 +525,7 @@ export class ChargeController {
     // charger idle before, so this doesn't fire on a transactionId restored
     // from the store at boot with no real status seen yet.
     if (info.status === 'Available') {
+      if (this.prevPlugged === true) this.host.onVehicleDisconnected?.();
       this.prevPlugged = false;
       // Debounced: see IDLE_RECONCILE_DELAY_MS. Don't trust a single Available
       // report as proof a still-tracked transaction has actually ended - only
@@ -443,8 +544,9 @@ export class ChargeController {
         clearTimeout(this.pendingIdleReconcile);
         this.pendingIdleReconcile = null;
       }
-      if (this.prevPlugged === false && this.manualLatch) {
-        this.clearManualLatch('fresh plug-in');
+      if (this.prevPlugged === false) {
+        if (this.manualLatch) this.clearManualLatch('fresh plug-in');
+        this.host.onVehicleConnected?.();
       }
       this.prevPlugged = true;
     }
@@ -460,7 +562,6 @@ export class ChargeController {
       this.awaitingStart = false;
       this.host.setStore('transactionId', null).catch(this.host.error);
       this.host.setCapability('evcharger_charging', false);
-      this.host.onChargingChanged?.(false);
     }
     this.lastStatusValue = info.status;
     // Only re-resolve on an actual status change - a repeat of the same
@@ -487,6 +588,11 @@ export class ChargeController {
       this.host.setStore('transactionId', null).catch(this.host.error);
       this.host.log('[charger] reconciled a stale transaction id (idle confirmed)');
     }
+    // Covers a genuine unplug that goes straight Charging -> Available with no
+    // Finishing report - the debounce above already confirmed this isn't a
+    // reconnect blip. No-op (via emitChargingEvent's dedup) if 'stopped' was
+    // already emitted through the Finishing path.
+    this.emitChargingEvent('stopped');
   }
 
   private onMeterValues(r: Readings): void {
@@ -495,7 +601,11 @@ export class ChargeController {
     }
     if (r.current !== undefined) this.host.setCapability('measure_current', r.current);
     if (r.voltage !== undefined) this.host.setCapability('measure_voltage', r.voltage);
-    if (r.energyKwh !== undefined) this.host.setCapability('meter_power', r.energyKwh);
+    if (r.energyKwh !== undefined) {
+      this.lastEnergyKwh = r.energyKwh;
+      this.host.setCapability('meter_power', r.energyKwh);
+    }
+    this.updateSessionCapabilities();
 
     // TEMP debugging: log every MeterValues report, unthrottled (normally
     // gated to a >=100W change - see git history to restore that).
@@ -509,8 +619,12 @@ export class ChargeController {
     this.awaitingStart = false;
     this.host.setStore('transactionId', id).catch(this.host.error);
     this.host.setStore('meterStartWh', req.meterStart).catch(this.host.error);
+    this.host.setStore('sessionStartMs', Date.now()).catch(this.host.error);
     this.host.setCapability('evcharger_charging', true);
-    this.host.onChargingChanged?.(true);
+    // Fresh session: re-base the session meters now rather than waiting for the
+    // next MeterValues/tick to recompute them off the new meterStart.
+    this.host.setCapability('meter_power.session', 0);
+    this.host.setCapability('session_duration', 0);
     if (this.desiredAmps != null) this.scheduleWrite();
   }
 
@@ -519,7 +633,6 @@ export class ChargeController {
     this.transactionId = null;
     this.host.setStore('transactionId', null).catch(this.host.error);
     this.host.setCapability('evcharger_charging', false);
-    this.host.onChargingChanged?.(false);
   }
 
   // ---------------------------------------------------------------------------
@@ -555,6 +668,12 @@ export class ChargeController {
 
   stop(): Promise<void> {
     return this.setManualCharging(false);
+  }
+
+  /** Flow action: clear a manual override so the next tick resolves Scheduled/Solar/Idle. */
+  resumeAutomatic(): void {
+    this.clearManualLatch('flow: resume automatic');
+    this.tick(new Date(), 'manual-toggle');
   }
 
   private clearManualLatch(reason: string): void {
@@ -997,6 +1116,11 @@ export class ChargeController {
       capNotes.length ? ` | ${capNotes.join('; ')}` : ''} -> ${finalDesc}`);
 
     this.ensureCharging(amps, capTightened);
+
+    // Advance the session duration/energy capabilities even on ticks with no
+    // fresh MeterValues (e.g. a paused-but-live session), so duration doesn't
+    // stall between meter reports.
+    this.updateSessionCapabilities(now.getTime());
 
     // Backstop: guarantee a re-resolve at least every TICK_MS even with no
     // reactive trigger (status/solar/manual/schedule) - but every tick, from

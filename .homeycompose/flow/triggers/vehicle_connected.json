@@ -1,0 +1,6 @@
+{
+  "title": { "en": "Vehicle connected" },
+  "args": [
+    { "type": "device", "name": "device", "filter": "driver_id=charger" }
+  ]
+}

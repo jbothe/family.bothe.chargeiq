@@ -16,6 +16,7 @@ interface FlowDevice {
   flowIsCharging(): boolean;
   flowModeIs(mode: string): boolean;
   flowWithinSchedule(): boolean;
+  flowResumeAuto(): void;
 }
 
 module.exports = class ChargerDriver extends Homey.Driver {
@@ -29,6 +30,8 @@ module.exports = class ChargerDriver extends Homey.Driver {
       .registerRunListener((args: { device: FlowDevice }) => args.device.flowStop());
     flow.getActionCard('set_current_limit')
       .registerRunListener((args: { device: FlowDevice; current: number }) => args.device.flowSetCurrent(args.current));
+    flow.getActionCard('resume_automatic')
+      .registerRunListener((args: { device: FlowDevice }) => args.device.flowResumeAuto());
 
     flow.getConditionCard('is_charging')
       .registerRunListener((args: { device: FlowDevice }) => args.device.flowIsCharging());

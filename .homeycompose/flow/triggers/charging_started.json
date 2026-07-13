@@ -1,5 +1,11 @@
 {
   "title": { "en": "Charging started" },
+  "tokens": [
+    { "name": "current", "type": "number", "title": { "en": "Target current (A)" } },
+    { "name": "mode", "type": "string", "title": { "en": "Mode" } },
+    { "name": "surplus", "type": "number", "title": { "en": "Solar surplus (W)" } },
+    { "name": "session_energy", "type": "number", "title": { "en": "Session energy (kWh)" } }
+  ],
   "args": [
     { "type": "device", "name": "device", "filter": "driver_id=charger" }
   ]

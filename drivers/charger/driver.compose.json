@@ -6,19 +6,27 @@
     "charge_current_limit",
     "charge_mode",
     "evcharger_charging_state",
+    "alarm_generic",
     "measure_solar_surplus",
-    "charger_status",
     "measure_power",
     "measure_current",
     "measure_voltage",
-    "meter_power"
+    "meter_power",
+    "meter_power.session",
+    "session_duration"
   ],
   "capabilitiesOptions": {
     "evcharger_charging_state": {
       "title": { "en": "Charging State" }
     },
+    "alarm_generic": {
+      "title": { "en": "Fault" }
+    },
     "meter_power": {
       "title": { "en": "Energy (total)" }
+    },
+    "meter_power.session": {
+      "title": { "en": "Energy (session)" }
     }
   },
   "platforms": ["local"],

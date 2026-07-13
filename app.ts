@@ -156,7 +156,6 @@ module.exports = class ChargeIQApp extends Homey.App {
         currentA: (cap('measure_current') as number) ?? 0,
         limitA: (cap('charge_current_limit') as number) ?? null,
         mode: modeInfo.mode,
-        status: cap('charger_status'),
         chargingState: cap('evcharger_charging_state'),
         charging: !!cap('evcharger_charging'),
       },
