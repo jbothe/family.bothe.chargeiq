@@ -62,6 +62,27 @@ test('default outside a schedule is Solar; follows excess', () => {
   assert.deepEqual(c.resolve(at(0, 12, 0)), { mode: 'solar', amps: 0 });
 });
 
+test('solarEnabled:false resolves Idle outside a schedule, ignoring any solar target', () => {
+  const { c } = makeController([], { solarEnabled: false });
+  c.setSolarTarget(10);
+  assert.deepEqual(c.resolve(at(0, 12, 0)), { mode: 'idle', amps: 0 });
+});
+
+test('solarEnabled:false still lets Scheduled and Manual take priority', async () => {
+  const { c } = makeController(SCHED, { solarEnabled: false });
+  assert.deepEqual(c.resolve(at(1, 10, 0)), { mode: 'scheduled', amps: 20 });
+  assert.equal(c.resolve(at(1, 20, 0)).mode, 'idle', 'outside window with solar disabled -> idle');
+  await c.startManual(16);
+  assert.deepEqual(c.resolve(at(1, 20, 0)), { mode: 'manual', amps: 16 });
+});
+
+test('solarEnabled:false does not stop solar samples from updating the surplus meter', () => {
+  const { c, caps } = makeController([], { solarEnabled: false });
+  c.onSolarSample({ gridSignedW: -2000, pvW: 2000, batteryW: 0 });
+  assert.equal(caps.measure_solar_surplus, 2000);
+  assert.equal(c.resolve(at(0, 12, 0)).mode, 'idle', 'mode still gated even though surplus is tracked');
+});
+
 test('inside a schedule (no manual) is Scheduled; schedule beats solar', () => {
   const { c } = makeController(SCHED);
   c.setSolarTarget(10);

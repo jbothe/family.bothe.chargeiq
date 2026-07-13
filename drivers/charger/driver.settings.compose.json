@@ -31,6 +31,7 @@
     "type": "group",
     "label": { "en": "Solar surplus" },
     "children": [
+      { "id": "solarEnabled", "type": "checkbox", "label": { "en": "Enable solar-surplus tracking" }, "hint": { "en": "When off, the charger never derives Solar mode outside a schedule - it goes Idle (holds at 0A) instead. Manual and Scheduled modes are unaffected, and the surplus meter/household caps keep updating in the background so re-enabling takes effect immediately." }, "value": true },
       { "id": "marginW", "type": "number", "label": { "en": "Grid reserve margin (W)" }, "hint": { "en": "Watts held back before offering surplus to the car. Positive reserves headroom and charges more conservatively; negative allows a bit of grid import. 0 targets breakeven." }, "value": 0, "min": -3000, "max": 3000 },
       { "id": "deadbandA", "type": "number", "label": { "en": "Deadband (A)" }, "hint": { "en": "While already charging, ignore surplus changes smaller than this many amps. Stops the current limit from adjusting on every minor solar flicker." }, "value": 1, "min": 0, "max": 10 },
       { "id": "rampA", "type": "number", "label": { "en": "Max ramp per step (A)" }, "hint": { "en": "While already charging, the most the current limit can change by on any single solar update. Smooths out sudden swings instead of jumping straight to the new target." }, "value": 3, "min": 1, "max": 32 },

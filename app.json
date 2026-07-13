@@ -139,6 +139,12 @@
                 "label": {
                   "en": "Solar surplus"
                 }
+              },
+              {
+                "id": "idle",
+                "label": {
+                  "en": "Idle"
+                }
               }
             ]
           }
@@ -461,6 +467,17 @@
           },
           "children": [
             {
+              "id": "solarEnabled",
+              "type": "checkbox",
+              "label": {
+                "en": "Enable solar-surplus tracking"
+              },
+              "hint": {
+                "en": "When off, the charger never derives Solar mode outside a schedule - it goes Idle (holds at 0A) instead. Manual and Scheduled modes are unaffected, and the surplus meter/household caps keep updating in the background so re-enabling takes effect immediately."
+              },
+              "value": true
+            },
+            {
               "id": "marginW",
               "type": "number",
               "label": {
@@ -627,7 +644,7 @@
         "en": "Charge Mode"
       },
       "desc": {
-        "en": "Current mode: Manual, Scheduled or Solar"
+        "en": "Current mode: Manual, Scheduled, Solar, or Idle"
       },
       "icon": "/assets/capabilities/charge_mode.svg",
       "getable": true,
@@ -650,6 +667,12 @@
           "id": "solar",
           "title": {
             "en": "Solar surplus"
+          }
+        },
+        {
+          "id": "idle",
+          "title": {
+            "en": "Idle"
           }
         }
       ]

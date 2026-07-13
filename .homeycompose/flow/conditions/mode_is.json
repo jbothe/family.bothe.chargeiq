@@ -9,7 +9,8 @@
       "values": [
         { "id": "manual", "label": { "en": "Manual" } },
         { "id": "scheduled", "label": { "en": "Scheduled" } },
-        { "id": "solar", "label": { "en": "Solar surplus" } }
+        { "id": "solar", "label": { "en": "Solar surplus" } },
+        { "id": "idle", "label": { "en": "Idle" } }
       ]
     }
   ]

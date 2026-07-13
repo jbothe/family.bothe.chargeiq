@@ -44,17 +44,23 @@ offset from SolarEdge's ~10s report cadence so the backstop and solar-driven tic
 land at nearly the same moment.
 
 ### Mode is a derived STATE, not user config
-Priority **Manual > Scheduled > Solar**, recomputed every tick:
+Priority **Manual > Scheduled > Solar > Idle**, recomputed every tick:
 - **Manual** — a *manual latch* is set. Any hands-on action sets it: `evcharger_charging` toggle,
   `charge_current_limit` slider, or Flow start/stop/set-current (`on`/amps → charge, `off` → off).
   Persisted in device store; cleared **only** when a schedule window *starts* (rising edge) or the
   charger is *unplugged→replugged* (OCPP `Available` → plugged edge).
 - **Scheduled** — no latch and inside a `Scheduler` window (schedule beats solar).
-- **Solar** — default outside schedules with no latch; follows excess via `SolarLoop`.
+- **Solar** — default outside schedules with no latch, when the `solarEnabled` device setting
+  (default on) is true; follows excess via `SolarLoop`.
+- **Idle** — no latch, not in a schedule window, and `solarEnabled` is false. Holds at 0A, same as
+  a paused Solar session, but labelled honestly rather than as `solar` when nothing is actually
+  being tracked. **`solarEnabled:false` only gates mode resolution** — `onSolarSample()`/`SolarLoop`
+  keep running regardless, so `measure_solar_surplus`, the household cap, and the shared-circuit cap
+  all stay live and re-enabling takes effect on the very next tick, not just the next solar sample.
 
 The **household grid-import cap** (`maxHouseholdW`, default 14 kW) applies on top in every mode.
-`charge_mode` is a **read-only** metric (manual/scheduled/solar). `getModeInfo()` → `{mode, detail}`
-drives the widget's `Mode: X · detail` line.
+`charge_mode` is a **read-only** metric (manual/scheduled/solar/idle). `getModeInfo()` →
+`{mode, detail}` drives the widget's `Mode: X · detail` line.
 
 The **shared-circuit cap** (`sharedCircuitA`/`sharedCircuitBufferA`, both default 0/disabled) is a
 second, independent hard ceiling for a physical circuit shared with other equipment (e.g. a home

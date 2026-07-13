@@ -15,7 +15,7 @@ import { Scheduler, ScheduleWindow, findScheduleConflicts } from './Scheduler';
 import { SolarLoop, SolarLoopConfig } from './SolarLoop';
 
 /** Derived charging mode (not user-selected). */
-export type ChargeMode = 'manual' | 'scheduled' | 'solar';
+export type ChargeMode = 'manual' | 'scheduled' | 'solar' | 'idle';
 
 /** Live power inputs from the solar feed (all in W; grid import + / export -). */
 export interface SolarSampleInput {
@@ -79,6 +79,10 @@ interface ControllerConfig {
   maxHouseholdW: number;
   sharedCircuitA: number;
   sharedCircuitBufferA: number;
+  // Master switch for solar-surplus tracking as a charging mode. Does NOT stop
+  // solar samples being consumed (surplus meter, household/circuit caps stay
+  // live) - only gates whether resolveDetailed() falls into the solar branch.
+  solarEnabled: boolean;
   // Dashboard capacity-meter peaks (0 = meter hidden); no bearing on control decisions.
   peakSolarW: number;
   peakBatteryChargeW: number;
@@ -102,6 +106,7 @@ const DEFAULTS: ControllerConfig = {
   maxHouseholdW: 14000,
   sharedCircuitA: 0,
   sharedCircuitBufferA: 0,
+  solarEnabled: true,
   peakSolarW: 0,
   peakBatteryChargeW: 0,
   peakBatteryDischargeW: 0,
@@ -297,6 +302,7 @@ export class ChargeController {
       maxHouseholdW: g('maxHouseholdW', DEFAULTS.maxHouseholdW),
       sharedCircuitA: g('sharedCircuitA', DEFAULTS.sharedCircuitA),
       sharedCircuitBufferA: g('sharedCircuitBufferA', DEFAULTS.sharedCircuitBufferA),
+      solarEnabled: g('solarEnabled', DEFAULTS.solarEnabled),
       peakSolarW: g('peakSolarW', DEFAULTS.peakSolarW),
       peakBatteryChargeW: g('peakBatteryChargeW', DEFAULTS.peakBatteryChargeW),
       peakBatteryDischargeW: g('peakBatteryDischargeW', DEFAULTS.peakBatteryDischargeW),
@@ -835,6 +841,13 @@ export class ChargeController {
     }
     if (this.scheduler.isActive(now)) {
       return { mode: 'scheduled', ...this.scheduledAmpsDetail(now) };
+    }
+    if (!this.cfg.solarEnabled) {
+      return {
+        mode: 'idle',
+        amps: 0,
+        reason: 'idle: solar tracking disabled (no manual or schedule target active)',
+      };
     }
     // Solar is the default outside a schedule. null (SolarLoop's 'off' state:
     // never started, or just reset) and 0 (its 'paused' state: was charging,

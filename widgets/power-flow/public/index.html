@@ -4,15 +4,26 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
+    /* Homey's own app-level theme setting (Settings > Appearance) is authoritative and can
+       differ from the OS's prefers-color-scheme (e.g. app forced to dark while iOS itself is
+       in light mode) - the mobile app doesn't propagate that override into the widget's
+       WKWebView as prefers-color-scheme, so relying on that media query alone silently
+       follows iOS instead of the configured Homey theme. What Homey *does* do is inject its
+       own semantic CSS custom properties into the widget document, pre-resolved to the real
+       active theme regardless of the OS (--homey-text-color et al; see
+       https://apps.developer.homey.app/the-basics/widgets/styling) - `.homey-dark-mode` from
+       that same doc is a separate, opt-in class for forcing dark mode, not something Homey
+       sets automatically, so it's not usable for detection. --text/--muted below prefer
+       Homey's live variable and only fall through to a literal when it's unset (i.e. when
+       this file is opened outside the Homey app, such as for the preview screenshots below);
+       --tile/--conn-static/--meter-track are then derived from --text via color-mix rather
+       than hand-tuned per theme, so they can never drift out of sync with it again. */
     :root {
-      --text: #0b1220;
-      --muted: #6b7280;
-      --tile: #e2e5ea;
+      --text: var(--homey-text-color, #0b1220);
+      --muted: var(--homey-text-color-light, #6b7280);
       --green: #16a34a;
       --purple: #8b5cf6;
-      --conn-static: #d8dce3;
       --flow: #2563eb;
-      --meter-track: rgba(11, 18, 32, 0.14);
       /* Bus gradient reflects live grid state: importing (drawing from the grid), exporting
          (feeding it), or neutral (no meaningful grid flow). Same tones in both themes — these
          are status colors, not surface colors. */
@@ -22,29 +33,16 @@
     }
     @media (prefers-color-scheme: dark) {
       :root {
-        --text: #ffffff; --muted: #8b93a1;
-        --tile: #363b47;
+        --text: var(--homey-text-color, #ffffff);
+        --muted: var(--homey-text-color-light, #8b93a1);
         --green: #3ddc97; --purple: #a78bfa;
-        --conn-static: #3a3d47;
         --flow: #60a5fa;
-        --meter-track: rgba(255, 255, 255, 0.16);
       }
     }
-    :root[data-theme="dark"] {
-      --text: #ffffff; --muted: #8b93a1;
-      --tile: #363b47;
-      --green: #3ddc97; --purple: #a78bfa;
-      --conn-static: #3a3d47;
-      --flow: #60a5fa;
-      --meter-track: rgba(255, 255, 255, 0.16);
-    }
-    :root[data-theme="light"] {
-      --text: #0b1220; --muted: #6b7280;
-      --tile: #e2e5ea;
-      --green: #16a34a; --purple: #8b5cf6;
-      --conn-static: #d8dce3;
-      --flow: #2563eb;
-      --meter-track: rgba(11, 18, 32, 0.14);
+    :root {
+      --tile: color-mix(in srgb, var(--text) 13%, transparent);
+      --conn-static: color-mix(in srgb, var(--text) 9%, transparent);
+      --meter-track: color-mix(in srgb, var(--text) 15%, transparent);
     }
 
     * { box-sizing: border-box; }
@@ -271,6 +269,7 @@
       'solar-low': '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="7" r="4.5"/><path d="M8 0.5v2M2.5 3.5l1.4 1.4M0.5 9h2"/><path d="M9 20.5h10.5a4 4 0 0 0 .4-7.96 5 5 0 0 0-9.6-1.7A4.3 4.3 0 0 0 9 20.5Z"/></svg>',
       scheduled: '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/></svg>',
       manual: '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="6" y1="4" x2="6" y2="20"/><circle cx="6" cy="9" r="2" fill="currentColor" stroke="none"/><line x1="12" y1="4" x2="12" y2="20"/><circle cx="12" cy="15" r="2" fill="currentColor" stroke="none"/><line x1="18" y1="4" x2="18" y2="20"/><circle cx="18" cy="7" r="2" fill="currentColor" stroke="none"/></svg>',
+      idle: '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><line x1="9.5" y1="9" x2="9.5" y2="15"/><line x1="14.5" y1="9" x2="14.5" y2="15"/></svg>',
     };
     function batterySvg(v) {
       return '<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="' + v.color + '" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">' +
@@ -366,6 +365,7 @@
         if (s.mode === 'scheduled') return 'scheduled';
         if (s.mode === 'manual') return 'manual';
         if (s.mode === 'solar') return s.solarEnough ? 'solar-enough' : 'solar-low';
+        if (s.mode === 'idle') return 'idle';
         return null;
       },
       // The Date the mode's shorthand status should point to: the active window's end while

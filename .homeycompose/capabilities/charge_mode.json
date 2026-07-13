@@ -1,7 +1,7 @@
 {
   "type": "enum",
   "title": { "en": "Charge Mode" },
-  "desc": { "en": "Current mode: Manual, Scheduled or Solar" },
+  "desc": { "en": "Current mode: Manual, Scheduled, Solar, or Idle" },
   "icon": "/assets/capabilities/charge_mode.svg",
   "getable": true,
   "setable": false,
@@ -9,6 +9,7 @@
   "values": [
     { "id": "manual", "title": { "en": "Manual" } },
     { "id": "scheduled", "title": { "en": "Scheduled" } },
-    { "id": "solar", "title": { "en": "Solar surplus" } }
+    { "id": "solar", "title": { "en": "Solar surplus" } },
+    { "id": "idle", "title": { "en": "Idle" } }
   ]
 }

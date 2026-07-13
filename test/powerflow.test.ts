@@ -139,6 +139,7 @@ test('modeIconKey: scheduled/manual are literal, solar splits on solarEnough', (
   assert.equal(PF.modeIconKey({ mode: 'manual' }), 'manual');
   assert.equal(PF.modeIconKey({ mode: 'solar', solarEnough: true }), 'solar-enough');
   assert.equal(PF.modeIconKey({ mode: 'solar', solarEnough: false }), 'solar-low');
+  assert.equal(PF.modeIconKey({ mode: 'idle' }), 'idle');
   assert.equal(PF.modeIconKey({ mode: null }), null);
 });
 
