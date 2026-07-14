@@ -224,6 +224,35 @@ beyond the configured floor, only genuine spare circuit capacity may.
 block, so keep it dependency-free (no imports). It renders live even when the charger is unplugged;
 dims (`.stale`) after ~50 s (5 missed 10s broadcasts) without a realtime update and auto-recovers.
 
+Almost every color/spacing/typography/border-radius value in the widget is a bare Homey CSS
+variable or `.homey-*` class (`--homey-su-*`, `--homey-color-*`, `--homey-text-color*`,
+`--homey-border-radius-*`, `--homey-icon-size-*`, `.homey-widget`, `.homey-text-*`) with **no
+local fallback** - by design, to stay a good dashboard citizen (see
+https://apps.developer.homey.app/the-basics/widgets/styling), but it means the widget renders
+unstyled (default browser fonts/colors, square corners) anywhere those aren't injected, i.e.
+outside the real Homey app. The handful of exceptions are genuinely bespoke tokens with no Homey
+equivalent: `--flow`/`--bus-import/export/neutral-a/b` (decorative/status gradients, still
+per-theme via their own `@media (prefers-color-scheme)` block), `--tile`/`--conn-static`/
+`--meter-track` (derived via `color-mix()` off `--homey-text-color`/`--homey-background-color`,
+not aliases of a single Homey var), and the battery gauge's 50%-tier color (`color-mix()` of
+red/green - Homey has no yellow token) and its null/no-data gray.
+
+For visual iteration without a real Homey device, `test/widget-preview.html` +
+`test/homey-mock.css` are dev-only tooling (not part of `npm test`, never shipped - nothing in
+`widget.compose.json`/`app.json` references `test/`). The preview page loads the real,
+**unmodified** widget file in an iframe and injects `homey-mock.css` into it after load, so the
+shipped file is never touched or duplicated. Must be served over http(s) (e.g. `python3 -m
+http.server` from the repo root) rather than opened via `file://`, since same-origin iframe access
+is required to inject the stylesheet and call the widget's own `render()` directly. It has a
+Light/Dark/Auto theme toggle - an explicit `data-theme` attribute override on both documents, not
+just `prefers-color-scheme`, since Homey's own theme setting is independent of the OS (same
+reasoning as the widget's own top-of-file comment) - and preset buttons that fill a JSON textarea
+rather than rendering immediately, so a preset is a starting point to tweak before hitting "Apply
+state", not a one-shot action. `homey-mock.css`'s values are reasonable approximations, not
+authoritative: spacing/icon-size/color-palette names are documented by Homey, but the two
+border-radius values are pure guesses since Homey doesn't publish them - real on-device
+verification (exact fonts, real color/radius values) still needs `homey app run`.
+
 ## Testing
 Pure logic is unit-tested (`SolarLoop`, `Scheduler`, controller mode/latch/cap resolution, solar
 merge, widget presentation, `parseMeterValues()`). `test/sim-charger.ts` is an `ocpp-rpc` `RPCClient`

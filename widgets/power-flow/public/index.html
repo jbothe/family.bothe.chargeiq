@@ -13,23 +13,19 @@
        active theme regardless of the OS (--homey-text-color et al; see
        https://apps.developer.homey.app/the-basics/widgets/styling) - `.homey-dark-mode` from
        that same doc is a separate, opt-in class for forcing dark mode, not something Homey
-       sets automatically, so it's not usable for detection. --text/--muted/--bg below prefer
-       Homey's live variables and only fall through to a literal when unset (i.e. when this
-       file is opened outside the Homey app, such as for the preview screenshots below);
-       --tile/--conn-static are then derived from --text blended toward --bg via color-mix
-       rather than hand-tuned per theme, so they can never drift out of sync with it again.
-       They're blended toward --bg rather than transparent so they stay fully opaque - .tile
-       and .conn rely on that opacity to hide the connector's intentional negative-margin
-       bleed under the tile (see .hicon .conn / .tcol .conn below); a translucent tile lets
-       that bleed show through into the icon instead of stopping at its edge. --meter-track
-       has no such bleed to hide (it's a strip painted on top of the already-opaque tile, not
-       something else bleeding under it), so it's left blended toward transparent. */
+       sets automatically, so it's not usable for detection. Text/background/de-emphasized-text
+       colors below reference --homey-text-color/--homey-background-color/--homey-text-color-light
+       directly (no local alias, no fallback), so they're unstyled outside the Homey app (e.g.
+       these preview screenshots). --tile/--conn-static are derived from --homey-text-color
+       blended toward --homey-background-color via color-mix rather than hand-tuned per theme,
+       so they can never drift out of sync with it again. They're blended toward the background
+       color rather than transparent so they stay fully opaque - .tile and .conn rely on that
+       opacity to hide the connector's intentional negative-margin bleed under the tile (see
+       .hicon .conn / .tcol .conn below); a translucent tile lets that bleed show through into
+       the icon instead of stopping at its edge. --meter-track has no such bleed to hide (it's a
+       strip painted on top of the already-opaque tile, not something else bleeding under it),
+       so it's left blended toward transparent. */
     :root {
-      --text: var(--homey-text-color, #0b1220);
-      --muted: var(--homey-text-color-light, #6b7280);
-      --bg: var(--homey-background-color, #ffffff);
-      --green: #16a34a;
-      --purple: #8b5cf6;
       --flow: #2563eb;
       /* Bus gradient reflects live grid state: importing (drawing from the grid), exporting
          (feeding it), or neutral (no meaningful grid flow). Same tones in both themes — these
@@ -40,26 +36,30 @@
     }
     @media (prefers-color-scheme: dark) {
       :root {
-        --text: var(--homey-text-color, #ffffff);
-        --muted: var(--homey-text-color-light, #8b93a1);
-        --bg: var(--homey-background-color, #0b0d12);
-        --green: #3ddc97; --purple: #a78bfa;
         --flow: #60a5fa;
       }
     }
     :root {
-      --tile: color-mix(in srgb, var(--text) 13%, var(--bg));
-      --conn-static: color-mix(in srgb, var(--text) 9%, var(--bg));
-      --meter-track: color-mix(in srgb, var(--text) 15%, transparent);
+      --tile: color-mix(in srgb, var(--homey-text-color) 13%, var(--homey-background-color));
+      --conn-static: color-mix(in srgb, var(--homey-text-color) 9%, var(--homey-background-color));
+      --meter-track: color-mix(in srgb, var(--homey-text-color) 15%, transparent);
     }
 
     * { box-sizing: border-box; }
-    html, body { margin: 0; padding: 0; background: transparent; }
-    body { font-family: -apple-system, "Segoe UI", Roboto, Helvetica, sans-serif; color: var(--text);
-           -webkit-font-smoothing: antialiased; }
-    /* Top/bottom padding was previously 12px/10px (not actually uniform); now equal and
-       ~1.5x the old average (11px -> 17px), per widget.compose.json's declared height. */
-    .card { padding: 17px 14px; transition: opacity .5s ease, filter .5s ease; }
+    /* overflow:hidden guards against the widget frame ever being given less height than
+       widget.compose.json declares (title bar, grid rounding, etc.) - without it, any excess
+       content shows as a visible scrollbar, which reads as "not a native widget" next to
+       Homey's own frame (rounded corners, no scroll chrome). At the declared 226px this is a
+       no-op today; it only clips in that mismatch case instead of scrolling. */
+    html, body { margin: 0; padding: 0; background: transparent; overflow: hidden; }
+    /* font-family comes from .homey-text-regular on <body> (see markup) - no local stack. */
+    body { color: var(--homey-text-color); -webkit-font-smoothing: antialiased; }
+    /* Padding follows Homey's `.homey-widget` convention (--homey-su-4, a uniform 16px) instead
+       of a hand-tuned asymmetric value - see https://apps.developer.homey.app/the-basics/widgets/styling.
+       No literal fallback: relies on Homey's own injected variable, same as the .homey-text-*
+       classes elsewhere in this file - won't be sized outside the Homey app (e.g. these preview
+       screenshots). */
+    .card { padding: var(--homey-su-4); transition: opacity .5s ease, filter .5s ease; }
     /* Stale: data hasn't refreshed recently (network/wifi blip). Dim, keep last values, auto-recover. */
     .card.stale { opacity: 0.4; filter: grayscale(0.85); }
 
@@ -72,7 +72,7 @@
        time the value's digit count changes width. Text is anchored to the same fixed point
        and grows outward (away from center), so it never pushes the icon either. */
     .headrow { position: relative; height: 78px; }
-    .hicon { display: flex; flex-direction: column; align-items: center; gap: 4px;
+    .hicon { display: flex; flex-direction: column; align-items: center; gap: var(--homey-su-1);
              position: absolute; top: 0; }
     .hcol.ev .hicon { left: 25%; transform: translateX(-50%); }
     .hcol.solar .hicon { left: 75%; transform: translateX(-50%); }
@@ -87,7 +87,7 @@
        makes the browser's own line-box taller than a specified line-height, so line-height
        alone doesn't actually clamp the rendered height - confirmed via
        getBoundingClientRect (a 20px line-height still measured 23px tall). */
-    .htext { display: flex; flex-direction: column; justify-content: center; gap: 4px;
+    .htext { display: flex; flex-direction: column; justify-content: center; gap: var(--homey-su-1);
              height: 44px; position: absolute; top: 0; }
     .hcol.ev .htext { right: calc(75% + 30px); align-items: flex-end; }
     .hcol.solar .htext { left: calc(75% + 30px); align-items: flex-start; }
@@ -98,7 +98,8 @@
        for a seamless bleed instead of a visible gap. overflow:hidden clips the capacity
        .meter strip (see below) to the tile's own rounded corners, so it bleeds flush to the
        edge without needing to duplicate the radius on the strip itself. */
-    .tile { width: 44px; height: 44px; border-radius: 10px; flex: 0 0 auto; position: relative;
+    .tile { width: 44px; height: 44px; border-radius: var(--homey-border-radius-default);
+            flex: 0 0 auto; position: relative;
             display: grid; place-items: center; background: var(--tile); overflow: hidden; }
     .tile svg { display: block; }
 
@@ -113,7 +114,10 @@
     .meter.bottom { bottom: 0; }
     .meter > span { display: block; height: 100%; }
 
-    .conn { width: 5px; height: 40px; border-radius: 2.5px; flex: 0 0 auto;
+    /* No border-radius: both ends always bleed under an opaque .tile/.bus (10px/6px overlap,
+       both well past this element's own end), so any corner rounding here would never
+       actually render as a visible curve. */
+    .conn { width: 5px; height: 40px; flex: 0 0 auto;
             background-color: var(--conn-static); background-size: 100% 6px; }
     .hicon .conn { margin: -10px 0 0; }  /* bleeds up into the tile above it */
     .tcol .conn { margin: 0 0 -10px; }   /* bleeds down into the tile below it */
@@ -127,14 +131,14 @@
        still keeps the box itself deterministic (see .htext comment). No CSS `gap` here -
        the number-to-unit space is a literal character inside .unit (see PF.valHtml()), so it
        renders at the unit's own smaller font-size instead of a fixed pixel gap. */
-    .val { display: flex; align-items: baseline; height: 20px;
-           font-size: 17px; font-weight: 700; font-variant-numeric: tabular-nums; letter-spacing: -0.01em; }
-    .val .unit { font-size: 11px; color: var(--muted); font-weight: 600; } /* de-emphasized so the number reads first */
+    /* Font-size/weight now come from the .homey-text-bold class on the element (see markup);
+       font-variant-numeric stays here since it's not part of that preset. */
+    .val { display: flex; align-items: baseline; height: 20px; font-variant-numeric: tabular-nums; }
+    .val .unit { color: var(--homey-text-color-light); } /* de-emphasized so the number reads first; size/weight via .homey-text-small-light */
     /* Explicit height (not line-height/padding) gives .lbl the same rendered height as
        .chip, so the two align by center - see .mode-stack and the .htext comment above on
-       why this can't just be line-height. */
-    .lbl { display: flex; align-items: center; height: 16px;
-           font-size: 10px; font-weight: 600; letter-spacing: 0.05em; color: var(--muted); text-transform: uppercase; }
+       why this can't just be line-height. Font-size/weight via .homey-text-small-light on the element. */
+    .lbl { display: flex; align-items: center; height: 16px; color: var(--homey-text-color-light); text-transform: uppercase; }
 
     .tile-wrap { position: relative; }
 
@@ -142,65 +146,75 @@
        top, icon+time beneath - mirrors .htext's label-above-value order). Same
        top/height/gap as .htext (see there) so the chip lines up with the label on the
        other side, and the icon+time row lines up with the power value, regardless of the
-       chip's content (plain text label or the bolt-icon+amps charging variant - both are
-       16px tall either way, see .chip). */
+       chip's content (READY / UNPLUGGED / CHARGING <amps>A - always 16px tall, see .chip). */
     .mode-stack { position: absolute; left: 100%; top: 0; margin-left: 6px; height: 44px;
                   display: flex; flex-direction: column; justify-content: center;
-                  align-items: flex-start; gap: 4px; }
-    .mode-row { display: flex; align-items: center; gap: 4px; height: 20px; }
-    .mode-icon { width: 17px; height: 17px; color: var(--text); }
+                  align-items: flex-start; gap: var(--homey-su-1); }
+    /* .val (the "kW" unit next to it on the other side of the icon) aligns its text on the
+       font baseline, while this row centers its content as a block - the two mechanisms land
+       the actual glyphs at slightly different heights even though both rows share the same
+       top/height. Nudged down a couple px (confirmed on-device) so the mode-time text reads
+       level with .val .unit; the icon/boost-icon move with it since they're the same flex row. */
+    .mode-row { display: flex; align-items: center; gap: var(--homey-su-1); height: 20px;
+                position: relative; top: 2px; }
+    .mode-icon { width: var(--homey-icon-size-regular); height: var(--homey-icon-size-regular); color: var(--homey-text-color); }
     .mode-icon svg { display: block; width: 100%; height: 100%; }
     .mode-icon:empty { display: none; }
     /* "→ 2:00pm" - the mode's next relevant transition (schedule window end while
        Scheduled, else the next window start). Empty (no schedule configured) collapses
        to zero width on its own, same as .mode-icon:empty. Styled to match .val .unit
        (small/muted) rather than .val itself - it's a secondary hint, not a metric. */
-    .mode-time { white-space: nowrap; font-size: 11px; font-weight: 600; color: var(--muted); }
-    .boost-icon { width: 15px; height: 15px; color: #f59e0b; }
+    .mode-time { white-space: nowrap; color: var(--homey-text-color-light); } /* size/weight via .homey-text-small-light */
+    .boost-icon { width: var(--homey-icon-size-small); height: var(--homey-icon-size-small); color: var(--homey-color-orange); }
     .boost-icon svg { display: block; width: 100%; height: 100%; }
     .boost-icon:empty { display: none; }
 
-    /* EV state chip. inline-flex + gap lets the charging chip mix an icon with its amps
-       reading; plain-text chips (READY / UNPLUGGED) are unaffected since they're a single
-       text-node child. Explicit height (not line-height/padding) matches .lbl's for
-       center-alignment - see .mode-stack. */
-    .chip { display: inline-flex; align-items: center; height: 16px; gap: 3px; white-space: nowrap;
-            font-size: 10px; font-weight: 700; letter-spacing: 0.05em;
-            text-transform: uppercase; padding: 0 6px; border-radius: 999px; }
+    /* EV state chip - always a single text label (READY / UNPLUGGED / CHARGING <amps>A).
+       Explicit height (not line-height/padding) matches .lbl's for center-alignment - see
+       .mode-stack. */
+    /* Font-size/weight via .homey-text-small on the element (see markup / chipEl.className below). */
+    .chip { display: inline-flex; align-items: center; height: 16px; white-space: nowrap;
+            text-transform: uppercase; padding: 0 var(--homey-su-1); border-radius: var(--homey-border-radius-default); }
     .chip:empty { display: none; }
-    .chip svg { display: block; }
-    .chip.charging { color: var(--green); background: color-mix(in srgb, var(--green) 18%, transparent); }
-    .chip.ready { color: var(--purple); background: color-mix(in srgb, var(--purple) 18%, transparent); }
-    .chip.unplugged { color: var(--muted); background: color-mix(in srgb, var(--muted) 18%, transparent); }
+    /* text-transform:uppercase text has no descenders, but align-items:center still centers the
+       *font's* full ascent/descent line box, not the glyph ink - the unused descender reserve is
+       bigger than the unused ascent-to-cap-height reserve for most fonts, so the ink sits
+       fractionally high within the chip's own background pill (confirmed via canvas measureText:
+       ~0.6px asymmetric in the system font here). Deliberately NOT compensated: .lbl has the
+       identical uppercase/centered setup and the same unaddressed asymmetry, so nudging only
+       .chip's text (tried at both 2px and 1px) made it visibly sit lower than .lbl on the other
+       side of the row - a more noticeable regression than the sub-pixel internal offset it was
+       meant to fix. Left unnudged on both sides for consistency. */
+    .chip.charging { color: var(--homey-color-green); background: color-mix(in srgb, var(--homey-color-green) 18%, transparent); }
+    .chip.ready { color: var(--homey-color-blue-600); background: color-mix(in srgb, var(--homey-color-blue-600) 18%, transparent); }
+    .chip.unplugged { color: var(--homey-text-color-light); background: color-mix(in srgb, var(--homey-text-color-light) 18%, transparent); }
 
     /* Power bus: negative top/bottom margins pull it into both rows' connectors. Gradient
        reflects live grid state (see PF.busState). */
-    .bus { height: 6px; border-radius: 3px; margin: -6px 2px -6px; position: relative;
+    .bus { height: 6px; border-radius: var(--homey-border-radius-small); margin: -6px 2px -6px; position: relative;
            transition: background .4s ease; }
     .bus.bus-import { background: linear-gradient(90deg, var(--bus-import-a), var(--bus-import-b)); }
     .bus.bus-export { background: linear-gradient(90deg, var(--bus-export-a), var(--bus-export-b)); }
     .bus.bus-neutral { background: linear-gradient(90deg, var(--bus-neutral-a), var(--bus-neutral-b)); }
 
     /* Device tile row: Grid / Battery / House */
-    .tilerow { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
-    .tcol { display: flex; flex-direction: column; align-items: center; gap: 4px; text-align: center; }
+    .tilerow { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--homey-su-2); }
+    .tcol { display: flex; flex-direction: column; align-items: center; gap: var(--homey-su-1); }
     /* Value-to-label gap kept separate from the icon-to-value gap above (.tcol's own gap) so
        it can be tuned independently - bottom row only (.lbl/.val themselves are shared with
-       the header row's .htext, so they stay untouched). No CSS gap: .lbl's own line box
-       already reserves ~2px above its capital letters (confirmed via Range.getBoundingClientRect
-       on the glyphs, not just the box), so a literal 0 gap here still reads as a small,
-       intentional ~2px visual gap - about 2/3 of the previous 1px-gap + 2px-reserve (3px)
-       total, not a true zero. */
-    .tcol-text { display: flex; flex-direction: column; align-items: center; gap: 0; margin-top: 2px; }
+       the header row's .htext, so they stay untouched). .lbl's own line box already reserves
+       ~2px above its capital letters even at gap:0 (confirmed via Range.getBoundingClientRect
+       on the glyphs, not just the box) - the explicit gap here is added on top of that reserve. */
+    .tcol-text { display: flex; flex-direction: column; align-items: center; gap: var(--homey-su-1); margin-top: var(--homey-su-1); }
   </style>
 </head>
-<body>
-  <div class="card">
+<body class="homey-text-regular">
+  <div class="card homey-widget">
     <div class="headrow">
       <div class="hcol ev">
         <div class="htext">
-          <div class="lbl">EV</div>
-          <div class="val" id="ev-val">–</div>
+          <div class="lbl homey-text-small-light">EV</div>
+          <div class="val homey-text-bold" id="ev-val">–</div>
         </div>
         <div class="hicon">
           <div class="tile-wrap">
@@ -209,7 +223,7 @@
               <div class="chip" id="ev-chip"></div>
               <div class="mode-row">
                 <div class="mode-icon" id="mode-icon"></div>
-                <div class="mode-time" id="mode-time"></div>
+                <div class="mode-time homey-text-small-light" id="mode-time"></div>
                 <div class="boost-icon" id="mode-boost"></div>
               </div>
             </div>
@@ -223,8 +237,8 @@
           <div class="conn" id="solar-conn"></div>
         </div>
         <div class="htext">
-          <div class="lbl">Solar</div>
-          <div class="val" id="solar-val">–</div>
+          <div class="lbl homey-text-small-light">Solar</div>
+          <div class="val homey-text-bold" id="solar-val">–</div>
         </div>
       </div>
     </div>
@@ -232,28 +246,28 @@
     <div class="bus" id="bus"></div>
 
     <div class="tilerow">
-      <div class="tcol">
+      <div class="tcol homey-text-align-center">
         <div class="conn" id="grid-conn"></div>
         <div class="tile" id="grid-tile"></div>
         <div class="tcol-text">
-          <div class="val" id="grid-val">–</div>
-          <div class="lbl">Grid</div>
+          <div class="val homey-text-bold" id="grid-val">–</div>
+          <div class="lbl homey-text-small-light">Grid</div>
         </div>
       </div>
-      <div class="tcol">
+      <div class="tcol homey-text-align-center">
         <div class="conn" id="battery-conn"></div>
         <div class="tile" id="battery-tile"></div>
         <div class="tcol-text">
-          <div class="val" id="battery-val">–</div>
-          <div class="lbl">Battery</div>
+          <div class="val homey-text-bold" id="battery-val">–</div>
+          <div class="lbl homey-text-small-light">Battery</div>
         </div>
       </div>
-      <div class="tcol">
+      <div class="tcol homey-text-align-center">
         <div class="conn" id="house-conn"></div>
         <div class="tile" id="house-tile"></div>
         <div class="tcol-text">
-          <div class="val" id="house-val">–</div>
-          <div class="lbl">House</div>
+          <div class="val homey-text-bold" id="house-val">–</div>
+          <div class="lbl homey-text-small-light">House</div>
         </div>
       </div>
     </div>
@@ -265,8 +279,6 @@
       solar: '<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="12" rx="1.5"/><path d="M3 8h18M3 12h18M9 4v12M15 4v12"/><path d="M9 20l1.5-4M15 20l-1.5-4"/></svg>',
       grid: '<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l7 20M12 2L5 22M9 22l1.5-6h3L15 22"/><path d="M7 14h10M8.3 8h7.4"/></svg>',
       house: '<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11l9-7 9 7"/><path d="M5 9.5V21h14V9.5"/></svg>',
-      // Lightning bolt used inline inside the EV chip when actively charging.
-      bolt: '<svg width="11.5" height="11.5" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M13 2 3 14h7l-1 8 10-12h-7l1-8Z"/></svg>',
       // Small "boost active" badge, shown next to the clock icon in scheduled mode.
       boost: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M7 15l5-5 5 5"/><path d="M7 9l5-5 5 5"/></svg>',
     };
@@ -287,8 +299,8 @@
         '</svg>';
     }
 
-    // House shares Grid's purple, and EV/Solar fall back to that same purple when idle.
-    var ACCENT = { ev: 'var(--green)', solar: 'var(--green)', grid: 'var(--purple)', house: 'var(--purple)', inactive: 'var(--purple)' };
+    // House shares Grid's blue-600, and EV/Solar fall back to that same blue-600 when idle.
+    var ACCENT = { ev: 'var(--homey-color-green)', solar: 'var(--homey-color-green)', grid: 'var(--homey-color-blue-600)', house: 'var(--homey-color-blue-600)', inactive: 'var(--homey-color-blue-600)' };
 
     // === POWERFLOW-LOGIC-START (inlined so the widget is self-contained; the test
     // suite extracts this exact block, so keep it dependency-free) ===
@@ -324,13 +336,13 @@
       },
       // Dynamic battery glyph: outline stays fixed, fill rect scales/recolors by charge tier.
       batteryVisual: function (pct) {
-        if (pct == null || isNaN(pct)) return { color: '#9aa1ad', fillHeight: 2, fillY: 17 };
+        if (pct == null || isNaN(pct)) return { color: 'var(--homey-color-mono-500)', fillHeight: 2, fillY: 17 };
         var color, frac;
-        if (pct <= 5) { color = '#ef4444'; frac = 0; }
-        else if (pct <= 25) { color = '#f59e0b'; frac = 0.25; }
-        else if (pct <= 50) { color = '#eab308'; frac = 0.5; }
-        else if (pct <= 75) { color = '#f59e0b'; frac = 0.75; }
-        else { color = '#22c55e'; frac = 1; }
+        if (pct <= 5) { color = 'var(--homey-color-red)'; frac = 0; }
+        else if (pct <= 25) { color = 'var(--homey-color-orange)'; frac = 0.25; }
+        else if (pct <= 50) { color = 'color-mix(in srgb, var(--homey-color-red), var(--homey-color-green))'; frac = 0.5; } // no Homey yellow token - blended as a stand-in
+        else if (pct <= 75) { color = 'var(--homey-color-orange)'; frac = 0.75; }
+        else { color = 'var(--homey-color-green)'; frac = 1; }
         var maxFill = 13;
         var fillHeight = frac === 0 ? 2 : maxFill * frac;
         var fillY = 6 + (maxFill - fillHeight);
@@ -345,8 +357,8 @@
       },
       // EV status chip, from the same evcharger_charging_state enum Homey's own UI uses
       // (computed once in ChargeController.toChargingState, just passed through here).
-      // Charging carries no label - the render layer fills it with a bolt icon + live
-      // amps (via chargeAmps) instead of static text.
+      // Charging carries no label - the render layer fills it with a "CHARGING" label +
+      // live amps (via chargeAmps) instead of a static one.
       evChip: function (s) {
         s = s || {};
         var c = s.charger || {};
@@ -411,22 +423,22 @@
         if (kind === 'ev') {
           var c = s.charger || {};
           if (!c.available || !(lim.chargerMaxW > 0)) return null;
-          return { pct: Math.max(0, Math.min(1, (c.powerW || 0) / lim.chargerMaxW)), color: 'var(--green)' };
+          return { pct: Math.max(0, Math.min(1, (c.powerW || 0) / lim.chargerMaxW)), color: 'var(--homey-color-green)' };
         }
         if (kind === 'solar') {
           if (!(lim.solarPeakW > 0)) return null;
-          return { pct: Math.max(0, Math.min(1, (s.solarW || 0) / lim.solarPeakW)), color: 'var(--green)' };
+          return { pct: Math.max(0, Math.min(1, (s.solarW || 0) / lim.solarPeakW)), color: 'var(--homey-color-green)' };
         }
         if (kind === 'battery') {
           var w = s.batteryW || 0;
           var peak = w >= 0 ? lim.batteryChargePeakW : lim.batteryDischargePeakW;
           if (!(peak > 0)) return null;
-          return { pct: Math.max(0, Math.min(1, Math.abs(w) / peak)), color: 'var(--purple)' };
+          return { pct: Math.max(0, Math.min(1, Math.abs(w) / peak)), color: 'var(--homey-color-blue-600)' };
         }
         if (kind === 'grid') {
           if (!(lim.gridMaxW > 0)) return null;
           var pct = Math.max(0, Math.min(1, Math.abs(s.gridW || 0) / lim.gridMaxW));
-          return { pct: pct, color: pct >= 0.95 ? '#ef4444' : 'var(--purple)' };
+          return { pct: pct, color: pct >= 0.95 ? 'var(--homey-text-color-danger)' : 'var(--homey-color-blue-600)' };
         }
         return null;
       },
@@ -513,7 +525,7 @@
         var str = PF.fmtW(w);
         var i = str.lastIndexOf(' ');
         if (i < 0) return str;
-        return str.slice(0, i) + '<span class="unit">&nbsp;' + str.slice(i + 1) + '</span>';
+        return str.slice(0, i) + '<span class="unit homey-text-small-light">&nbsp;' + str.slice(i + 1) + '</span>';
       },
     };
     // === POWERFLOW-LOGIC-END ===
@@ -545,12 +557,8 @@
 
       var chip = PF.evChip(s);
       var chipEl = document.getElementById('ev-chip');
-      if (chip && chip.cls === 'charging') {
-        chipEl.innerHTML = ICONS.bolt + Math.round(PF.chargeAmps(s)) + 'A';
-      } else {
-        chipEl.textContent = chip ? chip.label : '';
-      }
-      chipEl.className = 'chip' + (chip ? ' ' + chip.cls : '');
+      chipEl.textContent = chip ? (chip.cls === 'charging' ? 'CHARGING ' + Math.round(PF.chargeAmps(s)) + 'A' : chip.label) : '';
+      chipEl.className = 'chip homey-text-small' + (chip ? ' ' + chip.cls : '');
 
       document.getElementById('mode-icon').innerHTML = MODE_ICONS[PF.modeIconKey(s)] || '';
       document.getElementById('mode-time').textContent = PF.modeStatusText(s);
@@ -594,12 +602,27 @@
       render(result); applyStale();
     }
 
+    // Homey re-invokes onHomeyReady every time this widget (re)mounts - notably when
+    // navigating away from a dashboard containing it and back. Registering the realtime
+    // listener and stale-check interval unconditionally on every call would stack up one
+    // more of each per visit with nothing ever tearing down the previous ones - confirmed
+    // as the cause of a whole-dashboard freeze after a few dashboard switches (duplicate
+    // onData/applyStale callbacks compounding on every 10s push and 5s check). Guard the
+    // listener registration to once per JS context, and always clear any prior interval
+    // before starting a new one, so a re-mount can never leave an orphaned timer running.
+    var readyListenerAttached = false;
+    var staleTimer = null;
+
     function onHomeyReady(Homey) {
       Homey.ready();
       render({});
       // Live data is pushed from the app via realtime events (see startWidgetBroadcast).
-      Homey.on('powerflow', onData);
-      setInterval(applyStale, CHECK_MS);
+      if (!readyListenerAttached) {
+        readyListenerAttached = true;
+        Homey.on('powerflow', onData);
+      }
+      if (staleTimer) clearInterval(staleTimer);
+      staleTimer = setInterval(applyStale, CHECK_MS);
     }
   </script>
 </body>

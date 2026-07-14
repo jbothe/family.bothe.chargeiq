@@ -35,8 +35,8 @@ test('valHtml: wraps the unit in a span with a leading &nbsp;, so the space pick
   // A plain " " gets silently trimmed here - .val is a flex container, and a leading
   // collapsible space at the start of a flex item's own content is dropped just like at
   // the start of a block box. &nbsp; isn't collapsible, so it's what actually renders.
-  assert.equal(PF.valHtml(850), '850<span class="unit">&nbsp;W</span>');
-  assert.equal(PF.valHtml(2300), '2.3<span class="unit">&nbsp;kW</span>');
+  assert.equal(PF.valHtml(850), '850<span class="unit homey-text-small-light">&nbsp;W</span>');
+  assert.equal(PF.valHtml(2300), '2.3<span class="unit homey-text-small-light">&nbsp;kW</span>');
 });
 
 test('valHtml: no separator string is left between the number and the unit span', () => {
@@ -86,19 +86,22 @@ test('busState: import / export / neutral by grid sign, with a +-10W deadband', 
 });
 
 test('batteryVisual: color/fill tiers by charge percent', () => {
-  assert.deepEqual(PF.batteryVisual(5), { color: '#ef4444', fillHeight: 2, fillY: 17 });
-  assert.deepEqual(PF.batteryVisual(20), { color: '#f59e0b', fillHeight: 3.25, fillY: 15.75 });
-  assert.deepEqual(PF.batteryVisual(50), { color: '#eab308', fillHeight: 6.5, fillY: 12.5 });
-  assert.deepEqual(PF.batteryVisual(75), { color: '#f59e0b', fillHeight: 9.75, fillY: 9.25 });
-  assert.deepEqual(PF.batteryVisual(100), { color: '#22c55e', fillHeight: 13, fillY: 6 });
-  assert.deepEqual(PF.batteryVisual(null), { color: '#9aa1ad', fillHeight: 2, fillY: 17 });
+  assert.deepEqual(PF.batteryVisual(5), { color: 'var(--homey-color-red)', fillHeight: 2, fillY: 17 });
+  assert.deepEqual(PF.batteryVisual(20), { color: 'var(--homey-color-orange)', fillHeight: 3.25, fillY: 15.75 });
+  assert.deepEqual(
+    PF.batteryVisual(50),
+    { color: 'color-mix(in srgb, var(--homey-color-red), var(--homey-color-green))', fillHeight: 6.5, fillY: 12.5 },
+  );
+  assert.deepEqual(PF.batteryVisual(75), { color: 'var(--homey-color-orange)', fillHeight: 9.75, fillY: 9.25 });
+  assert.deepEqual(PF.batteryVisual(100), { color: 'var(--homey-color-green)', fillHeight: 13, fillY: 6 });
+  assert.deepEqual(PF.batteryVisual(null), { color: 'var(--homey-color-mono-500)', fillHeight: 2, fillY: 17 });
 });
 
 test('evChip: label + style class from evcharger_charging_state, null when no charger paired', () => {
   assert.deepEqual(
     PF.evChip({ charger: { available: true, chargingState: 'plugged_in_charging' } }),
     { cls: 'charging' },
-    'charging carries no label - render() fills it with a bolt icon + live amps instead',
+    'charging carries no label - render() fills it with a "CHARGING" label + live amps instead',
   );
   assert.deepEqual(
     PF.evChip({ charger: { available: true, chargingState: 'plugged_in' } }),
@@ -184,7 +187,7 @@ test('meter: ev uses live charger power against chargerMaxW, hidden when no char
   };
   assert.deepEqual(
     PF.meter('ev', { charger: { available: true, powerW: 3680 }, limits }),
-    { pct: 0.5, color: 'var(--green)' },
+    { pct: 0.5, color: 'var(--homey-color-green)' },
   );
   assert.equal(
     PF.meter('ev', { charger: { available: false, powerW: 3680 }, limits }), null,
@@ -200,7 +203,7 @@ test('meter: solar against solarPeakW, hidden when no peak configured', () => {
   const limits = {
     chargerMaxW: 7360, gridMaxW: 14000, batteryChargePeakW: 3000, batteryDischargePeakW: 2600, solarPeakW: 6000,
   };
-  assert.deepEqual(PF.meter('solar', { solarW: 3000, limits }), { pct: 0.5, color: 'var(--green)' });
+  assert.deepEqual(PF.meter('solar', { solarW: 3000, limits }), { pct: 0.5, color: 'var(--homey-color-green)' });
   assert.equal(PF.meter('solar', { solarW: 3000, limits: { ...limits, solarPeakW: 0 } }), null);
 });
 
@@ -209,11 +212,11 @@ test('meter: battery picks charge peak when charging, discharge peak when discha
     chargerMaxW: 7360, gridMaxW: 14000, batteryChargePeakW: 3000, batteryDischargePeakW: 2600, solarPeakW: 6000,
   };
   assert.deepEqual(
-    PF.meter('battery', { batteryW: 1500, limits }), { pct: 0.5, color: 'var(--purple)' },
+    PF.meter('battery', { batteryW: 1500, limits }), { pct: 0.5, color: 'var(--homey-color-blue-600)' },
     'charging (positive) uses batteryChargePeakW',
   );
   assert.deepEqual(
-    PF.meter('battery', { batteryW: -1300, limits }), { pct: 0.5, color: 'var(--purple)' },
+    PF.meter('battery', { batteryW: -1300, limits }), { pct: 0.5, color: 'var(--homey-color-blue-600)' },
     'discharging (negative) uses batteryDischargePeakW',
   );
   assert.equal(
@@ -222,13 +225,13 @@ test('meter: battery picks charge peak when charging, discharge peak when discha
   );
 });
 
-test('meter: grid turns red within 5% of gridMaxW, purple below, hidden when cap disabled', () => {
+test('meter: grid turns red within 5% of gridMaxW, blue-600 below, hidden when cap disabled', () => {
   const limits = {
     chargerMaxW: 7360, gridMaxW: 14000, batteryChargePeakW: 3000, batteryDischargePeakW: 2600, solarPeakW: 6000,
   };
-  assert.deepEqual(PF.meter('grid', { gridW: 1400, limits }), { pct: 0.1, color: 'var(--purple)' });
-  assert.deepEqual(PF.meter('grid', { gridW: -13300, limits }), { pct: 0.95, color: '#ef4444' }, 'exactly at threshold');
-  assert.deepEqual(PF.meter('grid', { gridW: 13000, limits }), { pct: 13000 / 14000, color: 'var(--purple)' });
+  assert.deepEqual(PF.meter('grid', { gridW: 1400, limits }), { pct: 0.1, color: 'var(--homey-color-blue-600)' });
+  assert.deepEqual(PF.meter('grid', { gridW: -13300, limits }), { pct: 0.95, color: 'var(--homey-text-color-danger)' }, 'exactly at threshold');
+  assert.deepEqual(PF.meter('grid', { gridW: 13000, limits }), { pct: 13000 / 14000, color: 'var(--homey-color-blue-600)' });
   assert.equal(PF.meter('grid', { gridW: 1000, limits: { ...limits, gridMaxW: 0 } }), null);
 });
 
@@ -236,8 +239,8 @@ test('meter: pct clamps at 1 when current exceeds the configured peak', () => {
   const limits = {
     chargerMaxW: 7360, gridMaxW: 14000, batteryChargePeakW: 3000, batteryDischargePeakW: 2600, solarPeakW: 6000,
   };
-  assert.deepEqual(PF.meter('solar', { solarW: 9000, limits }), { pct: 1, color: 'var(--green)' });
-  assert.deepEqual(PF.meter('grid', { gridW: 20000, limits }), { pct: 1, color: '#ef4444' });
+  assert.deepEqual(PF.meter('solar', { solarW: 9000, limits }), { pct: 1, color: 'var(--homey-color-green)' });
+  assert.deepEqual(PF.meter('grid', { gridW: 20000, limits }), { pct: 1, color: 'var(--homey-text-color-danger)' });
 });
 
 test('meter: null/missing state and unknown kind both yield null', () => {
@@ -250,11 +253,11 @@ test('meter: a missing/zero reading is a real 0% fill, not treated as absent', (
   const limits = {
     chargerMaxW: 7360, gridMaxW: 14000, batteryChargePeakW: 3000, batteryDischargePeakW: 2600, solarPeakW: 6000,
   };
-  assert.deepEqual(PF.meter('ev', { charger: { available: true }, limits }), { pct: 0, color: 'var(--green)' });
-  assert.deepEqual(PF.meter('solar', { limits }), { pct: 0, color: 'var(--green)' });
-  assert.deepEqual(PF.meter('grid', { limits }), { pct: 0, color: 'var(--purple)' });
+  assert.deepEqual(PF.meter('ev', { charger: { available: true }, limits }), { pct: 0, color: 'var(--homey-color-green)' });
+  assert.deepEqual(PF.meter('solar', { limits }), { pct: 0, color: 'var(--homey-color-green)' });
+  assert.deepEqual(PF.meter('grid', { limits }), { pct: 0, color: 'var(--homey-color-blue-600)' });
   assert.deepEqual(
-    PF.meter('battery', { limits }), { pct: 0, color: 'var(--purple)' },
+    PF.meter('battery', { limits }), { pct: 0, color: 'var(--homey-color-blue-600)' },
     'batteryW defaults to 0, which is >=0 so it reads against the charge peak',
   );
 });
@@ -263,7 +266,7 @@ test('meter: pct never goes negative even for an out-of-range negative reading',
   const limits = {
     chargerMaxW: 7360, gridMaxW: 14000, batteryChargePeakW: 3000, batteryDischargePeakW: 2600, solarPeakW: 6000,
   };
-  assert.deepEqual(PF.meter('solar', { solarW: -500, limits }), { pct: 0, color: 'var(--green)' });
+  assert.deepEqual(PF.meter('solar', { solarW: -500, limits }), { pct: 0, color: 'var(--homey-color-green)' });
 });
 
 test('connSpeed: solar+grid each producing 1kW into a 2kW house each run at half the house\'s speed', () => {
@@ -307,7 +310,7 @@ test('meterHtml: renders "" for a null (hidden) meter', () => {
 });
 
 test('meterHtml: exactly 0% renders a real 0px fill - genuinely empty, not a floored sliver', () => {
-  const html = PF.meterHtml({ pct: 0, color: 'var(--purple)' }, 'top') as string;
+  const html = PF.meterHtml({ pct: 0, color: 'var(--homey-color-blue-600)' }, 'top') as string;
   assert.match(html, /class="meter top"/);
   assert.match(html, /width:0px/);
 });
@@ -324,7 +327,7 @@ test('meterHtml: a low nonzero reading is rescaled up to a visible floor, withou
   // swallowed by that curve at every row of the strip, not just thinned out. EDGE_PX is
   // deliberately just past that geometric threshold (not a much bigger round number), so a
   // low reading is visible without inflating it toward a disproportionately large bar.
-  const html = PF.meterHtml({ pct: 900 / 14200, color: 'var(--purple)' }, 'top') as string;
+  const html = PF.meterHtml({ pct: 900 / 14200, color: 'var(--homey-color-blue-600)' }, 'top') as string;
   // EDGE_PX(5) + pct*(44-2*EDGE_PX) = 5 + 0.0634*34 = 7.16 -> rounds to 7px.
   assert.match(html, /width:7px/);
 });
@@ -345,7 +348,7 @@ test('meterHtml: a high-but-not-full reading is rescaled down, staying visibly s
 
 test('meterHtml: the rescale is monotonic and reaches both true endpoints only at 0 and 1', () => {
   const widths = [0, 0.063, 0.5, 0.92, 0.96, 1].map((pct) => {
-    const html = PF.meterHtml({ pct, color: 'var(--purple)' }, 'top') as string;
+    const html = PF.meterHtml({ pct, color: 'var(--homey-color-blue-600)' }, 'top') as string;
     return Number(/width:(\d+)px/.exec(html)![1]);
   });
   for (let i = 1; i < widths.length; i += 1) {
@@ -356,6 +359,6 @@ test('meterHtml: the rescale is monotonic and reaches both true endpoints only a
 });
 
 test('meterHtml: edge class selects which tile side the strip bleeds to', () => {
-  assert.match(PF.meterHtml({ pct: 0.5, color: 'var(--green)' }, 'bottom') as string, /class="meter bottom"/);
-  assert.match(PF.meterHtml({ pct: 0.5, color: 'var(--green)' }, 'top') as string, /class="meter top"/);
+  assert.match(PF.meterHtml({ pct: 0.5, color: 'var(--homey-color-green)' }, 'bottom') as string, /class="meter bottom"/);
+  assert.match(PF.meterHtml({ pct: 0.5, color: 'var(--homey-color-green)' }, 'top') as string, /class="meter top"/);
 });

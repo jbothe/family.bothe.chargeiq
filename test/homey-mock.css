@@ -1,0 +1,86 @@
+/* Stand-in for Homey's own injected widget stylesheet, for local preview only.
+   Real values are NOT publicly documented in exact px/hex terms (see
+   https://apps.developer.homey.app/the-basics/widgets/styling) - these are reasonable
+   approximations, not authoritative. Never shipped with the app (lives under test/, which
+   nothing in widget.compose.json/app.json references) and never loaded by
+   test/powerflow.test.ts (that suite only exercises pure JS logic, not CSS). Injected into
+   the widget's iframe by widget-preview.html after load - the real widget file in
+   widgets/power-flow/public/index.html is never modified or duplicated. */
+
+:root {
+  --homey-su: 4px;
+  --homey-su-1: 4px;
+  --homey-su-2: 8px;
+  --homey-su-3: 12px;
+  --homey-su-4: 16px;
+  --homey-su-5: 20px;
+  --homey-su-6: 24px;
+  --homey-su-7: 28px;
+  --homey-su-8: 32px;
+
+  --homey-border-radius-default: 8px; /* guessed - not documented */
+  --homey-border-radius-small: 4px;   /* guessed - not documented */
+
+  /* These three are documented (unlike the border-radius pair above). */
+  --homey-icon-size-medium: 20px;
+  --homey-icon-size-regular: 16px;
+  --homey-icon-size-small: 14px;
+
+  --homey-text-color: #0b1220;
+  --homey-text-color-light: #6b7280;
+  --homey-text-color-white: #ffffff;
+  --homey-background-color: #ffffff;
+
+  --homey-color-green: #16a34a;
+  --homey-color-orange: #f59e0b;
+  --homey-color-red: #ef4444;
+  --homey-color-blue-600: #3b82f6;
+  --homey-color-mono-500: #9aa1ad;
+
+  --homey-text-color-danger: #ef4444;
+  --homey-text-color-success: #16a34a;
+  --homey-text-color-warning: #f59e0b;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --homey-text-color: #ffffff;
+    --homey-text-color-light: #8b93a1;
+    --homey-background-color: #0b0d12;
+  }
+}
+
+/* Explicit override for widget-preview.html's light/dark toggle, so preview theme isn't
+   pinned to the browser/OS's real prefers-color-scheme (which JS can't override) - matches
+   how Homey's own theme setting actually works too: it's independent of the OS (see the
+   widget's own top-of-file comment on --homey-text-color et al). Same specificity as the
+   plain :root block above but declared later, and the media-query block above it, so either
+   attribute wins over both when the harness sets it. */
+:root[data-theme='dark'] {
+  --homey-text-color: #ffffff;
+  --homey-text-color-light: #8b93a1;
+  --homey-background-color: #0b0d12;
+}
+:root[data-theme='light'] {
+  --homey-text-color: #0b1220;
+  --homey-text-color-light: #6b7280;
+  --homey-background-color: #ffffff;
+}
+
+body { font-family: -apple-system, "Segoe UI", Roboto, Helvetica, sans-serif; }
+
+.homey-widget { padding: var(--homey-su-4); }
+.homey-widget-small { padding: var(--homey-su-2); }
+.homey-widget-full { padding: 0; }
+
+/* Font-size/weight pairings guessed from the documented preset names + the "smallest preset
+   is 14px" fact mentioned in Homey's docs - not the real published table. */
+.homey-text-regular { font-size: 14px; font-weight: 400; line-height: 20px; }
+.homey-text-medium { font-size: 14px; font-weight: 600; line-height: 20px; }
+.homey-text-bold { font-size: 16px; font-weight: 700; line-height: 22px; }
+.homey-text-small { font-size: 12px; font-weight: 600; line-height: 16px; }
+.homey-text-small-light { font-size: 12px; font-weight: 500; line-height: 16px; }
+
+.homey-text-align-left { text-align: left; }
+.homey-text-align-center { text-align: center; }
+.homey-text-align-right { text-align: right; }

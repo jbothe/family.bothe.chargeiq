@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Power Flow widget preview</title>
+  <style>
+    /* Harness chrome only - never touches the widget itself, which renders inside the iframe
+       below exactly as shipped (widgets/power-flow/public/index.html, unmodified). */
+    :root {
+      --bg: #f2f3f7;
+      --surface: #ffffff;
+      --border: #e2e4ea;
+      --text: #1a1d29;
+      --text-muted: #676c7e;
+      --accent: #4f46e5;
+      --accent-text: #ffffff;
+      --radius: 12px;
+      --radius-sm: 8px;
+      --shadow: 0 1px 2px rgba(16, 18, 27, 0.04), 0 8px 24px rgba(16, 18, 27, 0.06);
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
+    body {
+      font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      margin: 0;
+      padding: 32px 20px 60px;
+      background: var(--bg);
+      color: var(--text);
+    }
+    .page { max-width: 640px; margin: 0 auto; }
+
+    header { margin-bottom: 24px; }
+    h1 { font-size: 18px; font-weight: 700; margin: 0 0 6px; letter-spacing: -0.01em; }
+    header p { font-size: 13px; line-height: 1.5; color: var(--text-muted); margin: 0; }
+    header code { background: var(--border); padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+
+    section { margin-bottom: 28px; }
+    section > h2 {
+      font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em;
+      color: var(--text-muted); margin: 0 0 10px;
+    }
+    section > p.hint { font-size: 13px; color: var(--text-muted); margin: -4px 0 12px; line-height: 1.5; }
+
+    .row { display: flex; gap: 8px; flex-wrap: wrap; }
+
+    button {
+      font: inherit; font-size: 13px; font-weight: 600; color: var(--text);
+      padding: 8px 14px; cursor: pointer;
+      background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm);
+      box-shadow: 0 1px 2px rgba(16, 18, 27, 0.03);
+      transition: background 0.15s ease, border-color 0.15s ease, transform 0.05s ease;
+    }
+    button:hover { border-color: #c8cbd6; background: #fafafe; }
+    button:active { transform: translateY(1px); }
+    button[aria-pressed='true'] { border-color: var(--accent); color: var(--accent); background: #eeecfd; }
+
+    button.primary {
+      background: var(--accent); color: var(--accent-text); border-color: var(--accent);
+    }
+    button.primary:hover { background: #4338ca; border-color: #4338ca; }
+
+    /* "Realtime" controls (theme + stale) grouped together since both apply instantly with
+       no intermediate state to review, unlike the preset shortcuts below. */
+    .controls-card {
+      display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+      background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+      box-shadow: var(--shadow); padding: 14px 16px; margin-bottom: 20px;
+    }
+    .controls-card .divider { width: 1px; align-self: stretch; background: var(--border); }
+
+    .preview-card {
+      display: flex; justify-content: center;
+      background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+      box-shadow: var(--shadow); padding: 24px;
+    }
+    /* Matches homey-mock.css's own light/dark --homey-background-color values, so the iframe's
+       transparent .card always sits on a same-theme surface behind it - otherwise the mock's
+       light-vs-dark text color and this wrapper's background can mismatch (e.g. white text
+       from a dark-mode browser on this box's hardcoded white background). Falls back to the
+       real prefers-color-scheme when the toggle is in "Auto" (no [data-theme] on <html>), but
+       an explicit [data-theme] - same attribute/values the toggle sets on the iframe's own
+       <html> - always wins, same as homey-mock.css's own override. */
+    .frame-wrap { display: inline-block; border: 1px solid #ccc; background: #ffffff; border-radius: 10px; overflow: hidden; }
+    @media (prefers-color-scheme: dark) {
+      .frame-wrap { background: #0b0d12; border-color: #333; }
+    }
+    html[data-theme='light'] .frame-wrap { background: #ffffff; border-color: #ccc; }
+    html[data-theme='dark'] .frame-wrap { background: #0b0d12; border-color: #333; }
+    iframe { display: block; width: 380px; height: 226px; border: 0; }
+
+    textarea {
+      width: 100%; height: 220px; font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 12.5px;
+      line-height: 1.5; color: var(--text); background: var(--surface);
+      border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 12px;
+      resize: vertical; box-shadow: var(--shadow);
+    }
+    textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.15); }
+
+    .apply-row { margin-top: 10px; display: flex; justify-content: flex-end; }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <header>
+      <h1>Power Flow widget preview</h1>
+      <p>Homey styles mocked via <code>test/homey-mock.css</code>, injected into the iframe below.
+         Serve this over http(s), not <code>file://</code>.</p>
+    </header>
+
+    <div class="controls-card">
+      <div class="row">
+        <button class="theme-btn" data-theme="light">Light</button>
+        <button class="theme-btn" data-theme="dark">Dark</button>
+        <button class="theme-btn" data-theme="">Auto (OS)</button>
+      </div>
+      <div class="divider"></div>
+      <button id="toggleStale">Toggle stale</button>
+    </div>
+
+    <section>
+      <div class="preview-card">
+        <div class="frame-wrap">
+          <iframe id="widget" src="../widgets/power-flow/public/index.html"></iframe>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Shortcuts</h2>
+      <p class="hint">Click one to fill the State box below with that preset's JSON, ready to
+         tweak before applying - they don't render directly, so you can edit first.</p>
+      <div class="row">
+        <button data-preset="idle">Idle / unplugged</button>
+        <button data-preset="ready">Plugged in, ready</button>
+        <button data-preset="charging">Solar charging</button>
+        <button data-preset="scheduledBoost">Scheduled + boost</button>
+        <button data-preset="gridCap">Grid near cap</button>
+        <button data-preset="unknownBattery">Battery reading unknown</button>
+      </div>
+    </section>
+
+    <section>
+      <h2>State</h2>
+      <p class="hint">JSON passed straight to the widget's own <code>render()</code>.</p>
+      <textarea id="customState">{}</textarea>
+      <div class="apply-row"><button id="applyCustom" class="primary">Apply state</button></div>
+    </section>
+  </div>
+
+  <script>
+    var PRESETS = {
+      idle: {
+        charger: { available: true, powerW: 0, chargingState: 'plugged_out' },
+        solarW: 0, gridW: 0, batteryW: 0, houseW: 0, batterySoc: 40,
+        mode: 'idle',
+      },
+      ready: {
+        charger: { available: true, powerW: 0, chargingState: 'plugged_in' },
+        solarW: 200, gridW: 150, batteryW: 0, houseW: 350, batterySoc: 55,
+        mode: 'solar', solarEnough: false,
+      },
+      charging: {
+        charger: { available: true, powerW: 3680, chargingState: 'plugged_in_charging', limitA: 16 },
+        solarW: 4200, gridW: -300, batteryW: 200, houseW: 800, batterySoc: 72,
+        mode: 'solar', solarEnough: true,
+        limits: { chargerMaxW: 7360, solarPeakW: 8000, batteryChargePeakW: 5000, batteryDischargePeakW: 5000, gridMaxW: 14000 },
+      },
+      scheduledBoost: {
+        charger: { available: true, powerW: 7360, chargingState: 'plugged_in_charging', limitA: 32 },
+        solarW: 3200, gridW: 800, batteryW: -500, houseW: 2900, batterySoc: 62,
+        mode: 'scheduled', boostActive: true, scheduleEndAt: new Date(Date.now() + 3600000).toISOString(),
+        limits: { chargerMaxW: 7360, solarPeakW: 8000, batteryChargePeakW: 5000, batteryDischargePeakW: 5000, gridMaxW: 14000 },
+      },
+      gridCap: {
+        charger: { available: true, powerW: 6900, chargingState: 'plugged_in_charging', limitA: 30 },
+        solarW: 500, gridW: 13600, batteryW: 0, houseW: 1200, batterySoc: 50,
+        mode: 'manual',
+        limits: { chargerMaxW: 7360, solarPeakW: 8000, batteryChargePeakW: 5000, batteryDischargePeakW: 5000, gridMaxW: 14000 },
+      },
+      unknownBattery: {
+        charger: { available: true, powerW: 2000, chargingState: 'plugged_in_charging', limitA: 10 },
+        solarW: 2500, gridW: -400, batteryW: 0, houseW: 700, batterySoc: null,
+        mode: 'solar', solarEnough: true,
+      },
+    };
+
+    var iframe = document.getElementById('widget');
+    var mockCssHref = 'homey-mock.css';
+    var currentTheme = ''; // '' = Auto (follows the browser/OS prefers-color-scheme)
+
+    function injectMockCss() {
+      var doc = iframe.contentDocument;
+      if (!doc || doc.getElementById('homey-mock-css')) return;
+      var link = doc.createElement('link');
+      link.id = 'homey-mock-css';
+      link.rel = 'stylesheet';
+      link.href = new URL(mockCssHref, window.location.href).href; // resolve against this page, not the iframe's own location
+      doc.head.appendChild(link);
+    }
+
+    // Sets [data-theme] on both this page's <html> (drives .frame-wrap above) and the
+    // iframe's own <html> (drives homey-mock.css's [data-theme] override) so the two always
+    // agree - an empty theme removes the attribute entirely, falling back to each document's
+    // real prefers-color-scheme.
+    function applyTheme(theme) {
+      currentTheme = theme;
+      if (theme) {
+        document.documentElement.setAttribute('data-theme', theme);
+      } else {
+        document.documentElement.removeAttribute('data-theme');
+      }
+      var doc = iframe.contentDocument;
+      if (doc) {
+        if (theme) doc.documentElement.setAttribute('data-theme', theme);
+        else doc.documentElement.removeAttribute('data-theme');
+      }
+      document.querySelectorAll('.theme-btn').forEach(function (btn) {
+        btn.setAttribute('aria-pressed', String(btn.getAttribute('data-theme') === theme));
+      });
+    }
+
+    iframe.addEventListener('load', function () {
+      injectMockCss();
+      applyTheme(currentTheme); // re-apply after any (re)load, since a fresh document has no [data-theme] yet
+    });
+
+    document.querySelectorAll('.theme-btn').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        applyTheme(btn.getAttribute('data-theme'));
+      });
+    });
+    applyTheme(''); // Auto by default
+
+    function applyState(state) {
+      var win = iframe.contentWindow;
+      if (win && typeof win.render === 'function') {
+        win.render(state);
+      }
+    }
+
+    // Preset buttons only fill the State textarea (pretty-printed) rather than rendering
+    // directly, so a preset is a starting point to tweak, not a one-shot action - "Apply
+    // state" below is still the one thing that actually calls render().
+    document.querySelectorAll('button[data-preset]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var preset = PRESETS[btn.getAttribute('data-preset')];
+        document.getElementById('customState').value = JSON.stringify(preset, null, 2);
+      });
+    });
+
+    document.getElementById('applyCustom').addEventListener('click', function () {
+      try {
+        applyState(JSON.parse(document.getElementById('customState').value));
+      } catch (e) {
+        alert('Invalid JSON: ' + e.message);
+      }
+    });
+
+    document.getElementById('toggleStale').addEventListener('click', function () {
+      var doc = iframe.contentDocument;
+      var card = doc && doc.querySelector('.card');
+      if (card) card.classList.toggle('stale');
+    });
+  </script>
+</body>
+</html>
