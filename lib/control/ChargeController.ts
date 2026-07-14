@@ -907,6 +907,7 @@ export class ChargeController {
 
   getDiagnostics(): {
     availableW: number; solarState: string; targetA: number | null; mode: ChargeMode;
+    chargerPowerW: number | null;
     limits: {
       chargerMaxW: number; gridMaxW: number;
       batteryChargePeakW: number; batteryDischargePeakW: number; solarPeakW: number;
@@ -917,6 +918,11 @@ export class ChargeController {
       solarState: this.solarLoop?.getState() ?? 'off',
       targetA: this.solarTargetAmps,
       mode: this.getMode(),
+      // Netted charger draw (see nettedChargerW()): 0 if confirmed not delivering,
+      // null if genuinely unknown right now. Exposed so callers (the widget's house
+      // load) can subtract the EV's own draw out of a grid-derived total instead of
+      // double-counting it as household consumption.
+      chargerPowerW: this.nettedChargerW(),
       limits: {
         chargerMaxW: this.cfg.maxAmps * this.cfg.voltage * this.cfg.phases,
         gridMaxW: this.cfg.maxHouseholdW,

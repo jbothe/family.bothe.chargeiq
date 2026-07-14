@@ -1537,6 +1537,39 @@ test('getDiagnostics() reflects the live solar loop state, target, and available
   assert.equal(diag.availableW, 2300);
 });
 
+test('getDiagnostics().chargerPowerW nets the charger\'s own draw for the widget\'s house-load calc', () => {
+  const fakeClient: RpcClient = {
+    identity: 'X', handle: () => {}, call: async () => ({ status: 'Accepted' }), close: async () => {}, on: () => {},
+  };
+  const cp = new ChargePoint({ identity: 'X', authorize: () => true, nextTransactionId: () => 1 });
+  cp.attach(fakeClient);
+  const host: ControllerHost = {
+    identity: 'X',
+    setCapability: () => {},
+    getSetting: <T>(k: string) => ({
+      minAmps: 6, maxAmps: 31, phases: 1, voltage: 230, maxHouseholdW: 14000,
+    } as Record<string, unknown>)[k] as T,
+    getStore: <T>(k: string) => ({ schedule: [] } as Record<string, unknown>)[k] as T,
+    setStore: async () => {},
+    setAvailable: () => {},
+    setUnavailable: () => {},
+    setWarning: () => {},
+    log: () => {},
+    error: () => {},
+  };
+  const cs = { getChargePoint: () => cp, on: () => {} } as unknown as CentralSystem;
+  const c = new ChargeController(host, cs);
+  c.init();
+  assert.equal(c.getDiagnostics().chargerPowerW, 0, 'confirmed not delivering - nothing to net out yet');
+
+  cp.emit('status', { connectorId: 1, errorCode: 'NoError', status: 'Charging' });
+  assert.equal(c.getDiagnostics().chargerPowerW, null,
+    'Charging but no MeterValues on this connection yet - genuinely unknown, not guessed at 0');
+
+  cp.emit('meterValues', { power: 3000 });
+  assert.equal(c.getDiagnostics().chargerPowerW, 3000, 'known draw while actually delivering power');
+});
+
 test('getDiagnostics().limits resolves dashboard capacity-meter peaks from config, defaulting to 0', () => {
   const { c: defaultC } = makeController([]);
   assert.deepEqual(defaultC.getDiagnostics().limits, {

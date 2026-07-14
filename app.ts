@@ -13,6 +13,7 @@ interface ChargerDeviceLike {
   getCapabilityValue(id: string): unknown;
   getDiagnostics?(): {
     availableW: number; solarState: string; targetA: number | null; mode: string;
+    chargerPowerW: number | null;
     limits: {
       chargerMaxW: number; gridMaxW: number;
       batteryChargePeakW: number; batteryDischargePeakW: number; solarPeakW: number;
@@ -135,9 +136,16 @@ module.exports = class ChargeIQApp extends Homey.App {
     };
     // Excess solar available to the car: from the loop when present, else grid export.
     const surplusW = diag ? diag.availableW : Math.max(0, -solar.gridSignedW);
+    // solar.houseW is derived purely from the SolarEdge feed (pv + grid - battery), so it
+    // has no notion of the EV charger and includes its draw as if it were household load.
+    // Net the charger's own draw back out when it's known, so house/ev/solar/grid/battery
+    // stay zero-sum instead of double-counting the EV. Left unmodified when unknown
+    // (diag.chargerPowerW === null, e.g. briefly after a reconnect) rather than guessing.
+    const chargerPowerW = diag?.chargerPowerW ?? null;
+    const houseW = chargerPowerW != null ? Math.max(0, solar.houseW - chargerPowerW) : solar.houseW;
     return {
       solarW: solar.pvW,
-      houseW: solar.houseW,
+      houseW,
       gridW: solar.gridSignedW, // import + / export -
       batteryW: solar.batteryW,
       batterySoc: solar.batterySoc,
