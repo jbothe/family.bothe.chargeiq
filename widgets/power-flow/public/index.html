@@ -26,18 +26,12 @@
        strip painted on top of the already-opaque tile, not something else bleeding under it),
        so it's left blended toward transparent. */
     :root {
-      --flow: #2563eb;
       /* Bus gradient reflects live grid state: importing (drawing from the grid), exporting
          (feeding it), or neutral (no meaningful grid flow). Same tones in both themes — these
          are status colors, not surface colors. */
       --bus-import-a: #ef4444; --bus-import-b: #f59e0b;
       --bus-export-a: #16a34a; --bus-export-b: #22c55e;
       --bus-neutral-a: #8b5cf6; --bus-neutral-b: #c4b5fd;
-    }
-    @media (prefers-color-scheme: dark) {
-      :root {
-        --flow: #60a5fa;
-      }
     }
     :root {
       --tile: color-mix(in srgb, var(--homey-text-color) 13%, var(--homey-background-color));
@@ -130,10 +124,17 @@
        baseline as the number, not vertically centered against it - the explicit height
        still keeps the box itself deterministic (see .htext comment). No CSS `gap` here -
        the number-to-unit space is a literal character inside .unit (see PF.valHtml()), so it
-       renders at the unit's own smaller font-size instead of a fixed pixel gap. */
-    /* Font-size/weight now come from the .homey-text-bold class on the element (see markup);
-       font-variant-numeric stays here since it's not part of that preset. */
-    .val { display: flex; align-items: baseline; height: 20px; font-variant-numeric: tabular-nums; }
+       renders at the unit's own smaller font-size instead of a fixed pixel gap. Homey's docs
+       pair --homey-font-size-large with --homey-line-height-large (28px), but that's not
+       reachable here: .htext is a fixed-44px flex column, so a stated height of 28px (which
+       would push lbl+gap+val to 48px) just gets shrunk back down by the browser's default
+       flex-shrink - and per the .htext comment, mixed font-sizes on this line (the number
+       plus .unit's smaller one) already make a plain line-height unreliable as a height clamp
+       even before that. 24px is the actual measured floor (confirmed via
+       getBoundingClientRect, same method as the .htext comment) - set explicitly, matching
+       that constraint instead of the unreachable spec value. */
+    .val { display: flex; align-items: baseline; height: 24px; font-variant-numeric: tabular-nums;
+           font-size: var(--homey-font-size-large); font-weight: var(--homey-font-weight-medium); }
     .val .unit { color: var(--homey-text-color-light); } /* de-emphasized so the number reads first; size/weight via .homey-text-small-light */
     /* Explicit height (not line-height/padding) gives .lbl the same rendered height as
        .chip, so the two align by center - see .mode-stack and the .htext comment above on
@@ -147,17 +148,23 @@
        top/height/gap as .htext (see there) so the chip lines up with the label on the
        other side, and the icon+time row lines up with the power value, regardless of the
        chip's content (READY / UNPLUGGED / CHARGING <amps>A - always 16px tall, see .chip). */
-    .mode-stack { position: absolute; left: 100%; top: 0; margin-left: 6px; height: 44px;
+    .mode-stack { position: absolute; left: 100%; top: 0; margin-left: var(--homey-su-2); height: 44px;
                   display: flex; flex-direction: column; justify-content: center;
                   align-items: flex-start; gap: var(--homey-su-1); }
-    /* .val (the "kW" unit next to it on the other side of the icon) aligns its text on the
-       font baseline, while this row centers its content as a block - the two mechanisms land
-       the actual glyphs at slightly different heights even though both rows share the same
-       top/height. Nudged down a couple px (confirmed on-device) so the mode-time text reads
-       level with .val .unit; the icon/boost-icon move with it since they're the same flex row. */
-    .mode-row { display: flex; align-items: center; gap: var(--homey-su-1); height: 20px;
-                position: relative; top: 2px; }
-    .mode-icon { width: var(--homey-icon-size-regular); height: var(--homey-icon-size-regular); color: var(--homey-text-color); }
+    /* align-items:baseline (not center) so .mode-time reads level with .val .unit - both use
+       the same alignment mechanism now, rather than a hardcoded pixel nudge trying to
+       reconcile two different ones (a fixed offset would only ever be correct for one
+       specific font/size combination, and silently drift again the next time either
+       changes). mode-icon/boost-icon (SVGs, no text baseline of their own) default to their
+       bottom edge as their baseline under that scheme, which sits them too high - a 16px/14px
+       icon anchored at the text's baseline extends well above its cap-height, unlike a
+       glyph. Both override back to align-self:center so they sit centered on the text line
+       instead. Height matches .val's own height (24px, see there) so .htext/.mode-stack's
+       shared lbl+gap+val / chip+gap+mode-row sums stay equal - otherwise centering each stack
+       independently within the same 44px band would land .val and .mode-row at different
+       offsets instead of level with each other. */
+    .mode-row { display: flex; align-items: baseline; gap: var(--homey-su-1); height: 24px; }
+    .mode-icon { width: var(--homey-icon-size-regular); height: var(--homey-icon-size-regular); color: var(--homey-text-color); align-self: center; }
     .mode-icon svg { display: block; width: 100%; height: 100%; }
     .mode-icon:empty { display: none; }
     /* "→ 2:00pm" - the mode's next relevant transition (schedule window end while
@@ -165,7 +172,7 @@
        to zero width on its own, same as .mode-icon:empty. Styled to match .val .unit
        (small/muted) rather than .val itself - it's a secondary hint, not a metric. */
     .mode-time { white-space: nowrap; color: var(--homey-text-color-light); } /* size/weight via .homey-text-small-light */
-    .boost-icon { width: var(--homey-icon-size-small); height: var(--homey-icon-size-small); color: var(--homey-color-orange); }
+    .boost-icon { width: var(--homey-icon-size-small); height: var(--homey-icon-size-small); color: var(--homey-color-orange); align-self: center; }
     .boost-icon svg { display: block; width: 100%; height: 100%; }
     .boost-icon:empty { display: none; }
 
@@ -202,10 +209,13 @@
     .tcol { display: flex; flex-direction: column; align-items: center; gap: var(--homey-su-1); }
     /* Value-to-label gap kept separate from the icon-to-value gap above (.tcol's own gap) so
        it can be tuned independently - bottom row only (.lbl/.val themselves are shared with
-       the header row's .htext, so they stay untouched). .lbl's own line box already reserves
-       ~2px above its capital letters even at gap:0 (confirmed via Range.getBoundingClientRect
-       on the glyphs, not just the box) - the explicit gap here is added on top of that reserve. */
-    .tcol-text { display: flex; flex-direction: column; align-items: center; gap: var(--homey-su-1); margin-top: var(--homey-su-1); }
+       the header row's .htext, so they stay untouched). gap:0 here, not su-1 - .val's own
+       box (baseline-aligned, sized for a large font with no descenders in play) already
+       reserves a few px below the digits, and .lbl's line box reserves ~1-2px above its
+       capital letters even at gap:0 (confirmed via Range.getBoundingClientRect on the
+       glyphs, not just the boxes) - an explicit gap on top of both left visibly more
+       whitespace here than the icon-to-value gap above it. */
+    .tcol-text { display: flex; flex-direction: column; align-items: center; gap: 0; margin-top: var(--homey-su-1); }
   </style>
 </head>
 <body class="homey-text-regular">
@@ -214,7 +224,7 @@
       <div class="hcol ev">
         <div class="htext">
           <div class="lbl homey-text-small-light">EV</div>
-          <div class="val homey-text-bold" id="ev-val">–</div>
+          <div class="val" id="ev-val">–</div>
         </div>
         <div class="hicon">
           <div class="tile-wrap">
@@ -238,7 +248,7 @@
         </div>
         <div class="htext">
           <div class="lbl homey-text-small-light">Solar</div>
-          <div class="val homey-text-bold" id="solar-val">–</div>
+          <div class="val" id="solar-val">–</div>
         </div>
       </div>
     </div>
@@ -247,27 +257,27 @@
 
     <div class="tilerow">
       <div class="tcol homey-text-align-center">
-        <div class="conn" id="grid-conn"></div>
-        <div class="tile" id="grid-tile"></div>
+        <div class="conn" id="house-conn"></div>
+        <div class="tile" id="house-tile"></div>
         <div class="tcol-text">
-          <div class="val homey-text-bold" id="grid-val">–</div>
-          <div class="lbl homey-text-small-light">Grid</div>
+          <div class="val" id="house-val">–</div>
+          <div class="lbl homey-text-small-light">House</div>
         </div>
       </div>
       <div class="tcol homey-text-align-center">
         <div class="conn" id="battery-conn"></div>
         <div class="tile" id="battery-tile"></div>
         <div class="tcol-text">
-          <div class="val homey-text-bold" id="battery-val">–</div>
+          <div class="val" id="battery-val">–</div>
           <div class="lbl homey-text-small-light">Battery</div>
         </div>
       </div>
       <div class="tcol homey-text-align-center">
-        <div class="conn" id="house-conn"></div>
-        <div class="tile" id="house-tile"></div>
+        <div class="conn" id="grid-conn"></div>
+        <div class="tile" id="grid-tile"></div>
         <div class="tcol-text">
-          <div class="val homey-text-bold" id="house-val">–</div>
-          <div class="lbl homey-text-small-light">House</div>
+          <div class="val" id="grid-val">–</div>
+          <div class="lbl homey-text-small-light">Grid</div>
         </div>
       </div>
     </div>
@@ -462,23 +472,36 @@
       // power as a fraction of its own configured capacity (that's already what the
       // tile-edge capacity meter shows via meter()/meterHtml(); using it for speed too was
       // redundant, and left House - which has no meter - and any node with an unset peak
-      // permanently animating at the flat default). e.g. solar 1kW + grid 1kW feeding a
-      // 2kW house: house is the busiest flow (share 1.0, FAST_S), solar and grid each carry
-      // half the house's magnitude (share 0.5, so exactly double FAST_S's duration - half
-      // the visual speed).
+      // permanently animating at the flat default). Duration follows FAST_S / share^POWER -
+      // a curve, not a straight line, so it reads as more clearly "busy vs. idle" at a
+      // glance - fit through three named reference points: share 1.0 -> FAST_S, share
+      // MIN_RATE -> SLOW_S, and share 0 (nothing flowing) treated as MIN_RATE too rather
+      // than a divide-by-zero. POWER is derived below from FAST_S/SLOW_S/MIN_RATE, so
+      // retuning the animation (as has happened more than once) only ever means editing
+      // those three values directly, never re-deriving the curve by hand.
       //
-      // share is floored at MIN_RATE (not 0) so a connector that's barely moving still
-      // crawls at a bounded slowest duration (FAST_S / MIN_RATE) instead of stalling
-      // outright or dividing by zero when maxFlowW() itself is 0 (nothing flowing at all -
-      // setConn() never applies the duration in that case anyway, since dir is null below
-      // the 10W deadband in flow()).
+      // MIN_RATE (not MID_S) is the third tunable, deliberately: the alternative - fixing
+      // the share-0.5 duration instead - sounds more intuitive, but it locks POWER (the
+      // curve's steepness) to whatever ratio FAST_S:that duration implies, which pushes
+      // MIN_RATE whichever way that ratio happens to demand (concretely, FAST_S=0.25s /
+      // 0.75s-at-50%-share / SLOW_S=3s previously forced MIN_RATE up to ~21% - a needlessly
+      // steep curve where every connector under ~21% share looked identically "slowest",
+      // e.g. no visible difference between a 5% and a 19% flow). Setting MIN_RATE directly
+      // instead means it's never an accidental side effect of the other two - lower it here
+      // to spread the low end out further; the 50%-share duration is a read-only side
+      // effect of these three, not the other way around. e.g. solar 1kW + grid 1kW feeding
+      // a 2kW house: house is the busiest flow (share 1.0, FAST_S), solar and grid each
+      // carry half the house's magnitude - a share still well above MIN_RATE, so each gets
+      // its own distinct duration, not the same clamped SLOW_S.
       connSpeed: function (kind, s) {
-        var FAST_S = 0.4;
-        var MIN_RATE = 0.08;
+        var FAST_S = 0.25;
+        var SLOW_S = 3.0;
+        var MIN_RATE = 0.10;
+        var POWER = Math.log(FAST_S / SLOW_S) / Math.log(MIN_RATE);
         var max = PF.maxFlowW(s);
         var share = max > 0 ? PF.flow(kind, s).mag / max : 0;
         share = Math.max(MIN_RATE, Math.min(1, share));
-        return FAST_S / share;
+        return FAST_S / Math.pow(share, POWER);
       },
       // Renders a meter() result (or '' when null/hidden) as the tile-edge strip markup.
       // edge is 'bottom' for the header row (EV/Solar, connector runs below) or 'top' for
@@ -579,11 +602,11 @@
       // color (or, for Battery, its charge-tier color) stays on the icon itself. Dash-scroll
       // speed is driven by PF.connSpeed (each connector's share of the busiest flow on the
       // diagram right now - see connSpeed's own comment).
-      setConn(document.getElementById('ev-conn'), 'var(--flow)', ev, PF.connSpeed('ev', s));
-      setConn(document.getElementById('solar-conn'), 'var(--flow)', solar, PF.connSpeed('solar', s));
-      setConn(document.getElementById('grid-conn'), 'var(--flow)', grid, PF.connSpeed('grid', s));
-      setConn(document.getElementById('house-conn'), 'var(--flow)', house, PF.connSpeed('house', s));
-      setConn(document.getElementById('battery-conn'), 'var(--flow)', battery, PF.connSpeed('battery', s));
+      setConn(document.getElementById('ev-conn'), 'var(--homey-color-blue-600)', ev, PF.connSpeed('ev', s));
+      setConn(document.getElementById('solar-conn'), 'var(--homey-color-blue-600)', solar, PF.connSpeed('solar', s));
+      setConn(document.getElementById('grid-conn'), 'var(--homey-color-blue-600)', grid, PF.connSpeed('grid', s));
+      setConn(document.getElementById('house-conn'), 'var(--homey-color-blue-600)', house, PF.connSpeed('house', s));
+      setConn(document.getElementById('battery-conn'), 'var(--homey-color-blue-600)', battery, PF.connSpeed('battery', s));
     }
 
     var CHECK_MS = 5000;   // how often we re-check staleness

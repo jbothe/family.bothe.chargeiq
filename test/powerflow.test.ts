@@ -269,31 +269,39 @@ test('meter: pct never goes negative even for an out-of-range negative reading',
   assert.deepEqual(PF.meter('solar', { solarW: -500, limits }), { pct: 0, color: 'var(--homey-color-green)' });
 });
 
-test('connSpeed: solar+grid each producing 1kW into a 2kW house each run at half the house\'s speed', () => {
+test('connSpeed: solar+grid each producing 1kW into a 2kW house each run slower than the house, by POWER\'s ratio', () => {
   const s = { solarW: 1000, gridW: 1000, houseW: 2000 };
   const houseSpeed = PF.connSpeed('house', s) as number;
   const solarSpeed = PF.connSpeed('solar', s) as number;
   const gridSpeed = PF.connSpeed('grid', s) as number;
-  assert.equal(solarSpeed, houseSpeed * 2);
-  assert.equal(gridSpeed, houseSpeed * 2);
+  // FAST_S / share^POWER, with POWER derived from FAST_S/SLOW_S/MIN_RATE (not a
+  // directly-set 50%-share duration - see the comment on connSpeed()), so the ratio at
+  // share 0.5 is a golden value tied to the current tuning (recompute if FAST_S/SLOW_S/
+  // MIN_RATE change), not a clean hand-picked multiplier like the old 2x/3x/4x versions.
+  const expectedRatio = 2.1128366700967725;
+  assert.ok(Math.abs(solarSpeed / houseSpeed - expectedRatio) < 1e-9);
+  assert.ok(Math.abs(gridSpeed / houseSpeed - expectedRatio) < 1e-9);
 });
 
-test('connSpeed: the busiest connector on the diagram always animates at FAST_S (0.4s)', () => {
-  assert.equal(PF.connSpeed('house', { houseW: 4000, solarW: 4000, gridW: 500 }), 0.4);
+test('connSpeed: the busiest connector on the diagram always animates at FAST_S (0.25s)', () => {
+  assert.equal(PF.connSpeed('house', { houseW: 4000, solarW: 4000, gridW: 500 }), 0.25);
   // Ties: more than one connector can simultaneously be "the" max.
-  assert.equal(PF.connSpeed('solar', { houseW: 4000, solarW: 4000, gridW: 500 }), 0.4);
+  assert.equal(PF.connSpeed('solar', { houseW: 4000, solarW: 4000, gridW: 500 }), 0.25);
 });
 
 test('connSpeed: the share floor caps the crawl - a connector far below the busiest one animates at the same bounded duration', () => {
   const s = { houseW: 10000, gridW: 10 };
-  // 10/10000 = 0.1%, well under MIN_RATE (8%) - clamped to the same floor duration
-  // (FAST_S / MIN_RATE = 5s) rather than crawling ever slower toward zero.
-  assert.equal(PF.connSpeed('grid', s), 0.4 / 0.08);
-  assert.equal(PF.connSpeed('grid', { houseW: 10000, gridW: 1 }), 0.4 / 0.08);
+  // 10/10000 = 0.1%, well under MIN_RATE (10%, a direct literal now - see the comment on
+  // connSpeed()) - clamped to the same floor duration (SLOW_S = 3s) rather than crawling
+  // ever slower toward zero.
+  assert.equal(PF.connSpeed('grid', s), 3.0);
+  assert.equal(PF.connSpeed('grid', { houseW: 10000, gridW: 1 }), 3.0);
 });
 
 test('connSpeed: scales monotonically - duration shrinks (speed rises) as a connector\'s share of the busiest flow rises', () => {
-  const durations = [4, 10, 25, 50, 75, 90, 100].map(
+  // Only one point (5%) below MIN_RATE (10%) - two floored points would tie instead of
+  // strictly decreasing, which is what this test is asserting.
+  const durations = [5, 25, 50, 75, 90, 100].map(
     (pct) => PF.connSpeed('grid', { houseW: 10000, gridW: pct * 100 }) as number,
   );
   for (let i = 1; i < durations.length; i += 1) {
@@ -302,7 +310,7 @@ test('connSpeed: scales monotonically - duration shrinks (speed rises) as a conn
 });
 
 test('connSpeed: with nothing flowing, computes a defined (if unused) duration rather than dividing by zero', () => {
-  assert.equal(PF.connSpeed('house', {}), 0.4 / 0.08);
+  assert.equal(PF.connSpeed('house', {}), 3.0);
 });
 
 test('meterHtml: renders "" for a null (hidden) meter', () => {

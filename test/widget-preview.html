@@ -23,7 +23,7 @@
     body {
       font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
       margin: 0;
-      padding: 32px 20px 60px;
+      padding: 18px 20px 60px;
       background: var(--bg);
       color: var(--text);
     }
@@ -103,8 +103,6 @@
   <div class="page">
     <header>
       <h1>Power Flow widget preview</h1>
-      <p>Homey styles mocked via <code>test/homey-mock.css</code>, injected into the iframe below.
-         Serve this over http(s), not <code>file://</code>.</p>
     </header>
 
     <div class="controls-card">
@@ -127,8 +125,6 @@
 
     <section>
       <h2>Shortcuts</h2>
-      <p class="hint">Click one to fill the State box below with that preset's JSON, ready to
-         tweak before applying - they don't render directly, so you can edit first.</p>
       <div class="row">
         <button data-preset="idle">Idle / unplugged</button>
         <button data-preset="ready">Plugged in, ready</button>
@@ -136,12 +132,11 @@
         <button data-preset="scheduledBoost">Scheduled + boost</button>
         <button data-preset="gridCap">Grid near cap</button>
         <button data-preset="unknownBattery">Battery reading unknown</button>
+        <button data-preset="unpluggedSchedule">Unplugged + schedule</button>
       </div>
     </section>
 
     <section>
-      <h2>State</h2>
-      <p class="hint">JSON passed straight to the widget's own <code>render()</code>.</p>
       <textarea id="customState">{}</textarea>
       <div class="apply-row"><button id="applyCustom" class="primary">Apply state</button></div>
     </section>
@@ -181,6 +176,11 @@
         charger: { available: true, powerW: 2000, chargingState: 'plugged_in_charging', limitA: 10 },
         solarW: 2500, gridW: -400, batteryW: 0, houseW: 700, batterySoc: null,
         mode: 'solar', solarEnough: true,
+      },
+      unpluggedSchedule: {
+        charger: { available: true, powerW: 0, chargingState: 'plugged_out' },
+        solarW: 1500, gridW: 0, batteryW: 800, houseW: 700, batterySoc: 68,
+        mode: 'scheduled', scheduleEndAt: new Date(Date.now() + 5400000).toISOString(),
       },
     };
 
