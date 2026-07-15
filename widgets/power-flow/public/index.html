@@ -60,7 +60,7 @@
     @keyframes flowDown { from { background-position: 0 0; } to { background-position: 0 6px; } }
     @keyframes flowUp { from { background-position: 0 0; } to { background-position: 0 -6px; } }
 
-    /* Header row: EV (left) / Solar (right). Icons are pinned at fixed x-positions (25%/75%
+    /* Header row: Solar (left) / EV (right). Icons are pinned at fixed x-positions (25%/75%
        of the row) via absolute positioning instead of being centered together with their
        value text in a shrink-wrapped flex group — otherwise the icon shifts sideways every
        time the value's digit count changes width. Text is anchored to the same fixed point
@@ -68,8 +68,8 @@
     .headrow { position: relative; height: 78px; }
     .hicon { display: flex; flex-direction: column; align-items: center; gap: var(--homey-su-1);
              position: absolute; top: 0; }
-    .hcol.ev .hicon { left: 25%; transform: translateX(-50%); }
-    .hcol.solar .hicon { left: 75%; transform: translateX(-50%); }
+    .hcol.solar .hicon { left: 25%; transform: translateX(-50%); }
+    .hcol.ev .hicon { left: 75%; transform: translateX(-50%); }
     /* top:0 (not a translateY(-50%) center) plus an explicit height matching .tile's own
        44px, with justify-content:center centering the 2-line content block within that
        band - not a translateY trick, so it holds regardless of gap. Both .htext and
@@ -83,8 +83,8 @@
        getBoundingClientRect (a 20px line-height still measured 23px tall). */
     .htext { display: flex; flex-direction: column; justify-content: center; gap: var(--homey-su-1);
              height: 44px; position: absolute; top: 0; }
-    .hcol.ev .htext { right: calc(75% + 30px); align-items: flex-end; }
-    .hcol.solar .htext { left: calc(75% + 30px); align-items: flex-start; }
+    .hcol.solar .htext { right: calc(75% + 30px); align-items: flex-end; }
+    .hcol.ev .htext { left: calc(75% + 30px); align-items: flex-start; }
 
     /* position:relative (no z-index needed) lifts tiles and the bus into the positioned
        paint layer, so they're always drawn over the plain in-flow connectors — letting a
@@ -143,27 +143,40 @@
 
     .tile-wrap { position: relative; }
 
-    /* EV chip + mode icon/shorthand status, stacked to the right of the EV icon (chip on
+    /* EV chip + mode icon/shorthand status, stacked to the left of the EV icon (chip on
        top, icon+time beneath - mirrors .htext's label-above-value order). Same
        top/height/gap as .htext (see there) so the chip lines up with the label on the
        other side, and the icon+time row lines up with the power value, regardless of the
        chip's content (READY / UNPLUGGED / CHARGING <amps>A - always 16px tall, see .chip). */
-    .mode-stack { position: absolute; left: 100%; top: 0; margin-left: var(--homey-su-2); height: 44px;
+    .mode-stack { position: absolute; right: 100%; top: 0; margin-right: var(--homey-su-2); height: 44px;
                   display: flex; flex-direction: column; justify-content: center;
-                  align-items: flex-start; gap: var(--homey-su-1); }
-    /* align-items:baseline (not center) so .mode-time reads level with .val .unit - both use
-       the same alignment mechanism now, rather than a hardcoded pixel nudge trying to
-       reconcile two different ones (a fixed offset would only ever be correct for one
-       specific font/size combination, and silently drift again the next time either
-       changes). mode-icon/boost-icon (SVGs, no text baseline of their own) default to their
-       bottom edge as their baseline under that scheme, which sits them too high - a 16px/14px
-       icon anchored at the text's baseline extends well above its cap-height, unlike a
-       glyph. Both override back to align-self:center so they sit centered on the text line
-       instead. Height matches .val's own height (24px, see there) so .htext/.mode-stack's
-       shared lbl+gap+val / chip+gap+mode-row sums stay equal - otherwise centering each stack
+                  align-items: flex-end; gap: var(--homey-su-1); }
+    /* align-items:center (not baseline) - mode-icon/boost-icon are SVGs with no text baseline
+       of their own, so under align-items:baseline they'd default to their bottom edge as their
+       baseline, sitting them too high (a 16px/14px icon anchored at the text's baseline extends
+       well above its cap-height, unlike a glyph); center keeps icons and .mode-time mutually
+       level with each other, which is the relationship that actually matters within this row.
+       Height matches .val's own height (24px, see there) so .htext/.mode-stack's shared
+       lbl+gap+val / chip+gap+mode-row sums stay equal - otherwise centering each stack
        independently within the same 44px band would land .val and .mode-row at different
-       offsets instead of level with each other. */
-    .mode-row { display: flex; align-items: baseline; gap: var(--homey-su-1); height: 24px; }
+       offsets instead of level with each other. That still leaves the row as a *group* sitting
+       a few px higher than .val's own baseline (pulled down by .val's large-font number - a
+       small font's natural centered position in a fixed-height row isn't the same spot a larger
+       font's baseline lands it at), so the whole row is nudged down via position:relative below
+       - see there for why that, and not a mechanism internal to the row, is what's shifted. */
+    .mode-row { display: flex; align-items: center; gap: var(--homey-su-1); height: 24px;
+                position: relative; top: 2px; }
+    /* Shifts the icon+text+boost group as a unit (position:relative, not margin-top - margin
+       would grow .mode-stack's flex content past its fixed 44px height, and justify-content:
+       center would then re-center that taller block, quietly pulling .chip away from its own
+       still-unshifted counterpart .lbl on the other side of the header row) down to read level
+       with .val .unit, without disturbing the icons' and .mode-time's alignment with each
+       other (see .mode-row above) - 2px is empirical (measured via getBoundingClientRect, then
+       nudged 1px up off that measurement per visual review, not derived from a font metric),
+       because the actual gap comes from two different fonts each finding their own "centered"
+       position in an equal-height row, which has no closed-form relationship to nudge by
+       instead. Real Homey fonts aren't available outside `homey app run` (see homey-mock.css's
+       own caveat), so this may need re-tuning once verified on-device. */
     .mode-icon { width: var(--homey-icon-size-regular); height: var(--homey-icon-size-regular); color: var(--homey-text-color); align-self: center; }
     .mode-icon svg { display: block; width: 100%; height: 100%; }
     .mode-icon:empty { display: none; }
@@ -221,6 +234,16 @@
 <body class="homey-text-regular">
   <div class="card homey-widget">
     <div class="headrow">
+      <div class="hcol solar">
+        <div class="hicon">
+          <div class="tile" id="solar-tile"></div>
+          <div class="conn" id="solar-conn"></div>
+        </div>
+        <div class="htext">
+          <div class="lbl homey-text-small-light">Solar</div>
+          <div class="val" id="solar-val">–</div>
+        </div>
+      </div>
       <div class="hcol ev">
         <div class="htext">
           <div class="lbl homey-text-small-light">EV</div>
@@ -241,27 +264,17 @@
           <div class="conn" id="ev-conn"></div>
         </div>
       </div>
-      <div class="hcol solar">
-        <div class="hicon">
-          <div class="tile" id="solar-tile"></div>
-          <div class="conn" id="solar-conn"></div>
-        </div>
-        <div class="htext">
-          <div class="lbl homey-text-small-light">Solar</div>
-          <div class="val" id="solar-val">–</div>
-        </div>
-      </div>
     </div>
 
     <div class="bus" id="bus"></div>
 
     <div class="tilerow">
       <div class="tcol homey-text-align-center">
-        <div class="conn" id="house-conn"></div>
-        <div class="tile" id="house-tile"></div>
+        <div class="conn" id="grid-conn"></div>
+        <div class="tile" id="grid-tile"></div>
         <div class="tcol-text">
-          <div class="val" id="house-val">–</div>
-          <div class="lbl homey-text-small-light">House</div>
+          <div class="val" id="grid-val">–</div>
+          <div class="lbl homey-text-small-light">Grid</div>
         </div>
       </div>
       <div class="tcol homey-text-align-center">
@@ -273,11 +286,11 @@
         </div>
       </div>
       <div class="tcol homey-text-align-center">
-        <div class="conn" id="grid-conn"></div>
-        <div class="tile" id="grid-tile"></div>
+        <div class="conn" id="house-conn"></div>
+        <div class="tile" id="house-tile"></div>
         <div class="tcol-text">
-          <div class="val" id="grid-val">–</div>
-          <div class="lbl homey-text-small-light">Grid</div>
+          <div class="val" id="house-val">–</div>
+          <div class="lbl homey-text-small-light">House</div>
         </div>
       </div>
     </div>
