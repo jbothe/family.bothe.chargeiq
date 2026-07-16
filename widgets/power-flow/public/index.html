@@ -183,8 +183,12 @@
     /* "→ 2:00pm" - the mode's next relevant transition (schedule window end while
        Scheduled, else the next window start). Empty (no schedule configured) collapses
        to zero width on its own, same as .mode-icon:empty. Styled to match .val .unit
-       (small/muted) rather than .val itself - it's a secondary hint, not a metric. */
-    .mode-time { white-space: nowrap; color: var(--homey-text-color-light); } /* size/weight via .homey-text-small-light */
+       (small/muted) rather than .val itself - it's a secondary hint, not a metric.
+       position:relative + top:1px nudges its own paint position only - unlike .mode-row's
+       shift (which moves the icon/time/boost-icon group as one unit, see there), this doesn't
+       consume layout space, so .mode-icon/.boost-icon's align-items:center position in the row
+       is untouched. */
+    .mode-time { white-space: nowrap; color: var(--homey-text-color-light); position: relative; top: 1px; } /* size/weight via .homey-text-small-light */
     .boost-icon { width: var(--homey-icon-size-small); height: var(--homey-icon-size-small); color: var(--homey-color-orange); align-self: center; }
     .boost-icon svg { display: block; width: 100%; height: 100%; }
     .boost-icon:empty { display: none; }
@@ -194,20 +198,34 @@
        .mode-stack. */
     /* Font-size/weight via .homey-text-small on the element (see markup / chipEl.className below). */
     .chip { display: inline-flex; align-items: center; height: 16px; white-space: nowrap;
-            text-transform: uppercase; padding: 0 var(--homey-su-1); border-radius: var(--homey-border-radius-default); }
+            text-transform: uppercase; padding: 0 var(--homey-su-1); position: relative; }
     .chip:empty { display: none; }
     /* text-transform:uppercase text has no descenders, but align-items:center still centers the
        *font's* full ascent/descent line box, not the glyph ink - the unused descender reserve is
-       bigger than the unused ascent-to-cap-height reserve for most fonts, so the ink sits
-       fractionally high within the chip's own background pill (confirmed via canvas measureText:
-       ~0.6px asymmetric in the system font here). Deliberately NOT compensated: .lbl has the
-       identical uppercase/centered setup and the same unaddressed asymmetry, so nudging only
-       .chip's text (tried at both 2px and 1px) made it visibly sit lower than .lbl on the other
-       side of the row - a more noticeable regression than the sub-pixel internal offset it was
-       meant to fix. Left unnudged on both sides for consistency. */
-    .chip.charging { color: var(--homey-color-green); background: color-mix(in srgb, var(--homey-color-green) 18%, transparent); }
-    .chip.ready { color: var(--homey-color-blue-600); background: color-mix(in srgb, var(--homey-color-blue-600) 18%, transparent); }
-    .chip.unplugged { color: var(--homey-text-color-light); background: color-mix(in srgb, var(--homey-text-color-light) 18%, transparent); }
+       bigger than the unused ascent-to-cap-height reserve for most fonts, so the ink sits high
+       within the chip's own layout box. The layout box itself is deliberately NOT renudged to
+       fix this: .lbl has the identical uppercase/centered setup and the same unaddressed
+       asymmetry, so nudging .chip's *text* (tried at both 2px and 1px) made it visibly sit lower
+       than .lbl on the other side of the row. Instead the background pill is painted by
+       ::before, detached from .chip's own box, and nudged up to re-center the *visible pill* on
+       the ink without moving the text (and therefore without touching the .lbl alignment above)
+       - the asymmetry was only ever a paint-layer problem. The nudge amount is font-dependent
+       and was retuned from ~0.25px to 1.25px after a real-device (Homey app, not this repo's
+       dev-only preview harness) screenshot showed the on-device font's descent reserve is much
+       larger relative to its ascent than the desktop system font this was first tuned against -
+       these values were read off real-device screenshots, not independently derived, so may
+       still want another pass. top/bottom aren't equal-and-opposite: after the 1.25px symmetric
+       version was confirmed close on real hardware, a further real-device check asked for a bit
+       more room specifically below the text, so only `bottom` moved (1.25px → 0.75px, i.e. the
+       pill's bottom edge extended 0.5px further down) while `top` stayed put - this is purely the
+       ::before pseudo's own paint box, absolutely positioned and thus outside layout flow, so
+       growing it doesn't push .mode-row (icon/time/boost-icon) below it in .mode-stack down. */
+    .chip::before { content: ''; position: absolute; left: 0; right: 0; top: -1.25px; bottom: 0.75px;
+                     border-radius: var(--homey-border-radius-default); z-index: -1;
+                     background: color-mix(in srgb, currentColor 18%, transparent); }
+    .chip.charging { color: var(--homey-color-green); }
+    .chip.ready { color: var(--homey-color-blue-600); }
+    .chip.unplugged { color: var(--homey-text-color-light); }
 
     /* Power bus: negative top/bottom margins pull it into both rows' connectors. Gradient
        reflects live grid state (see PF.busState). */
