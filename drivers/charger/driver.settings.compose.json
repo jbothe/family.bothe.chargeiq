@@ -1,12 +1,30 @@
 [
   {
     "type": "group",
+    "label": { "en": "Household electrical" },
+    "children": [
+      { "id": "voltage", "type": "number", "label": { "en": "Nominal voltage (V)" }, "hint": { "en": "Grid voltage used for watt/amp conversions everywhere - with Household phases below for the household cap, and with the EV charger's own Phases setting for solar and charger-circuit calculations. Use the nominal value for your grid (e.g. 230) - it doesn't need to track the live measured voltage." }, "value": 230, "min": 100, "max": 480 },
+      { "id": "maxHouseholdA", "type": "number", "label": { "en": "Household main fuse rating (A)" }, "hint": { "en": "Your home's main fuse/breaker rating per phase, matching Household phases below - most main breakers are amp-rated, not watt-rated. Charging is throttled in any mode so total grid import never exceeds this. Set 0 to disable." }, "value": 63, "min": 0, "max": 250 },
+      { "id": "householdPhases", "type": "number", "label": { "en": "Household phases" }, "hint": { "en": "How many phases your home's main supply has (independent of the EV charger's own Phases setting below - a single-phase charger on a 3-phase household connection is common). Used with Main fuse rating and Nominal voltage above to compute the household grid cap." }, "value": 1, "min": 1, "max": 3, "step": 1 }
+    ]
+  },
+  {
+    "type": "group",
     "label": { "en": "EV charger electrical" },
     "children": [
-      { "id": "phases", "type": "number", "label": { "en": "Phases" }, "hint": { "en": "How many phases the charger is wired on (1 or 3). Used with Nominal voltage to convert between watts and amps everywhere, and sent to the charger in every charging profile." }, "value": 1, "min": 1, "max": 3, "step": 1 },
-      { "id": "voltage", "type": "number", "label": { "en": "Nominal voltage (V)" }, "hint": { "en": "Grid voltage used with Phases for watt/amp conversions in solar and household-cap calculations. Use the nominal value for your grid (e.g. 230) - it doesn't need to track the live measured voltage." }, "value": 230, "min": 100, "max": 480 },
+      { "id": "phases", "type": "number", "label": { "en": "Phases" }, "hint": { "en": "How many phases the charger is wired on (1 or 3). Used with Nominal voltage (under Household electrical above) for solar and charger-circuit watt/amp conversions, and sent to the charger in every charging profile." }, "value": 1, "min": 1, "max": 3, "step": 1 },
       { "id": "minAmps", "type": "number", "label": { "en": "Minimum current (A)" }, "hint": { "en": "Lowest current ever sent to the charger once it's told to charge - manual, scheduled, and solar targets are all floored to this. Also the surplus threshold: solar charging only starts once available surplus reaches at least this many amps." }, "value": 6, "min": 1, "max": 32 },
       { "id": "maxAmps", "type": "number", "label": { "en": "Maximum current (A)" }, "hint": { "en": "Highest current ever sent to the charger, in any mode. Manual, scheduled, and solar targets are all capped to this - match it to what the charger and your home's wiring/breaker support." }, "value": 32, "min": 6, "max": 80 }
+    ]
+  },
+  {
+    "type": "group",
+    "label": { "en": "EV charger circuit" },
+    "children": [
+      { "id": "sharedCircuitA", "type": "number", "label": { "en": "Charger circuit rating (A)" }, "hint": { "en": "Set this if the charger's own circuit/breaker has a lower rating than the rest of the house - whether it's dedicated to the charger alone (e.g. a 32A breaker with nothing else on it) or shared with other equipment (e.g. a home battery inverter, or any other load). Charging is throttled in any mode so total current on that circuit never exceeds this. This is independent of the whole-household grid cap under Household electrical. Set 0 to disable." }, "value": 0, "min": 0, "max": 100 },
+      { "id": "sharedCircuitIncludeSolar", "type": "checkbox", "label": { "en": "Charger circuit includes solar production" }, "hint": { "en": "Enable if solar PV also feeds into the charger circuit above - its production is added as extra headroom on top of the circuit rating. Leave off if the circuit has nothing to do with your solar system (or you have none)." }, "value": false },
+      { "id": "sharedCircuitIncludeBattery", "type": "checkbox", "label": { "en": "Charger circuit includes home battery" }, "hint": { "en": "Enable if a home battery inverter also feeds into the charger circuit above - its charge/discharge is netted into the circuit rating, and battery discharge blocks a schedule's boost-to-cap from treating it as spare capacity. Leave off if the circuit has nothing to do with a battery (or you have none)." }, "value": false },
+      { "id": "sharedCircuitBufferA", "type": "number", "label": { "en": "Charger circuit buffer (A)" }, "hint": { "en": "Amps reserved on the charger circuit for anything not otherwise measured (e.g. inverter overhead, other appliances). Subtracted from the circuit rating before any of it is offered to the EV." }, "value": 0, "min": 0, "max": 32 }
     ]
   },
   {
@@ -20,20 +38,11 @@
   },
   {
     "type": "group",
-    "label": { "en": "Load management" },
-    "children": [
-      { "id": "maxHouseholdW", "type": "number", "label": { "en": "Max household grid draw (W)" }, "hint": { "en": "Charging is throttled in any mode so total grid import never exceeds this. Set 0 to disable." }, "value": 14000, "min": 0, "max": 100000 },
-      { "id": "sharedCircuitA", "type": "number", "label": { "en": "Shared circuit rating (A)" }, "hint": { "en": "Set this if the charger shares a physical circuit/breaker with other equipment (e.g. a home battery inverter) - charging is throttled in any mode so total current on that circuit never exceeds this, using live solar/battery readings. This is independent of the whole-household grid cap above. Set 0 to disable." }, "value": 0, "min": 0, "max": 100 },
-      { "id": "sharedCircuitBufferA", "type": "number", "label": { "en": "Shared circuit buffer (A)" }, "hint": { "en": "Amps reserved on the shared circuit for other equipment (inverter overhead, minor loads) not otherwise measured. Subtracted from the shared circuit rating before any of it is offered to the car." }, "value": 0, "min": 0, "max": 32 }
-    ]
-  },
-  {
-    "type": "group",
     "label": { "en": "Solar surplus" },
     "children": [
       { "id": "solarEnabled", "type": "checkbox", "label": { "en": "Enable solar-surplus tracking" }, "hint": { "en": "When off, the charger never derives Solar mode outside a schedule - it goes Idle (holds at 0A) instead. Manual and Scheduled modes are unaffected, and the surplus meter/household caps keep updating in the background so re-enabling takes effect immediately." }, "value": true },
-      { "id": "marginW", "type": "number", "label": { "en": "Grid reserve margin (W)" }, "hint": { "en": "Watts held back before offering surplus to the car. Positive reserves headroom and charges more conservatively; negative allows a bit of grid import. 0 targets breakeven." }, "value": 0, "min": -3000, "max": 3000 },
-      { "id": "deadbandA", "type": "number", "label": { "en": "Deadband (A)" }, "hint": { "en": "While already charging, ignore surplus changes smaller than this many amps. Stops the current limit from adjusting on every minor solar flicker." }, "value": 1, "min": 0, "max": 10 },
+      { "id": "marginW", "type": "number", "label": { "en": "Grid reserve margin (W)" }, "hint": { "en": "Watts held back before offering surplus to the EV. Positive reserves headroom and charges more conservatively; negative allows a bit of grid import. 0 targets breakeven." }, "value": 0, "min": -3000, "max": 3000 },
+      { "id": "deadbandA", "type": "number", "label": { "en": "Deadband (A)" }, "hint": { "en": "While already charging, ignore surplus changes smaller than this many amps. Stops the current limit from adjusting on every minor solar flicker." }, "value": 0, "min": 0, "max": 10 },
       { "id": "rampA", "type": "number", "label": { "en": "Max ramp per step (A)" }, "hint": { "en": "While already charging, the most the current limit can change by on any single solar update. Smooths out sudden swings instead of jumping straight to the new target." }, "value": 3, "min": 1, "max": 32 },
       { "id": "minOnSec", "type": "number", "label": { "en": "Minimum on time (s)" }, "hint": { "en": "Once solar charging starts, keep it running at least this long before a temporary drop in surplus is allowed to pause it." }, "value": 180, "min": 0, "max": 3600 },
       { "id": "minOffSec", "type": "number", "label": { "en": "Minimum off time (s)" }, "hint": { "en": "Once paused (or before a first start), surplus must stay sufficient for at least this long before charging (re)starts. Prevents rapid pause/resume cycling." }, "value": 180, "min": 0, "max": 3600 },

@@ -46,14 +46,15 @@ The app addresses only the first device:
 This is the real blocker. Three shared resources are each consumed by every
 controller **independently, with no arbitration**:
 
-1. **Household grid cap** (`maxHouseholdW`, `ChargeController.householdCapAmps`).
+1. **Household grid cap** (`maxHouseholdA`/`householdPhases`, derived internally into
+   `maxHouseholdW`, `ChargeController.householdCapAmps`).
    Each controller computes headroom as `maxHouseholdW − (grid − ownDraw)` — it
    nets out only its *own* draw (`nettedChargerW()` has no concept of siblings)
    and treats a sibling's draw as fixed base load. Two chargers independently see
    the same spare headroom on a tick and both ramp into it → oscillation and
    transient breaches of the import limit, worsened by the 15s write throttle.
 
-2. **Shared-circuit cap** (`sharedCircuitA`, `ChargeController.sharedCircuitCapAmps`).
+2. **Charger-circuit cap** (`sharedCircuitA`, `ChargeController.sharedCircuitCapAmps`).
    Same structure, but this protects a **physical breaker**. Two chargers each
    believing they own the full circuit rating can genuinely overload the shared
    conductor — a safety regression, not just jitter.
@@ -63,12 +64,12 @@ controller **independently, with no arbitration**:
    double-allocating export.
 
 Doing this correctly needs a new **site-level load allocator**: one component
-that knows total site import, total shared-circuit current, and total surplus,
+that knows total site import, total charger-circuit current, and total surplus,
 and *divides* the budget across the N active chargers (by priority / proportion /
 round-robin), handing each its slice as a ceiling. The per-charger caps then
 consume their allocated slice instead of the whole limit.
 
-It also forces a **settings model change**: `maxHouseholdW`, `sharedCircuitA`,
+It also forces a **settings model change**: `maxHouseholdA`, `householdPhases`, `sharedCircuitA`,
 and `sharedCircuitBufferA` are currently **per-device settings**
 (`drivers/charger/driver.settings.compose.json`). They describe one physical
 house / one physical circuit — with two devices you'd have two conflicting copies

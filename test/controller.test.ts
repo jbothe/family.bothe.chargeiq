@@ -24,7 +24,7 @@ function makeController(schedule: ScheduleWindow[], extraSettings: Record<string
 } {
   const store: Record<string, unknown> = { schedule };
   const settings: Record<string, unknown> = {
-    minAmps: 6, maxAmps: 31, phases: 1, voltage: 230, maxHouseholdW: 14000, ...extraSettings,
+    minAmps: 6, maxAmps: 31, phases: 1, voltage: 230, maxHouseholdA: 14000 / 230, householdPhases: 1, ...extraSettings,
   };
   const caps: Record<string, unknown> = {};
   const logs: string[] = [];
@@ -195,7 +195,9 @@ test('shared circuit cap is disabled by default (sharedCircuitA=0)', async () =>
 });
 
 test('shared circuit cap throttles the charger in any mode (manual)', async () => {
-  const { c, caps } = makeController([], { sharedCircuitA: 32, sharedCircuitBufferA: 2 });
+  const { c, caps } = makeController([], {
+    sharedCircuitA: 32, sharedCircuitBufferA: 2, sharedCircuitIncludeSolar: true, sharedCircuitIncludeBattery: true,
+  });
   await c.startManual(31);
   // Battery charging at 14A (3220W), no solar -> cap = 32 - 14 - 2 = 16A.
   c.onSolarSample({ gridSignedW: 3220, pvW: 0, batteryW: 3220 });
@@ -203,7 +205,9 @@ test('shared circuit cap throttles the charger in any mode (manual)', async () =
 });
 
 test('shared circuit cap rises with pv production, up to the hardware max', async () => {
-  const { c, caps } = makeController([], { sharedCircuitA: 32, sharedCircuitBufferA: 2 });
+  const { c, caps } = makeController([], {
+    sharedCircuitA: 32, sharedCircuitBufferA: 2, sharedCircuitIncludeSolar: true, sharedCircuitIncludeBattery: true,
+  });
   await c.startManual(31);
   // +20A pv, 14A battery charge -> cap = 32 + 20 - 14 - 2 = 36, clamped to maxAmps (31).
   c.onSolarSample({ gridSignedW: -1000, pvW: 4600, batteryW: 3220 });
@@ -211,16 +215,64 @@ test('shared circuit cap rises with pv production, up to the hardware max', asyn
 });
 
 test('shared circuit cap is a no-op on stale/absent solar data (trusts the configured ceiling)', async () => {
-  const { c, caps } = makeController([], { sharedCircuitA: 32, sharedCircuitBufferA: 2 });
+  const { c, caps } = makeController([], {
+    sharedCircuitA: 32, sharedCircuitBufferA: 2, sharedCircuitIncludeSolar: true, sharedCircuitIncludeBattery: true,
+  });
   await c.startManual(20); // no onSolarSample ever called -> lastSolarSampleAt stays 0 -> "stale"
   assert.equal(caps.charge_current_limit, 20, 'no shared-circuit restriction while solar data has never arrived');
+});
+
+test('shared circuit cap only counts pv when battery is excluded', async () => {
+  const { c, caps } = makeController([], {
+    sharedCircuitA: 32, sharedCircuitBufferA: 2, sharedCircuitIncludeSolar: true, sharedCircuitIncludeBattery: false,
+  });
+  await c.startManual(31);
+  // +20A pv would raise the cap, but battery charging at 14A is excluded -> cap = 32 + 20 - 2 = 50, uncapped.
+  c.onSolarSample({ gridSignedW: -1000, pvW: 4600, batteryW: 3220 });
+  assert.equal(caps.charge_current_limit, 31, 'battery term ignored, only pv counted (uncapped up to hardware max)');
+});
+
+test('shared circuit cap only counts battery when solar is excluded', async () => {
+  const { c, caps } = makeController([], {
+    sharedCircuitA: 32, sharedCircuitBufferA: 2, sharedCircuitIncludeSolar: false, sharedCircuitIncludeBattery: true,
+  });
+  await c.startManual(31);
+  // +20A pv would offset it, but solar is excluded -> cap = 32 - 14 - 2 = 16A, same as if pv were 0.
+  c.onSolarSample({ gridSignedW: -1000, pvW: 4600, batteryW: 3220 });
+  assert.equal(caps.charge_current_limit, 16, 'pv term ignored, only battery counted');
+});
+
+test('shared circuit cap is a static number, independent of the solar feed, when neither solar nor battery is included', async () => {
+  const { c, caps } = makeController([], {
+    sharedCircuitA: 32, sharedCircuitBufferA: 2, sharedCircuitIncludeSolar: false, sharedCircuitIncludeBattery: false,
+  });
+  // No onSolarSample ever called - a static cap must not depend on a solar feed reporting at all,
+  // unlike the pv/battery-aware formula above (see the stale-data test).
+  await c.startManual(31);
+  assert.equal(caps.charge_current_limit, 30, 'static cap (32 - 2 buffer), never gated on solar feed freshness');
+});
+
+test('schedule boost is not blocked by battery discharge when the battery is excluded from the shared circuit', () => {
+  const sched: ScheduleWindow[] = [{
+    days: [1], start: '11:00', end: '14:00', currentA: 16, boostToCap: true,
+  }];
+  const { c } = makeController(sched, {
+    sharedCircuitA: 32, sharedCircuitBufferA: 2, sharedCircuitIncludeSolar: false, sharedCircuitIncludeBattery: false,
+  });
+  // Battery discharging would normally suppress the boost entirely, but it's not on this shared
+  // circuit at all -> static cap (32 - 2 = 30) still boosts the floor.
+  c.onSolarSample({ gridSignedW: 0, pvW: 0, batteryW: -2300 });
+  assert.deepEqual(c.resolve(at(1, 12, 0)), { mode: 'scheduled', amps: 30 },
+    'boost proceeds using the static cap - battery discharge is irrelevant to a circuit it is not part of');
 });
 
 test('schedule boost raises the target up to shared-circuit capacity when the battery is idle', () => {
   const sched: ScheduleWindow[] = [{
     days: [1], start: '11:00', end: '14:00', currentA: 16, boostToCap: true,
   }];
-  const { c } = makeController(sched, { sharedCircuitA: 32, sharedCircuitBufferA: 2 });
+  const { c } = makeController(sched, {
+    sharedCircuitA: 32, sharedCircuitBufferA: 2, sharedCircuitIncludeSolar: true, sharedCircuitIncludeBattery: true,
+  });
   c.onSolarSample({ gridSignedW: 0, pvW: 0, batteryW: 0 }); // idle battery, no solar -> cap = 32 - 0 - 2 = 30
   assert.deepEqual(c.resolve(at(1, 12, 0)), { mode: 'scheduled', amps: 30 });
 });
@@ -229,7 +281,9 @@ test('schedule boost matches the battery-charging + solar example (16A floor -> 
   const sched: ScheduleWindow[] = [{
     days: [1], start: '11:00', end: '14:00', currentA: 16, boostToCap: true,
   }];
-  const { c } = makeController(sched, { sharedCircuitA: 32, sharedCircuitBufferA: 2 });
+  const { c } = makeController(sched, {
+    sharedCircuitA: 32, sharedCircuitBufferA: 2, sharedCircuitIncludeSolar: true, sharedCircuitIncludeBattery: true,
+  });
   // Battery charging at 14A (3220W, the rate that made 16A a sensible floor), pv +4A (920W) -> cap = 20.
   c.onSolarSample({ gridSignedW: 0, pvW: 920, batteryW: 3220 });
   assert.deepEqual(c.resolve(at(1, 12, 0)), { mode: 'scheduled', amps: 20 });
@@ -239,7 +293,9 @@ test('schedule boost clamps to the hardware maxAmps, not just the circuit rating
   const sched: ScheduleWindow[] = [{
     days: [1], start: '11:00', end: '14:00', currentA: 16, boostToCap: true,
   }];
-  const { c } = makeController(sched, { sharedCircuitA: 32, sharedCircuitBufferA: 0, maxAmps: 31 });
+  const { c } = makeController(sched, {
+    sharedCircuitA: 32, sharedCircuitBufferA: 0, maxAmps: 31, sharedCircuitIncludeSolar: true, sharedCircuitIncludeBattery: true,
+  });
   c.onSolarSample({ gridSignedW: 0, pvW: 4600, batteryW: 0 }); // +20A pv -> cap = 52, way above hardware max
   assert.deepEqual(c.resolve(at(1, 12, 0)), { mode: 'scheduled', amps: 31 });
 });
@@ -248,7 +304,9 @@ test('schedule boost never lowers below the configured floor', () => {
   const sched: ScheduleWindow[] = [{
     days: [1], start: '11:00', end: '14:00', currentA: 16, boostToCap: true,
   }];
-  const { c } = makeController(sched, { sharedCircuitA: 32, sharedCircuitBufferA: 2 });
+  const { c } = makeController(sched, {
+    sharedCircuitA: 32, sharedCircuitBufferA: 2, sharedCircuitIncludeSolar: true, sharedCircuitIncludeBattery: true,
+  });
   // Battery charging harder than assumed (20A) -> cap = 32 - 20 - 2 = 10, below the 16A floor.
   c.onSolarSample({ gridSignedW: 0, pvW: 0, batteryW: 4600 });
   assert.deepEqual(c.resolve(at(1, 12, 0)), { mode: 'scheduled', amps: 16 },
@@ -259,7 +317,9 @@ test('the shared-circuit safety cap still throttles the charger even when the sc
   const sched: ScheduleWindow[] = [{
     days: [1], start: '11:00', end: '14:00', currentA: 16, boostToCap: true,
   }];
-  const { c, caps } = makeController(sched, { sharedCircuitA: 32, sharedCircuitBufferA: 2 });
+  const { c, caps } = makeController(sched, {
+    sharedCircuitA: 32, sharedCircuitBufferA: 2, sharedCircuitIncludeSolar: true, sharedCircuitIncludeBattery: true,
+  });
   c.onSolarSample({ gridSignedW: 0, pvW: 0, batteryW: 4600 }); // cap = 10, below the 16A floor
   c.tick(at(1, 12, 0)); // re-resolve at a fixed in-window time (onSolarSample's own tick used real time)
   assert.equal(caps.charge_current_limit, 10, 'final applied current is safety-capped to 10A regardless of the floor');
@@ -269,7 +329,9 @@ test('schedule boost is fully suppressed while the battery is discharging', () =
   const sched: ScheduleWindow[] = [{
     days: [1], start: '11:00', end: '14:00', currentA: 16, boostToCap: true,
   }];
-  const { c } = makeController(sched, { sharedCircuitA: 32, sharedCircuitBufferA: 2 });
+  const { c } = makeController(sched, {
+    sharedCircuitA: 32, sharedCircuitBufferA: 2, sharedCircuitIncludeSolar: true, sharedCircuitIncludeBattery: true,
+  });
   // No pv, battery discharging 10A -> the cap formula alone would say 32-(-10)-2=40A, but
   // discharge must never fund a boost above the floor.
   c.onSolarSample({ gridSignedW: 0, pvW: 0, batteryW: -2300 });
@@ -281,7 +343,9 @@ test('schedule boost does nothing when the window has not opted in', () => {
   const sched: ScheduleWindow[] = [{
     days: [1], start: '11:00', end: '14:00', currentA: 16,
   }]; // no boostToCap
-  const { c } = makeController(sched, { sharedCircuitA: 32, sharedCircuitBufferA: 2 });
+  const { c } = makeController(sched, {
+    sharedCircuitA: 32, sharedCircuitBufferA: 2, sharedCircuitIncludeSolar: true, sharedCircuitIncludeBattery: true,
+  });
   c.onSolarSample({ gridSignedW: 0, pvW: 0, batteryW: 0 }); // plenty of spare capacity available
   assert.deepEqual(c.resolve(at(1, 12, 0)), { mode: 'scheduled', amps: 16 }, 'stays at the fixed floor without opt-in');
 });
@@ -356,7 +420,9 @@ test('every tick logs a [decision] line, unconditionally, covering each branch',
     const sched: ScheduleWindow[] = [{
       days: [1], start: '11:00', end: '14:00', currentA: 16, boostToCap: true,
     }];
-    const { c, logs } = makeController(sched, { sharedCircuitA: 32, sharedCircuitBufferA: 2 });
+    const { c, logs } = makeController(sched, {
+      sharedCircuitA: 32, sharedCircuitBufferA: 2, sharedCircuitIncludeSolar: true, sharedCircuitIncludeBattery: true,
+    });
     c.onSolarSample({ gridSignedW: 0, pvW: 0, batteryW: -2300 });
     c.tick(at(1, 12, 0));
     const line = logs.filter((l) => l.startsWith('[decision:')).pop();
@@ -368,7 +434,9 @@ test('every tick logs a [decision] line, unconditionally, covering each branch',
     const sched: ScheduleWindow[] = [{
       days: [1], start: '11:00', end: '14:00', currentA: 16, boostToCap: true,
     }];
-    const { c, logs } = makeController(sched, { sharedCircuitA: 32, sharedCircuitBufferA: 2 });
+    const { c, logs } = makeController(sched, {
+      sharedCircuitA: 32, sharedCircuitBufferA: 2, sharedCircuitIncludeSolar: true, sharedCircuitIncludeBattery: true,
+    });
     c.onSolarSample({ gridSignedW: 0, pvW: 920, batteryW: 3220 });
     c.tick(at(1, 12, 0));
     const line = logs.filter((l) => l.startsWith('[decision:')).pop();
@@ -380,7 +448,9 @@ test('every tick logs a [decision] line, unconditionally, covering each branch',
     const sched: ScheduleWindow[] = [{
       days: [1], start: '11:00', end: '14:00', currentA: 16, boostToCap: true,
     }];
-    const { c, logs } = makeController(sched, { sharedCircuitA: 32, sharedCircuitBufferA: 2, maxHouseholdW: 3000 });
+    const { c, logs } = makeController(sched, {
+      sharedCircuitA: 32, sharedCircuitBufferA: 2, maxHouseholdA: 3000 / 230, householdPhases: 1, sharedCircuitIncludeSolar: true, sharedCircuitIncludeBattery: true,
+    });
     c.onSolarSample({ gridSignedW: 2800, pvW: 920, batteryW: 3220 });
     c.tick(at(1, 12, 0));
     const line = logs.filter((l) => l.startsWith('[decision:')).pop();
@@ -465,7 +535,7 @@ test('household cap nets out the charger\'s own draw once Charging, even without
 
   const store: Record<string, unknown> = { schedule: [] }; // no transactionId anywhere
   const settings: Record<string, unknown> = {
-    minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdW: 14200,
+    minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdA: 14200 / 230, householdPhases: 1,
   };
   const caps: Record<string, unknown> = {};
   const host: ControllerHost = {
@@ -507,7 +577,7 @@ test('the solar surplus calc sees the charger\'s real power once Charging, even 
 
   const store: Record<string, unknown> = { schedule: [] };
   const settings: Record<string, unknown> = {
-    minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdW: 14000,
+    minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdA: 14000 / 230, householdPhases: 1,
   };
   const caps: Record<string, unknown> = {};
   const host: ControllerHost = {
@@ -554,7 +624,7 @@ test('household cap is unavailable, not a guessed-low value, while Charging with
 
   const store: Record<string, unknown> = { schedule: [] };
   const settings: Record<string, unknown> = {
-    minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdW: 14200,
+    minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdA: 14200 / 230, householdPhases: 1,
   };
   const caps: Record<string, unknown> = {};
   const host: ControllerHost = {
@@ -586,10 +656,10 @@ test('household cap is unavailable, not a guessed-low value, while Charging with
     'household cap is skipped (not guessed at 13A) until a real MeterValues reading arrives');
 
   cp.emit('meterValues', { power: 3550 });
-  // Now netted correctly: baseLoadW = 11150-3550 = 7600. Tighten maxHouseholdW so the cap is
+  // Now netted correctly: baseLoadW = 11150-3550 = 7600. Tighten maxHouseholdA so the cap is
   // provably live and binding again (not just "no longer stale"): maxChargerW = 11050-7600 = 3450 ->
   // floor(3450/230) = 15A, below the 31A manual target.
-  settings.maxHouseholdW = 11050;
+  settings.maxHouseholdA = 11050 / 230;
   c.refreshConfig();
   c.onSolarSample({ gridSignedW: 11150, pvW: 0, batteryW: 0 });
   assert.equal(caps.charge_current_limit, 15, 'the cap is live again and binding once a real reading is known');
@@ -604,7 +674,7 @@ test('solar surplus evaluation is skipped, not zeroed, while Charging with no Me
 
   const store: Record<string, unknown> = { schedule: [] };
   const settings: Record<string, unknown> = {
-    minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdW: 14000,
+    minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdA: 14000 / 230, householdPhases: 1,
   };
   const caps: Record<string, unknown> = {};
   const logs: string[] = [];
@@ -647,7 +717,7 @@ test('household cap is unavailable, not a guessed pause, before any status arriv
   }];
   const store: Record<string, unknown> = { schedule: sched, transactionId: 29 };
   const settings: Record<string, unknown> = {
-    minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdW: 14200,
+    minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdA: 14200 / 230, householdPhases: 1,
   };
   const logs: string[] = [];
   const host: ControllerHost = {
@@ -703,7 +773,7 @@ test('household cap is unavailable, not a guessed-low value, on a transient Avai
   }];
   const store: Record<string, unknown> = { schedule: sched, transactionId: 29 };
   const settings: Record<string, unknown> = {
-    minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdW: 14200,
+    minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdA: 14200 / 230, householdPhases: 1,
   };
   const logs: string[] = [];
   const host: ControllerHost = {
@@ -748,7 +818,7 @@ test('a genuinely idle Available (no known transaction) still nets as a confirme
   }];
   const store: Record<string, unknown> = { schedule: sched }; // no persisted transactionId - genuinely idle
   const settings: Record<string, unknown> = {
-    minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdW: 14200,
+    minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdA: 14200 / 230, householdPhases: 1,
   };
   const logs: string[] = [];
   const host: ControllerHost = {
@@ -794,7 +864,7 @@ test('profile writes reach the charger (TxDefaultProfile) even without a known t
 
   const store: Record<string, unknown> = { schedule: [] };
   const settings: Record<string, unknown> = {
-    minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdW: 14000, writeThrottleMs: 0,
+    minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdA: 14000 / 230, householdPhases: 1, writeThrottleMs: 0,
   };
   const host: ControllerHost = {
     identity: 'X',
@@ -851,7 +921,7 @@ test('a pause (0A) decision reaches an already-mid-session charger, real-hardwar
 
   const store: Record<string, unknown> = { schedule: [] }; // no schedule, no transactionId
   const settings: Record<string, unknown> = {
-    minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdW: 14200, writeThrottleMs: 0,
+    minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdA: 14200 / 230, householdPhases: 1, writeThrottleMs: 0,
   };
   const host: ControllerHost = {
     identity: 'X',
@@ -899,7 +969,7 @@ test('RemoteStartTransaction is only attempted while Preparing, not once already
 
   const store: Record<string, unknown> = { schedule: [] };
   const settings: Record<string, unknown> = {
-    minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdW: 14000,
+    minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdA: 14000 / 230, householdPhases: 1,
   };
   const host: ControllerHost = {
     identity: 'X',
@@ -943,7 +1013,7 @@ test('a repeated identical status does not re-trigger the decision log/tick', ()
 
   const store: Record<string, unknown> = { schedule: [] };
   const settings: Record<string, unknown> = {
-    minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdW: 14000,
+    minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdA: 14000 / 230, householdPhases: 1,
   };
   const logs: string[] = [];
   const host: ControllerHost = {
@@ -1012,7 +1082,7 @@ test('a transient Available (reconnect blip) does not wipe a live transaction', 
     // boot (was already charging before the app restarted).
     const store: Record<string, unknown> = { schedule: [], transactionId: 55 };
     const settings: Record<string, unknown> = {
-      minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdW: 14000,
+      minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdA: 14000 / 230, householdPhases: 1,
     };
     const host: ControllerHost = {
       identity: 'X',
@@ -1071,7 +1141,7 @@ test('a genuinely sustained Available eventually reconciles a stale transaction 
 
     const store: Record<string, unknown> = { schedule: [], transactionId: 55 };
     const settings: Record<string, unknown> = {
-      minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdW: 14000,
+      minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdA: 14000 / 230, householdPhases: 1,
     };
     const host: ControllerHost = {
       identity: 'X',
@@ -1130,7 +1200,7 @@ test('EV-initiated Finishing (no StopTransaction) clears the stale transaction a
   }];
   const store: Record<string, unknown> = { schedule, transactionId: 5 };
   const settings: Record<string, unknown> = {
-    minAmps: 6, maxAmps: 31, phases: 1, voltage: 230, maxHouseholdW: 14000,
+    minAmps: 6, maxAmps: 31, phases: 1, voltage: 230, maxHouseholdA: 14000 / 230, householdPhases: 1,
   };
   const caps: Record<string, unknown> = {};
   const host: ControllerHost = {
@@ -1188,7 +1258,7 @@ test('manual off pauses at 0A (keeps the transaction) instead of hard-stopping',
 
   const store: Record<string, unknown> = { schedule: [], transactionId: 7 };
   const settings: Record<string, unknown> = {
-    minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdW: 14000, writeThrottleMs: 0,
+    minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdA: 14000 / 230, householdPhases: 1, writeThrottleMs: 0,
   };
   const caps: Record<string, unknown> = {};
   const host: ControllerHost = {
@@ -1242,7 +1312,7 @@ test('manual latch set while unplugged is cleared by the fresh plug-in (never de
 
   const store: Record<string, unknown> = { schedule: [] };
   const settings: Record<string, unknown> = {
-    minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdW: 14000,
+    minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdA: 14000 / 230, householdPhases: 1,
   };
   const caps: Record<string, unknown> = {};
   const host: ControllerHost = {
@@ -1293,7 +1363,7 @@ test('a transactionId restored from store at boot is never hard-stopped, confirm
   // Solar target null (below excess threshold) -> controller wants to be idle.
   const store: Record<string, unknown> = { schedule: [], transactionId: 42 };
   const settings: Record<string, unknown> = {
-    minAmps: 6, maxAmps: 31, phases: 1, voltage: 230, maxHouseholdW: 14000,
+    minAmps: 6, maxAmps: 31, phases: 1, voltage: 230, maxHouseholdA: 14000 / 230, householdPhases: 1,
   };
   const host: ControllerHost = {
     identity: 'X',
@@ -1344,7 +1414,7 @@ test('onStartTransaction persists the transaction id/meter start, flips the capa
 
   const store: Record<string, unknown> = { schedule: [] };
   const settings: Record<string, unknown> = {
-    minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdW: 14000, writeThrottleMs: 0,
+    minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdA: 14000 / 230, householdPhases: 1, writeThrottleMs: 0,
   };
   const caps: Record<string, unknown> = {};
   const host: ControllerHost = {
@@ -1390,7 +1460,7 @@ test('onStopTransaction clears the transaction id and flips the charging capabil
 
   const store: Record<string, unknown> = { schedule: [], transactionId: 42 };
   const settings: Record<string, unknown> = {
-    minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdW: 14000,
+    minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdA: 14000 / 230, householdPhases: 1,
   };
   const caps: Record<string, unknown> = {};
   const host: ControllerHost = {
@@ -1505,7 +1575,9 @@ test('getModeInfo() boostActive reflects real-time boosting, not just the window
   const allDayBoost: ScheduleWindow[] = [{
     days: [0, 1, 2, 3, 4, 5, 6], start: '00:00', end: '23:59', currentA: 16, boostToCap: true,
   }];
-  const { c } = makeController(allDayBoost, { sharedCircuitA: 32, sharedCircuitBufferA: 2 });
+  const { c } = makeController(allDayBoost, {
+    sharedCircuitA: 32, sharedCircuitBufferA: 2, sharedCircuitIncludeSolar: true, sharedCircuitIncludeBattery: true,
+  });
   c.onSolarSample({ gridSignedW: 0, pvW: 0, batteryW: 0 }); // idle battery, no solar -> cap = 30, above the 16A floor
   assert.equal(c.getModeInfo().boostActive, true);
 
@@ -1547,7 +1619,7 @@ test('getDiagnostics().chargerPowerW nets the charger\'s own draw for the widget
     identity: 'X',
     setCapability: () => {},
     getSetting: <T>(k: string) => ({
-      minAmps: 6, maxAmps: 31, phases: 1, voltage: 230, maxHouseholdW: 14000,
+      minAmps: 6, maxAmps: 31, phases: 1, voltage: 230, maxHouseholdA: 14000 / 230, householdPhases: 1,
     } as Record<string, unknown>)[k] as T,
     getStore: <T>(k: string) => ({ schedule: [] } as Record<string, unknown>)[k] as T,
     setStore: async () => {},
@@ -1584,7 +1656,8 @@ test('getDiagnostics().limits resolves dashboard capacity-meter peaks from confi
     maxAmps: 16,
     phases: 3,
     voltage: 230,
-    maxHouseholdW: 10000,
+    maxHouseholdA: 10000 / 230,
+    householdPhases: 1,
     peakSolarW: 6000,
     peakBatteryChargeW: 3000,
     peakBatteryDischargeW: 2600,
@@ -1659,7 +1732,7 @@ test('binds on a connect event, treats a rebind of the same ChargePoint as a rec
 
   const store: Record<string, unknown> = { schedule: [] };
   const settings: Record<string, unknown> = {
-    minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdW: 14000,
+    minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdA: 14000 / 230, householdPhases: 1,
   };
   let availableCount = 0;
   let unavailableMsg: string | null = null;
@@ -1733,7 +1806,7 @@ test('a boot event triggers configureCharger(), which logs rather than throws on
 
   const store: Record<string, unknown> = { schedule: [] };
   const settings: Record<string, unknown> = {
-    minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdW: 14000,
+    minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdA: 14000 / 230, householdPhases: 1,
   };
   const logs: string[] = [];
   const host: ControllerHost = {
@@ -1789,7 +1862,7 @@ test('a failed remote start attempt resets awaitingStart and reports the error, 
 
   const store: Record<string, unknown> = { schedule: [] };
   const settings: Record<string, unknown> = {
-    minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdW: 14000,
+    minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdA: 14000 / 230, householdPhases: 1,
   };
   const errors: unknown[][] = [];
   const host: ControllerHost = {
@@ -1835,7 +1908,7 @@ test('a failed SetChargingProfile write is caught and reported, not thrown', asy
 
   const store: Record<string, unknown> = { schedule: [] };
   const settings: Record<string, unknown> = {
-    minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdW: 14000, writeThrottleMs: 0,
+    minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdA: 14000 / 230, householdPhases: 1, writeThrottleMs: 0,
   };
   const errors: unknown[][] = [];
   const host: ControllerHost = {
@@ -1885,7 +1958,7 @@ test('scheduleWrite() defers a write until writeThrottleMs has elapsed since the
 
   const store: Record<string, unknown> = { schedule: [] };
   const settings: Record<string, unknown> = {
-    minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdW: 14000, writeThrottleMs: 200,
+    minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdA: 14000 / 230, householdPhases: 1, writeThrottleMs: 200,
   };
   const host: ControllerHost = {
     identity: 'X',
@@ -1947,9 +2020,11 @@ test('a hard cap tightening further jumps the write throttle instead of waiting 
     maxAmps: 32,
     phases: 1,
     voltage: 230,
-    maxHouseholdW: 14000,
+    maxHouseholdA: 14000 / 230,
+    householdPhases: 1,
     sharedCircuitA: 30,
     sharedCircuitBufferA: 0,
+    sharedCircuitIncludeBattery: true,
     writeThrottleMs: 5000,
   };
   const host: ControllerHost = {
@@ -2002,7 +2077,7 @@ test('a routine decrease with no cap tightening still respects the write throttl
 
   const store: Record<string, unknown> = { schedule: [] };
   const settings: Record<string, unknown> = {
-    minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdW: 14000, writeThrottleMs: 200,
+    minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdA: 14000 / 230, householdPhases: 1, writeThrottleMs: 200,
   };
   const host: ControllerHost = {
     identity: 'X',
@@ -2059,9 +2134,11 @@ test('an urgent cap-tightening write cancels an already-pending throttled write,
     maxAmps: 32,
     phases: 1,
     voltage: 230,
-    maxHouseholdW: 14000,
+    maxHouseholdA: 14000 / 230,
+    householdPhases: 1,
     sharedCircuitA: 25,
     sharedCircuitBufferA: 0,
+    sharedCircuitIncludeBattery: true,
     writeThrottleMs: 300,
   };
   const host: ControllerHost = {
@@ -2129,7 +2206,7 @@ function makeBoundController(extraStore: Record<string, unknown> = {}, extraSett
 
   const store: Record<string, unknown> = { schedule: [], ...extraStore };
   const settings: Record<string, unknown> = {
-    minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdW: 14000, ...extraSettings,
+    minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdA: 14000 / 230, householdPhases: 1, ...extraSettings,
   };
   const caps: Record<string, unknown> = {};
   const events: { event: string; tokens: ChargingTokens }[] = [];

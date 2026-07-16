@@ -95,9 +95,23 @@ interface ControllerConfig {
   minOffMs: number;
   marginW: number;
   solarStaleMs: number;
+  // Raw user settings for the household cap: the main supply's per-phase amp
+  // rating and its own phase count (independent of the charger's own `phases`
+  // above - a single-phase charger on a 3-phase household connection is
+  // common). `maxHouseholdW` below is derived from these in refreshConfig()
+  // and is what householdCapAmps()/getDiagnostics() actually compare against,
+  // since the live base-load reading is fundamentally in Watts.
+  maxHouseholdA: number;
+  householdPhases: number;
   maxHouseholdW: number;
   sharedCircuitA: number;
   sharedCircuitBufferA: number;
+  // Which live readings feed the shared-circuit formula below - a shared
+  // circuit doesn't necessarily involve solar or a battery at all (e.g. a
+  // charger sharing a breaker with a dryer), so each is opt-in independently
+  // rather than assumed. See sharedCircuitCapAmps().
+  sharedCircuitIncludeSolar: boolean;
+  sharedCircuitIncludeBattery: boolean;
   // Master switch for solar-surplus tracking as a charging mode. Does NOT stop
   // solar samples being consumed (surplus meter, household/circuit caps stay
   // live) - only gates whether resolveDetailed() falls into the solar branch.
@@ -116,15 +130,19 @@ const DEFAULTS: ControllerConfig = {
   idTag: 'CHARGEIQ',
   meterSampleIntervalSec: 10,
   writeThrottleMs: 15000,
-  deadbandA: 1,
+  deadbandA: 0,
   rampA: 3,
   minOnMs: 3 * 60000,
   minOffMs: 3 * 60000,
   marginW: 0,
   solarStaleMs: 60000,
-  maxHouseholdW: 14000,
+  maxHouseholdA: 63,
+  householdPhases: 1,
+  maxHouseholdW: 63 * 230 * 1,
   sharedCircuitA: 0,
   sharedCircuitBufferA: 0,
+  sharedCircuitIncludeSolar: false,
+  sharedCircuitIncludeBattery: false,
   solarEnabled: true,
   peakSolarW: 0,
   peakBatteryChargeW: 0,
@@ -315,11 +333,14 @@ export class ChargeController {
 
   refreshConfig(): void {
     const g = <T>(k: string, d: T): T => (this.host.getSetting<T>(k) ?? d);
+    const voltage = g('voltage', DEFAULTS.voltage);
+    const maxHouseholdA = g('maxHouseholdA', DEFAULTS.maxHouseholdA);
+    const householdPhases = g('householdPhases', DEFAULTS.householdPhases);
     this.cfg = {
       minAmps: g('minAmps', DEFAULTS.minAmps),
       maxAmps: g('maxAmps', DEFAULTS.maxAmps),
       phases: g('phases', DEFAULTS.phases),
-      voltage: g('voltage', DEFAULTS.voltage),
+      voltage,
       idTag: g('idTag', DEFAULTS.idTag),
       meterSampleIntervalSec: g('meterSampleIntervalSec', DEFAULTS.meterSampleIntervalSec),
       writeThrottleMs: g('writeThrottleMs', DEFAULTS.writeThrottleMs),
@@ -329,9 +350,13 @@ export class ChargeController {
       minOffMs: g('minOffSec', DEFAULTS.minOffMs / 1000) * 1000,
       marginW: g('marginW', DEFAULTS.marginW),
       solarStaleMs: g('solarStaleSec', DEFAULTS.solarStaleMs / 1000) * 1000,
-      maxHouseholdW: g('maxHouseholdW', DEFAULTS.maxHouseholdW),
+      maxHouseholdA,
+      householdPhases,
+      maxHouseholdW: maxHouseholdA * voltage * householdPhases,
       sharedCircuitA: g('sharedCircuitA', DEFAULTS.sharedCircuitA),
       sharedCircuitBufferA: g('sharedCircuitBufferA', DEFAULTS.sharedCircuitBufferA),
+      sharedCircuitIncludeSolar: g('sharedCircuitIncludeSolar', DEFAULTS.sharedCircuitIncludeSolar),
+      sharedCircuitIncludeBattery: g('sharedCircuitIncludeBattery', DEFAULTS.sharedCircuitIncludeBattery),
       solarEnabled: g('solarEnabled', DEFAULTS.solarEnabled),
       peakSolarW: g('peakSolarW', DEFAULTS.peakSolarW),
       peakBatteryChargeW: g('peakBatteryChargeW', DEFAULTS.peakBatteryChargeW),
@@ -873,15 +898,26 @@ export class ChargeController {
    * floor (see there). Stale feed -> no extra restriction, same convention as
    * householdCapAmps: whatever ceiling is already configured for the active
    * mode (manual amps / schedule currentA) is trusted as the safety margin.
+   *
+   * Not every shared circuit involves solar or a battery at all (e.g. a
+   * charger sharing a breaker with a dryer) - `sharedCircuitIncludeSolar`/
+   * `sharedCircuitIncludeBattery` opt each term in independently. If neither
+   * is enabled, the cap has nothing to do with the solar feed, so it's a
+   * plain static number and the staleness gate above doesn't apply either -
+   * gating a config that never reads the feed on that same feed being fresh
+   * would make the cap permanently unavailable for anyone without solar.
    */
   private sharedCircuitCapAmps(): number | null {
     if (this.cfg.sharedCircuitA <= 0) return null;
+    if (!this.cfg.sharedCircuitIncludeSolar && !this.cfg.sharedCircuitIncludeBattery) {
+      return Math.floor(this.cfg.sharedCircuitA - this.cfg.sharedCircuitBufferA);
+    }
     const stale = this.lastSolarSampleAt === 0
       || (Date.now() - this.lastSolarSampleAt) > this.cfg.solarStaleMs;
     if (stale) return null;
     const div = this.cfg.voltage * this.cfg.phases;
-    const pvA = this.lastPvW / div;
-    const batteryA = this.lastBatteryW / div;
+    const pvA = this.cfg.sharedCircuitIncludeSolar ? this.lastPvW / div : 0;
+    const batteryA = this.cfg.sharedCircuitIncludeBattery ? this.lastBatteryW / div : 0;
     return Math.floor(this.cfg.sharedCircuitA + pvA - batteryA - this.cfg.sharedCircuitBufferA);
   }
 
@@ -1039,14 +1075,16 @@ export class ChargeController {
    * and the home battery must never be the thing funding extra EV current
    * beyond the configured floor, even though sharedCircuitCapAmps() (the hard
    * safety ceiling applied afterwards in tick()) correctly treats that same
-   * discharge as freeing up real capacity on the conductor.
+   * discharge as freeing up real capacity on the conductor. Only applies when
+   * the battery is actually part of the shared circuit (`sharedCircuitIncludeBattery`)
+   * - otherwise its charge/discharge state has no bearing on this circuit at all.
    */
   private scheduledAmpsDetail(now: Date): { amps: number; reason: string } {
     const floor = this.scheduleOrMax(now);
     if (!this.scheduler.activeBoostToCap(now)) {
       return { amps: floor, reason: `scheduled: floor ${floor}A (boost not enabled for this window)` };
     }
-    if (this.lastBatteryW < 0) {
+    if (this.cfg.sharedCircuitIncludeBattery && this.lastBatteryW < 0) {
       const dischargeA = Math.abs(Math.round(this.lastBatteryW / (this.cfg.voltage * this.cfg.phases)));
       return {
         amps: floor,

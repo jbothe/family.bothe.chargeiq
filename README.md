@@ -21,7 +21,16 @@ App id: `family.bothe.chargeiq` · SDK v3, TypeScript · platform: `local`.
      export/surplus so the car only draws power you'd otherwise send to the
      grid.
 - **Applies a household grid-import cap** on top of whatever mode is active, so
-  total home import never exceeds a configured ceiling (default 14 kW).
+  total home import never exceeds your main fuse rating — configured as amps
+  per phase plus your household's phase count (default 63A, 1 phase), since
+  main breakers are amp-rated in practice, not watt-rated.
+- **Optional charger-circuit cap** for the charger's own circuit/breaker when
+  it's rated lower than the rest of the house — whether dedicated to the
+  charger alone (e.g. a standalone 32A breaker) or shared with other
+  equipment (e.g. a home battery inverter). A second, independent ceiling on
+  top of the household cap. Solar production and battery charge/discharge
+  each opt in separately, so it works just as well for a circuit with no
+  solar or battery involved at all.
 - **Never hard-stops a charging session.** Every "don't charge right now"
   decision pauses at 0 A instead of ending the OCPP transaction — some
   chargers (including the Pulsar) won't accept a new session again until the
@@ -41,7 +50,9 @@ App id: `family.bothe.chargeiq` · SDK v3, TypeScript · platform: `local`.
   Homey's LAN IP on the configured port.
 - Optional: a paired SolarEdge Homey app/integration for solar-surplus mode
   and the widget's solar/battery/house readings. The charger and schedules
-  work without it — solar mode just won't have anything to follow.
+  work without it — solar mode just won't have anything to follow, and the
+  charger-circuit cap (if configured) falls back to a plain static ceiling
+  rather than factoring in live solar/battery readings.
 - Homey's configured timezone (Settings → General) should be correct — the
   underlying OS clock runs in UTC regardless, and schedule windows are
   evaluated against the Homey-configured timezone, not the system clock.

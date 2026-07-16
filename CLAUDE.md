@@ -6,7 +6,7 @@ charging across three derived modes, plus a live power-flow dashboard widget. Ap
 `family.bothe.chargeiq`, compatibility `>=12.4.5`, platform `local`.
 
 **Single-charger by design (for now).** The OCPP/control layers are per-identity and would run
-several chargers, but the shared electrical limits (household grid cap, shared-circuit cap, solar
+several chargers, but the shared electrical limits (household grid cap, charger-circuit cap, solar
 surplus) are enforced per-controller with no cross-charger coordination, so pairing is capped at one
 device (`lib/pairing.ts` → `resolvePairList`, enforced in `drivers/charger/driver.ts`'s `list_devices`
 pair handler). The app→widget→schedule glue also assumes `devices[0]`. See `docs/MULTI_DEVICE.md` for
@@ -63,23 +63,41 @@ Priority **Manual > Scheduled > Solar > Idle**, recomputed every tick:
 - **Idle** — no latch, not in a schedule window, and `solarEnabled` is false. Holds at 0A, same as
   a paused Solar session, but labelled honestly rather than as `solar` when nothing is actually
   being tracked. **`solarEnabled:false` only gates mode resolution** — `onSolarSample()`/`SolarLoop`
-  keep running regardless, so `measure_solar_surplus`, the household cap, and the shared-circuit cap
+  keep running regardless, so `measure_solar_surplus`, the household cap, and the charger-circuit cap
   all stay live and re-enabling takes effect on the very next tick, not just the next solar sample.
 
-The **household grid-import cap** (`maxHouseholdW`, default 14 kW) applies on top in every mode.
+The **household grid-import cap** is configured in amps, not watts, since main breakers/fuses are
+amp-rated in practice: `maxHouseholdA` (per-phase main fuse rating, default 63A) and
+`householdPhases` (the *household's own* supply phase count, default 1 - independent of the
+charger's own `phases` setting, since a single-phase charger on a 3-phase household connection is
+common). `refreshConfig()` derives the actual Watts ceiling used everywhere downstream
+(`householdCapAmps()`, `getDiagnostics().limits.gridMaxW`, the `[decision:...]` log) as
+`maxHouseholdA * voltage * householdPhases` into `ControllerConfig.maxHouseholdW` - only that
+derived field is read internally; `maxHouseholdW` is no longer itself a settings id. Applies on top
+in every mode.
 `charge_mode` is a **read-only** metric (manual/scheduled/solar/idle). `getModeInfo()` →
 `{mode, detail}` drives the widget's `Mode: X · detail` line.
 
-The **shared-circuit cap** (`sharedCircuitA`/`sharedCircuitBufferA`, both default 0/disabled) is a
-second, independent hard ceiling for a physical circuit shared with other equipment (e.g. a home
-battery inverter on the same breaker as the charger) — `sharedCircuitA + pv − battery − buffer`
-(amps), reading live `pvW`/`batteryW` off the solar feed. It applies in every mode alongside the
-household cap. A schedule window can opt in to **boosting** above its `currentA` up to this cap via
+The **charger-circuit cap** (`sharedCircuitA`/`sharedCircuitBufferA` in code and store, both default
+0/disabled; labelled "Charger circuit rating/buffer" in the settings UI) is a second, independent
+hard ceiling for the charger's own circuit/breaker when it's rated lower than the rest of the house
+— whether dedicated to the charger alone (e.g. a standalone 32A breaker) or shared with other
+equipment (e.g. a home battery inverter on the same breaker as the charger) — `sharedCircuitA + pv −
+battery − buffer` (amps), reading live `pvW`/`batteryW` off the solar feed. Whether pv and battery
+actually factor in is per-component config, not assumed: `sharedCircuitIncludeSolar`/
+`sharedCircuitIncludeBattery` (both default **false**) opt each term in independently, since this
+circuit doesn't necessarily involve solar or a battery at all. If **both** are off, the cap
+collapses to a plain static `sharedCircuitA − buffer` with no dependency on the solar feed
+whatsoever — no staleness gate either, so it works for a circuit with no solar/battery integration
+at all (see `sharedCircuitCapAmps()`). It applies in every mode alongside the household cap. A
+schedule window can opt in to **boosting** above its `currentA` up to this cap via
 `ScheduleWindow.boostToCap` — `currentA` becomes a floor, not a fixed target, so solar (or the
 battery simply not charging as hard as assumed) can push the current higher. Battery **discharge**
 is deliberately excluded from the boost calc (`ChargeController.scheduledAmpsDetail`) even though it
 legitimately raises the safety-cap ceiling — the home battery must never fund extra EV current
-beyond the configured floor, only genuine spare circuit capacity may.
+beyond the configured floor, only genuine spare circuit capacity may. This discharge-blocks-boost
+rule itself only applies when `sharedCircuitIncludeBattery` is on — otherwise the battery isn't part
+of this circuit and its state has no bearing on it.
 
 ### Key invariants / gotchas
 - **Amps are always floored** (never rounded up) when converting W→A, in `SolarLoop`, the
@@ -97,7 +115,7 @@ beyond the configured floor, only genuine spare circuit capacity may.
   last; writes are throttled (`writeThrottleMs`). `TxProfile` while a transaction is live, else
   `TxDefaultProfile`. `limit: 0` = pause (keep the session). **A hard cap (`householdCapAmps()` /
   `sharedCircuitCapAmps()`) getting tighter than it was on the previous tick jumps this throttle** -
-  found via a real-hardware log where the shared-circuit cap tightened twice in ~20s as a home
+  found via a real-hardware log where the charger-circuit cap tightened twice in ~20s as a home
   battery ramped its charge rate, but the flat 15s-per-write throttle left the charger running under
   the previous, now-too-high limit for several seconds each time (confirmed: 22.5A actually flowing
   ~9.5s after the true cap had already dropped to 16A). `tick()` tracks each cap's own value
@@ -188,7 +206,7 @@ beyond the configured floor, only genuine spare circuit capacity may.
 - Grid sign convention: **import positive / export negative**. Surplus = `chargerPower − gridSigned −
   margin − batteryDischargeW` (see next bullet for the last term).
 - Battery sign convention: **charge positive / discharge negative** (matches `SolarEdge` battery
-  device). The shared-circuit cap uses this directly (no grid-based proxy), which is *why* the
+  device). The charger-circuit cap uses this directly (no grid-based proxy), which is *why* the
   schedule-boost feature can gate cleanly on `batteryW < 0` instead of guessing. **`SolarLoop` also
   subtracts battery discharge out of its surplus calc** (`max(0, -batteryW)`, confirmed as a real
   hardware incident: PV alone couldn't cover house load, the battery was discharging to fund an

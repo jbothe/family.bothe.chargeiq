@@ -16,6 +16,9 @@
     "alarm_generic"
   ],
   "capabilitiesOptions": {
+    "charge_current_limit": {
+      "title": { "en": "Manual Current" }
+    },
     "evcharger_charging_state": {
       "title": { "en": "Charging State" }
     },
@@ -26,7 +29,8 @@
       "title": { "en": "Energy (total)" }
     },
     "meter_power.session": {
-      "title": { "en": "Energy (session)" }
+      "title": { "en": "Energy (session)" },
+      "insights": false
     }
   },
   "platforms": ["local"],
