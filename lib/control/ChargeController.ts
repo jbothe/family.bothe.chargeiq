@@ -217,7 +217,12 @@ export class ChargeController {
 
   private solarStaleWarned = false;
 
-  /** null until the first MeterValues this connection - see nettedChargerW(). */
+  /**
+   * null until the first MeterValues since the charger was last confirmed
+   * delivering power - see nettedChargerW(). Also reset to null (not 0) by
+   * onStatus() on a confirmed stop, so a subsequent Charging status with no
+   * fresh MeterValues yet is read as unknown rather than a stale reading.
+   */
   private lastPowerW: number | null = null;
 
   /** null until the first energy reading this connection - see chargingTokens(). */
@@ -564,6 +569,27 @@ export class ChargeController {
       this.host.setCapability('evcharger_charging', false);
     }
     this.lastStatusValue = info.status;
+    // measure_power/measure_current are otherwise only ever written by
+    // onMeterValues() - but a charger stops sending MeterValues once a
+    // session ends (e.g. on unplug: confirmed on real hardware, Available
+    // reports carry no meter payload), so without this the capabilities -
+    // and anything reading them, including the power-flow widget and
+    // Homey's own device tile/Insights - would keep showing the last
+    // charging reading forever, even while evcharger_charging_state (driven
+    // purely by this same StatusNotification, see toChargingState() above)
+    // has already flipped to plugged_out. Reuse nettedChargerW()'s own
+    // "confirmed 0 vs genuinely unknown" logic rather than zeroing on every
+    // non-Charging status unconditionally, so the transient reconnect-blip
+    // Available (still-live transactionId, see IDLE_RECONCILE_DELAY_MS)
+    // correctly does NOT zero a session that's actually still charging.
+    // Reset lastPowerW to null (not 0) so a future Charging status with no
+    // fresh MeterValues yet is still read as unknown, not wrongly netted as
+    // a confirmed 0 - see nettedChargerW()'s own doc comment.
+    if (this.nettedChargerW() === 0 && this.lastPowerW !== null) {
+      this.lastPowerW = null;
+      this.host.setCapability('measure_power', 0);
+      this.host.setCapability('measure_current', 0);
+    }
     // Only re-resolve on an actual status change - a repeat of the same
     // status (e.g. the real charger echoing back what bind() already
     // replayed from cache, after requestFreshState()'s TriggerMessage) is not

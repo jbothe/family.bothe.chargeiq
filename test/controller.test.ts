@@ -2353,6 +2353,45 @@ test('an unplug fires onVehicleDisconnected', () => {
   assert.equal(disconnectEvents.length, 1);
 });
 
+test('unplugging a charger mid-session zeroes measure_power/measure_current instead of leaving the last charging reading stuck', () => {
+  // Regression: a Wallbox stops sending MeterValues once a session ends, so
+  // without an explicit reset on a confirmed stop, measure_power/current -
+  // and anything reading them, e.g. the power-flow widget's EV tile - would
+  // keep showing the last charging draw forever, even though
+  // evcharger_charging_state (same StatusNotification) already reads
+  // plugged_out.
+  const { cp, caps } = makeBoundController();
+  cp.emit('status', { connectorId: 1, errorCode: 'NoError', status: 'Available' }); // baseline (prevPlugged=false)
+  cp.emit('status', { connectorId: 1, errorCode: 'NoError', status: 'Preparing' });
+  cp.emit('status', { connectorId: 1, errorCode: 'NoError', status: 'Charging' });
+  cp.emit('meterValues', { power: 7200, current: 32 });
+  assert.equal(caps.measure_power, 7200);
+  assert.equal(caps.evcharger_charging_state, 'plugged_in_charging');
+
+  cp.emit('status', { connectorId: 1, errorCode: 'NoError', status: 'Available' }); // unplugged
+  assert.equal(caps.evcharger_charging_state, 'plugged_out');
+  assert.equal(caps.measure_power, 0, 'power reading is cleared, not left at the last charging value');
+  assert.equal(caps.measure_current, 0);
+});
+
+test('a transient Available reconnect blip (live transactionId) does not zero measure_power', () => {
+  // Mirrors the debounced-idle-reconciliation scenario elsewhere in this
+  // file: a lone Available report right after reconnect can flip back to
+  // Charging under a second later. nettedChargerW() already treats this as
+  // unknown (not confirmed-0) while a transactionId is still on record, and
+  // the capability reset must respect the same caution - zeroing here would
+  // wipe a real, still-live reading out from under an active session.
+  const { cp, caps } = makeBoundController({ transactionId: 29 }); // c.init() loads a still-live transaction id
+  cp.emit('status', { connectorId: 1, errorCode: 'NoError', status: 'Charging' });
+  cp.emit('meterValues', { power: 7200 });
+
+  cp.emit('status', { connectorId: 1, errorCode: 'NoError', status: 'Available' }); // reconnect blip
+  assert.equal(caps.measure_power, 7200, 'not wiped while a transaction is still on record, unreconciled');
+
+  cp.emit('status', { connectorId: 1, errorCode: 'NoError', status: 'Charging' }); // flips back, as on real hardware
+  assert.equal(caps.measure_power, 7200, 'reading survives the blip since it was never actually cleared');
+});
+
 test('resumeAutomatic() clears a manual latch and re-resolves out of manual mode', async () => {
   const { c } = makeBoundController();
   await c.startManual(16);
