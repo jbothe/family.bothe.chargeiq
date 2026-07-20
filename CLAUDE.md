@@ -37,8 +37,11 @@ The **App** (`app.ts`) owns the long-lived services and exposes them to the devi
   `SolarSample`; **house load is derived** (`pv + gridSigned − batterySigned`). Best-effort —
   the charger still works without it. See `memory/solaredge-feed-contract.md`.
 - Widget state is **pushed** to the widget via `this.homey.api.realtime('powerflow', …)` every
-  10 s (`startWidgetBroadcast`). This is the widget's data channel — the widget/app **api-fetch
-  routing never worked reliably on-device, so don't reintroduce it**.
+  10 s (`startWidgetBroadcast`). This is the widget's ongoing data channel. Immediate first paint
+  on load goes through a **widget-scoped** pull endpoint (`widgets/power-flow/api.js`'s
+  `getState`, declared in `widget.compose.json`'s own `api` block, calling `homey.app
+  .getWidgetState()` — the same merged state the broadcast sends), not the app-level `api.ts`. See
+  the Widget section below for the routing details.
 
 `drivers/charger/` — an `evcharger`-class device. `device.ts` is a thin adapter: it implements
 `ControllerHost` and forwards capability-listener/Flow calls to the controller.
@@ -242,6 +245,16 @@ of this circuit and its state has no bearing on it.
 block, so keep it dependency-free (no imports). It renders live even when the charger is unplugged;
 dims (`.stale`) after ~50 s (5 missed 10s broadcasts) without a realtime update and auto-recovers.
 
+**Immediate first paint on load pulls once via `widgets/power-flow/api.js`'s `getState`
+endpoint** (declared in `widget.compose.json`'s own `api` block, not the app-level `api.ts`),
+called with `Homey.api('GET', '/state', {}).then(onData)` in `onHomeyReady` before the realtime
+subscription's first push can arrive - otherwise the widget sits on its empty initial `render({})`
+for up to a full 10s broadcast-interval on every dashboard load. Modeled on
+`family.bothe.dexcom`'s `glucose-dashboard` widget, which uses the same widget-scoped-`api.js` +
+`widget.compose.json`-declared-`api` pattern. **Confirmed working on-device**: `homey app run`
+shows `[widget-api] getState hit` on widget load. `test/widget-preview.html` cannot exercise this
+transport (no `Homey` stub, so `onHomeyReady` never runs there) - it only covers the render path.
+
 Almost every color/spacing/typography/border-radius value in the widget is a bare Homey CSS
 variable or `.homey-*` class (`--homey-su-*`, `--homey-color-*`, `--homey-text-color*`,
 `--homey-border-radius-*`, `--homey-icon-size-*`, `.homey-widget`, `.homey-text-*`) with **no
@@ -298,7 +311,8 @@ to reach one log line.
 `SetChargingProfile` behaviour at exactly 6A (as opposed to 0A, confirmed below), and a live schedule
 window actually *starting* a charge from cold (`Preparing` → accepted `RemoteStartTransaction` →
 `StartTransaction`) — plausibly untestable on this charger at all, see below. Confirmed on-device:
-OCPP port bind (`:9000`), charger connect/bind, SolarFeed discovery, realtime widget,
+OCPP port bind (`:9000`), charger connect/bind, SolarFeed discovery, realtime widget, the widget's
+`getState` pull endpoint (Widget section above - `homey app run` shows `[widget-api] getState hit`),
 **`TxDefaultProfile` writes (no transaction id known) are genuinely obeyed** - a real Wallbox with no
 known transaction id went `Charging` → `SuspendedEVSE` → `0A` within ~1.2s of a `limit: 0`
 `TxDefaultProfile` write being accepted, so OCPP profile precedence was not the blocker it might have

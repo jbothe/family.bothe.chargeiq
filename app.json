@@ -843,6 +843,12 @@
       },
       "height": 218,
       "settings": [],
+      "api": {
+        "getState": {
+          "method": "GET",
+          "path": "/state"
+        }
+      },
       "id": "power-flow"
     }
   },

@@ -1,5 +1,8 @@
 {
   "name": { "en": "Power Flow" },
   "height": 218,
-  "settings": []
+  "settings": [],
+  "api": {
+    "getState": { "method": "GET", "path": "/state" }
+  }
 }

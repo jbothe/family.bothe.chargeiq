@@ -22,11 +22,11 @@ function loadPF(): Record<string, (...args: unknown[]) => unknown> {
 
 const PF = loadPF();
 
-test('fmtW formats W / kW, always stripping a trailing .0', () => {
+test('fmtW formats W / kW, always keeping exactly one decimal place on kW', () => {
   assert.equal(PF.fmtW(0), '0 W');
   assert.equal(PF.fmtW(850), '850 W');
   assert.equal(PF.fmtW(2300), '2.3 kW');
-  assert.equal(PF.fmtW(14000), '14 kW');
+  assert.equal(PF.fmtW(14000), '14.0 kW');
   assert.equal(PF.fmtW(13800), '13.8 kW');
   assert.equal(PF.fmtW(null), '–');
 });

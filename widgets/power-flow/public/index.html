@@ -190,11 +190,11 @@
        same coordinate space), so retune them as a pair if either changes. */
     .mode-row { display: flex; align-items: center; gap: var(--homey-su-1); height: 24px;
                 position: relative; top: -3.5px; }
-    /* mode-icon nudged 1px further down than .mode-row's own align-items:center position -
-       a paint-only offset (position:relative, same technique as .mode-time's own top:1px
-       below), so it doesn't disturb .mode-time's level-with-.val-.unit relationship that
-       .mode-row's own shift (above) is tuned around. */
-    .mode-icon { width: var(--homey-icon-size-regular); height: var(--homey-icon-size-regular); color: var(--homey-text-color); align-self: center; position: relative; top: 1px; }
+    /* mode-icon sits exactly at .mode-row's own align-items:center position (no further paint
+       offset) - a paint-only nudge, same technique as .mode-time's own top:1px below, so it
+       doesn't disturb .mode-time's level-with-.val-.unit relationship that .mode-row's own
+       shift (above) is tuned around. */
+    .mode-icon { width: var(--homey-icon-size-regular); height: var(--homey-icon-size-regular); color: var(--homey-text-color); align-self: center; position: relative; top: 0; }
     .mode-icon svg { display: block; width: 100%; height: 100%; }
     .mode-icon:empty { display: none; }
     /* "→ 2:00pm" - the mode's next relevant transition (schedule window end while
@@ -218,14 +218,14 @@
        icon(s) and the amps text is a single flex `gap` on .chip itself (not per-icon
        margins) so it applies identically whether there's one child (a plain label) or three
        (bolt/amps/boost) with no extra rule needed either way. height:21.5px plus
-       position:relative top:2.75px together land the chip's pill (see ::before below) flush
-       with the top/bottom of the header row's number text - i.e. .val's large-font line, not
-       the smaller .unit line beneath it - confirmed via getBoundingClientRect (number line:
-       top 16/bottom 38; pill: top 16.5/bottom 38.5, aligned to within half a pixel).
-       align-items:center keeps the 14px/20px chip content vertically centered within the
-       taller box. */
+       position:relative top:1.75px together land the chip's pill (see ::before below) 1px
+       above the top/bottom of the header row's number text - i.e. .val's large-font line, not
+       the smaller .unit line beneath it (was flush at top:2.75px, confirmed via
+       getBoundingClientRect: number line top 16/bottom 38, pill top 16.5/bottom 38.5 - nudged
+       up 1px from there on request). align-items:center keeps the 14px/20px chip content
+       vertically centered within the taller box. */
     .chip { display: inline-flex; align-items: center; gap: 3px; height: 21.5px; white-space: nowrap;
-            text-transform: uppercase; padding: 0 var(--homey-su-1); position: relative; top: 2.75px; }
+            text-transform: uppercase; padding: 0 var(--homey-su-1); position: relative; top: 1.75px; }
     .chip:empty { display: none; }
     /* Bolt/boost glyphs inside the charging chip - sized off the same --homey-icon-size-small
        token as the (now-removed) standalone mode-row boost badge, so the icon reads at a
@@ -399,7 +399,7 @@
       fmtW: function (w) {
         if (w == null || isNaN(w)) return '–';
         var a = Math.abs(w);
-        if (a >= 1000) return (w / 1000).toFixed(1).replace(/\.0$/, '') + ' kW';
+        if (a >= 1000) return (w / 1000).toFixed(1) + ' kW';
         return Math.round(w) + ' W';
       },
       cap: function (s) { return s ? String(s).charAt(0).toUpperCase() + String(s).slice(1) : ''; },
@@ -731,7 +731,12 @@
     function onHomeyReady(Homey) {
       Homey.ready();
       render({});
-      // Live data is pushed from the app via realtime events (see startWidgetBroadcast).
+      // Immediate paint: pull current state once via the widget's own api.js
+      // (see CLAUDE.md's Widget section), rather than waiting on the next 10s
+      // realtime broadcast tick.
+      Homey.api('GET', '/state', {}).then(onData).catch(function () {});
+      // Ongoing updates are pushed from the app via realtime events (see
+      // startWidgetBroadcast).
       if (!readyListenerAttached) {
         readyListenerAttached = true;
         Homey.on('powerflow', onData);
