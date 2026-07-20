@@ -37,6 +37,22 @@
       --tile: color-mix(in srgb, var(--homey-text-color) 13%, var(--homey-background-color));
       --conn-static: color-mix(in srgb, var(--homey-text-color) 9%, var(--homey-background-color));
       --meter-track: color-mix(in srgb, var(--homey-text-color) 15%, transparent);
+      /* Icon/meter blue (Grid, idle House/EV/Solar, the battery and grid capacity meters) -
+         one shade lighter than Homey's own --homey-color-blue-600 default elsewhere (e.g.
+         .chip.ready), for a bit more pop against --tile's dark-ish neutral background. Both
+         the light default and the dark override below are still Homey's own semantic blue
+         tokens, not hand-picked hex - only the *shade number* is bespoke, so this still tracks
+         any future change to Homey's actual palette. Unlike --tile/--conn-static/--meter-track
+         above, there's no Homey-provided variable this can derive from to get a brighter
+         dark-mode shade for free, so this is the one color in the file that falls back to
+         @media (prefers-color-scheme: dark) below - with the same caveat the top-of-file
+         comment already gives for that media query: it tracks the OS theme, not necessarily
+         Homey's own configured theme, so it can show the wrong shade in the edge case where
+         the two are forced apart. */
+      --icon-blue: var(--homey-color-blue-500);
+    }
+    @media (prefers-color-scheme: dark) {
+      :root { --icon-blue: var(--homey-color-blue-400); }
     }
 
     * { box-sizing: border-box; }
@@ -65,26 +81,25 @@
        value text in a shrink-wrapped flex group — otherwise the icon shifts sideways every
        time the value's digit count changes width. Text is anchored to the same fixed point
        and grows outward (away from center), so it never pushes the icon either. */
-    .headrow { position: relative; height: 78px; }
+    .headrow { position: relative; height: 82px; }
     .hicon { display: flex; flex-direction: column; align-items: center; gap: var(--homey-su-1);
              position: absolute; top: 0; }
     .hcol.solar .hicon { left: 25%; transform: translateX(-50%); }
     .hcol.ev .hicon { left: 75%; transform: translateX(-50%); }
-    /* top:0 (not a translateY(-50%) center) plus an explicit height matching .tile's own
-       44px, with justify-content:center centering the 2-line content block within that
-       band - not a translateY trick, so it holds regardless of gap. Both .htext and
-       .mode-stack use the same top/height/gap, so their content centers identically and
-       each line lines up with its counterpart in the other stack (.lbl with .chip, .val
-       with .mode-row) - not just the block as a whole. Both children still need an
-       explicit height (not line-height) for that gap math to be deterministic: mixing two
-       font-sizes on one line (e.g. .val's bold number next to its smaller .unit span)
-       makes the browser's own line-box taller than a specified line-height, so line-height
-       alone doesn't actually clamp the rendered height - confirmed via
-       getBoundingClientRect (a 20px line-height still measured 23px tall). */
-    .htext { display: flex; flex-direction: column; justify-content: center; gap: var(--homey-su-1);
-             height: 44px; position: absolute; top: 0; }
-    .hcol.solar .htext { right: calc(75% + 30px); align-items: flex-end; }
-    .hcol.ev .htext { left: calc(75% + 30px); align-items: flex-start; }
+    /* top:2px (not a translateY(-50%) center) centers the two-line number+unit block
+       against its 48px tile - .val's own stacked height (44px, see .htext .val below)
+       starts 2px below the tile's top edge and so ends 2px above its bottom edge too,
+       confirmed via getBoundingClientRect (tile 16-64, block 18-62 once shifted, both
+       centered on y=40). Still anchored in the same coordinate space as .hicon and
+       .mode-stack (all position:absolute within .headrow) so the value's number line and
+       the EV chip/mode-row can each be tuned against their counterpart on the other side
+       of the icon (see .htext .val and .chip/.mode-row below) - .mode-stack carries the
+       identical +2px so .mode-time keeps landing on .val .unit's line (see .mode-stack
+       below). height:auto - .val is .htext's only child now that the Solar/EV name labels
+       are gone, so there's no second line to reserve room for. */
+    .htext { display: flex; flex-direction: column; position: absolute; top: 2px; }
+    .hcol.solar .htext { right: calc(75% + 32px); align-items: flex-end; }
+    .hcol.ev .htext { left: calc(75% + 32px); align-items: flex-start; }
 
     /* position:relative (no z-index needed) lifts tiles and the bus into the positioned
        paint layer, so they're always drawn over the plain in-flow connectors — letting a
@@ -92,10 +107,19 @@
        for a seamless bleed instead of a visible gap. overflow:hidden clips the capacity
        .meter strip (see below) to the tile's own rounded corners, so it bleeds flush to the
        edge without needing to duplicate the radius on the strip itself. */
-    .tile { width: 44px; height: 44px; border-radius: var(--homey-border-radius-default);
+    .tile { width: 48px; height: 48px; border-radius: var(--homey-border-radius-default);
             flex: 0 0 auto; position: relative;
             display: grid; place-items: center; background: var(--tile); overflow: hidden; }
     .tile svg { display: block; }
+    /* Nudges the icon glyph off-center within its 48px tile, away from the capacity-meter
+       strip painted flush to one edge (see .meter above) - centered placement left only ~1px
+       of clearance between the icon and the meter (6px place-items:center margin minus the
+       meter's own 5px height), reading as touching. .icon-up is for the header row (EV/Solar,
+       meter on the bottom edge - see PF.meterHtml calls in render()); .icon-down is for the
+       device row (Grid/Battery, meter on the top edge). House has no meter of its own, so it's
+       left plain .tile with no nudge - there's no edge to clear it away from. */
+    .tile.icon-up svg { transform: translateY(-2px); }
+    .tile.icon-down svg { transform: translateY(2px); }
 
     /* Capacity meter: a full-bleed strip flush to the tile edge nearest its connector
        (bottom for EV/Solar in the header row, top for Grid/Battery in the device row -
@@ -121,95 +145,103 @@
     .conn.active.dir-up { animation-name: flowUp; animation-timing-function: linear; animation-iteration-count: infinite; }
 
     /* align-items:baseline (not center) so the smaller .unit span sits on the same text
-       baseline as the number, not vertically centered against it - the explicit height
-       still keeps the box itself deterministic (see .htext comment). No CSS `gap` here -
-       the number-to-unit space is a literal character inside .unit (see PF.valHtml()), so it
-       renders at the unit's own smaller font-size instead of a fixed pixel gap. Homey's docs
-       pair --homey-font-size-large with --homey-line-height-large (28px), but that's not
-       reachable here: .htext is a fixed-44px flex column, so a stated height of 28px (which
-       would push lbl+gap+val to 48px) just gets shrunk back down by the browser's default
-       flex-shrink - and per the .htext comment, mixed font-sizes on this line (the number
-       plus .unit's smaller one) already make a plain line-height unreliable as a height clamp
-       even before that. 24px is the actual measured floor (confirmed via
-       getBoundingClientRect, same method as the .htext comment) - set explicitly, matching
-       that constraint instead of the unreachable spec value. */
+       baseline as the number, not vertically centered against it. No CSS `gap` here - the
+       number-to-unit space is a literal character inside .unit (see PF.valHtml()), so it
+       renders at the unit's own smaller font-size instead of a fixed pixel gap. 24px matches
+       the measured floor for this font pairing (confirmed via getBoundingClientRect - a 20px
+       line-height still measured 23px tall, since mixing two font-sizes on one line makes the
+       browser's own line-box taller than a specified line-height). This is the tile row's
+       (Grid/Battery/House) single-line layout; the header row (Solar/EV) overrides to a
+       stacked two-line layout instead - see .htext .val below. */
     .val { display: flex; align-items: baseline; height: 24px; font-variant-numeric: tabular-nums;
            font-size: var(--homey-font-size-large); font-weight: var(--homey-font-weight-medium); }
     .val .unit { color: var(--homey-text-color-light); } /* de-emphasized so the number reads first; size/weight via .homey-text-small-light */
-    /* Explicit height (not line-height/padding) gives .lbl the same rendered height as
-       .chip, so the two align by center - see .mode-stack and the .htext comment above on
-       why this can't just be line-height. Font-size/weight via .homey-text-small-light on the element. */
-    .lbl { display: flex; align-items: center; height: 16px; color: var(--homey-text-color-light); text-transform: uppercase; }
+    /* Header row only: number and unit stacked on separate lines instead of side-by-side -
+       there's no longer a name label above the value (removed) to justify keeping the row
+       compact, and the stacked form reads more clearly at this icon size. height:auto (not
+       .val's own 24px) since the pair needs more vertical room; align-items:inherit picks up
+       .htext's flex-end/flex-start per column so the block still hugs the icon's near edge. */
+    .htext .val { flex-direction: column; align-items: inherit; height: auto; gap: 0; line-height: 1.15; }
+    .htext .val .unit { margin-top: 1px; }
 
     .tile-wrap { position: relative; }
 
-    /* EV chip + mode icon/shorthand status, stacked to the left of the EV icon (chip on
-       top, icon+time beneath - mirrors .htext's label-above-value order). Same
-       top/height/gap as .htext (see there) so the chip lines up with the label on the
-       other side, and the icon+time row lines up with the power value, regardless of the
-       chip's content (READY / UNPLUGGED / CHARGING <amps>A - always 16px tall, see .chip). */
-    .mode-stack { position: absolute; right: 100%; top: 0; margin-right: var(--homey-su-2); height: 44px;
-                  display: flex; flex-direction: column; justify-content: center;
-                  align-items: flex-end; gap: var(--homey-su-1); }
-    /* align-items:center (not baseline) - mode-icon/boost-icon are SVGs with no text baseline
-       of their own, so under align-items:baseline they'd default to their bottom edge as their
-       baseline, sitting them too high (a 16px/14px icon anchored at the text's baseline extends
-       well above its cap-height, unlike a glyph); center keeps icons and .mode-time mutually
-       level with each other, which is the relationship that actually matters within this row.
-       Height matches .val's own height (24px, see there) so .htext/.mode-stack's shared
-       lbl+gap+val / chip+gap+mode-row sums stay equal - otherwise centering each stack
-       independently within the same 44px band would land .val and .mode-row at different
-       offsets instead of level with each other. That still leaves the row as a *group* sitting
-       a few px higher than .val's own baseline (pulled down by .val's large-font number - a
-       small font's natural centered position in a fixed-height row isn't the same spot a larger
-       font's baseline lands it at), so the whole row is nudged down via position:relative below
-       - see there for why that, and not a mechanism internal to the row, is what's shifted. */
+    /* EV chip + mode icon/status text, stacked to the left of the EV icon (chip on top,
+       icon+time beneath). Anchored in the same top:0 coordinate space as .hicon/.htext (see
+       .htext comment) so .chip and .mode-row can each be tuned against their own counterpart
+       on the value side independently (.chip against the number line of .val, .mode-row
+       against .val .unit - see .chip and .mode-row below), rather than as one rigid block.
+       top:1px (the same +2px shift as .htext's own top, off its old top:-1px) and
+       height:auto - the two children are positioned independently now, so there's no
+       shared box to center them within, but the block as a whole still needs to track
+       .htext's shift so .mode-time keeps landing on .val .unit's line (see .htext above)
+       instead of drifting apart from it. */
+    .mode-stack { position: absolute; right: 100%; top: 1px; margin-right: var(--homey-su-2);
+                  display: flex; flex-direction: column; align-items: flex-end; gap: var(--homey-su-1); }
+    /* align-items:center (not baseline) - mode-icon is an SVG with no text baseline of its
+       own, so under align-items:baseline it would default to its bottom edge as its baseline,
+       sitting it too high (a 16px icon anchored at the text's baseline extends well above its
+       cap-height, unlike a glyph); center keeps the icon and .mode-time mutually level with
+       each other, which is the relationship that actually matters within this row.
+       position:relative + top:-3.5px pulls the row back up by exactly the extra flow height
+       .chip's taller box (see .chip below) adds below it, so .mode-time keeps landing on the
+       same line box as .val .unit regardless of .chip's own height - both were measured
+       together via getBoundingClientRect (modeTime and .val .unit: top 40/bottom 60 in the
+       same coordinate space), so retune them as a pair if either changes. */
     .mode-row { display: flex; align-items: center; gap: var(--homey-su-1); height: 24px;
-                position: relative; top: 2px; }
-    /* Shifts the icon+text+boost group as a unit (position:relative, not margin-top - margin
-       would grow .mode-stack's flex content past its fixed 44px height, and justify-content:
-       center would then re-center that taller block, quietly pulling .chip away from its own
-       still-unshifted counterpart .lbl on the other side of the header row) down to read level
-       with .val .unit, without disturbing the icons' and .mode-time's alignment with each
-       other (see .mode-row above) - 2px is empirical (measured via getBoundingClientRect, then
-       nudged 1px up off that measurement per visual review, not derived from a font metric),
-       because the actual gap comes from two different fonts each finding their own "centered"
-       position in an equal-height row, which has no closed-form relationship to nudge by
-       instead. Real Homey fonts aren't available outside `homey app run` (see homey-mock.css's
-       own caveat), so this may need re-tuning once verified on-device. */
-    .mode-icon { width: var(--homey-icon-size-regular); height: var(--homey-icon-size-regular); color: var(--homey-text-color); align-self: center; }
+                position: relative; top: -3.5px; }
+    /* mode-icon nudged 1px further down than .mode-row's own align-items:center position -
+       a paint-only offset (position:relative, same technique as .mode-time's own top:1px
+       below), so it doesn't disturb .mode-time's level-with-.val-.unit relationship that
+       .mode-row's own shift (above) is tuned around. */
+    .mode-icon { width: var(--homey-icon-size-regular); height: var(--homey-icon-size-regular); color: var(--homey-text-color); align-self: center; position: relative; top: 1px; }
     .mode-icon svg { display: block; width: 100%; height: 100%; }
     .mode-icon:empty { display: none; }
     /* "→ 2:00pm" - the mode's next relevant transition (schedule window end while
        Scheduled, else the next window start). Empty (no schedule configured) collapses
        to zero width on its own, same as .mode-icon:empty. Styled to match .val .unit
-       (small/muted) rather than .val itself - it's a secondary hint, not a metric.
-       position:relative + top:1px nudges its own paint position only - unlike .mode-row's
-       shift (which moves the icon/time/boost-icon group as one unit, see there), this doesn't
-       consume layout space, so .mode-icon/.boost-icon's align-items:center position in the row
-       is untouched. */
+       (small/muted) rather than .val itself - it's a secondary hint, not a metric. Same
+       font-size/line-height as .val .unit (both 14px/20px via homey-text-small-light), so
+       combined with .mode-row's own top:-3.5px above, the two land on the identical line box
+       and read as baseline-aligned across the row. position:relative + top:1px nudges its own
+       paint position only - unlike .mode-row's shift (which moves the icon/time group as one
+       unit, see there), this doesn't consume layout space, so .mode-icon's align-items:center
+       position in the row is untouched. Real Homey fonts aren't available outside `homey app
+       run` (see homey-mock.css's own caveat), so all of the above may need re-tuning once
+       verified on-device. */
     .mode-time { white-space: nowrap; color: var(--homey-text-color-light); position: relative; top: 1px; } /* size/weight via .homey-text-small-light */
-    .boost-icon { width: var(--homey-icon-size-small); height: var(--homey-icon-size-small); color: var(--homey-color-orange); align-self: center; }
-    .boost-icon svg { display: block; width: 100%; height: 100%; }
-    .boost-icon:empty { display: none; }
 
-    /* EV state chip - always a single text label (READY / UNPLUGGED / CHARGING <amps>A).
-       Explicit height (not line-height/padding) matches .lbl's for center-alignment - see
-       .mode-stack. */
-    /* Font-size/weight via .homey-text-small on the element (see markup / chipEl.className below). */
-    .chip { display: inline-flex; align-items: center; height: 16px; white-space: nowrap;
-            text-transform: uppercase; padding: 0 var(--homey-su-1); position: relative; }
+    /* EV state chip - READY / UNPLUGGED render as a plain text label; CHARGING instead
+       renders as an icon row (bolt, live amps, and - only while a schedule boost is
+       actively raising current right now, see PF.showBoost - a trailing boost badge), built
+       in render() rather than a static label since it carries live data. gap between the
+       icon(s) and the amps text is a single flex `gap` on .chip itself (not per-icon
+       margins) so it applies identically whether there's one child (a plain label) or three
+       (bolt/amps/boost) with no extra rule needed either way. height:21.5px plus
+       position:relative top:2.75px together land the chip's pill (see ::before below) flush
+       with the top/bottom of the header row's number text - i.e. .val's large-font line, not
+       the smaller .unit line beneath it - confirmed via getBoundingClientRect (number line:
+       top 16/bottom 38; pill: top 16.5/bottom 38.5, aligned to within half a pixel).
+       align-items:center keeps the 14px/20px chip content vertically centered within the
+       taller box. */
+    .chip { display: inline-flex; align-items: center; gap: 3px; height: 21.5px; white-space: nowrap;
+            text-transform: uppercase; padding: 0 var(--homey-su-1); position: relative; top: 2.75px; }
     .chip:empty { display: none; }
+    /* Bolt/boost glyphs inside the charging chip - sized off the same --homey-icon-size-small
+       token as the (now-removed) standalone mode-row boost badge, so the icon reads at a
+       consistent size wherever it appears. currentColor - the bolt inherits .chip.charging's
+       green, and needs no override; the boost badge deliberately does (see .chip-boost) so it
+       still stands out as its own distinct signal now that it lives inside the colored pill. */
+    .chip-icon { width: var(--homey-icon-size-small); height: var(--homey-icon-size-small); display: inline-flex; flex: 0 0 auto; }
+    .chip-icon svg { display: block; width: 100%; height: 100%; }
+    .chip-boost { color: var(--homey-color-orange); }
     /* text-transform:uppercase text has no descenders, but align-items:center still centers the
        *font's* full ascent/descent line box, not the glyph ink - the unused descender reserve is
        bigger than the unused ascent-to-cap-height reserve for most fonts, so the ink sits high
        within the chip's own layout box. The layout box itself is deliberately NOT renudged to
-       fix this: .lbl has the identical uppercase/centered setup and the same unaddressed
-       asymmetry, so nudging .chip's *text* (tried at both 2px and 1px) made it visibly sit lower
-       than .lbl on the other side of the row. Instead the background pill is painted by
-       ::before, detached from .chip's own box, and nudged up to re-center the *visible pill* on
-       the ink without moving the text (and therefore without touching the .lbl alignment above)
-       - the asymmetry was only ever a paint-layer problem. The nudge amount is font-dependent
+       fix this - the background pill is painted by ::before, detached from .chip's own box,
+       and nudged up to re-center the *visible pill* on the ink without moving the text - the
+       asymmetry was only ever a paint-layer problem. The nudge amount is font-dependent
        and was retuned from ~0.25px to 1.25px after a real-device (Homey app, not this repo's
        dev-only preview harness) screenshot showed the on-device font's descent reserve is much
        larger relative to its ascent than the desktop system font this was first tuned against -
@@ -231,22 +263,40 @@
        reflects live grid state (see PF.busState). */
     .bus { height: 6px; border-radius: var(--homey-border-radius-small); margin: -6px 2px -6px; position: relative;
            transition: background .4s ease; }
-    .bus.bus-import { background: linear-gradient(90deg, var(--bus-import-a), var(--bus-import-b)); }
-    .bus.bus-export { background: linear-gradient(90deg, var(--bus-export-a), var(--bus-export-b)); }
-    .bus.bus-neutral { background: linear-gradient(90deg, var(--bus-neutral-a), var(--bus-neutral-b)); }
+    .bus.bus-import { background-image: linear-gradient(90deg, var(--bus-import-a), var(--bus-import-b)); }
+    .bus.bus-export { background-image: linear-gradient(90deg, var(--bus-export-a), var(--bus-export-b)); }
+    .bus.bus-neutral { background-image: linear-gradient(90deg, var(--bus-neutral-a), var(--bus-neutral-b)); }
+    /* Left-to-right "flow": while .flowing (set in render() whenever any connector's flow
+       magnitude is above the same 10W deadband PF.flow() itself uses - the same gate the
+       connectors' own dash animation uses via f.dir, see .conn.active above), the gradient
+       itself scrolls, rather than a separate pattern/overlay animating on top of it. Swaps to
+       a *repeating* a-b-a gradient (vs. the plain two-stop a-b above) specifically because
+       `repeating-linear-gradient` tiles infinitely on its own past the element's edge, so
+       animating its position wraps back to an identical frame with no visible seam or jump at
+       loop restart - a plain (non-repeating) gradient has no next tile to scroll in from. The
+       resting/non-flowing look above intentionally stays the plain two-stop version instead of
+       also using the repeating one at rest, since a static a-b-a would show a symmetric
+       b-in-the-middle look rather than the original flat a-to-b sweep.
+       Stops are in *pixels* (a 0 / b 16px / a 32px), not percent, and PERIOD_PX below must
+       match that 32px span - percentage stops would make the pattern's one tile exactly as
+       wide as the bar itself (bg-size defaults to the element's own box), and animating
+       background-position by a percentage is a no-op whenever background-size equals the
+       container size (offset = percent * (bg-size - container-size) = percent * 0) - found by
+       the first version of this rendering as CSS with the class/animation-name/computed
+       gradient all applying correctly, yet nothing visibly moved. Pixel units sidestep that:
+       the tile repeats every 32 real px regardless of the bar's own width, so a handful of
+       soft a-b-a waves are visible flowing across it at once (still a smooth gradient with no
+       hard edges, not the dashed/blocky look this replaced). */
+    .bus.flowing.bus-import { background-image: repeating-linear-gradient(90deg, var(--bus-import-a) 0, var(--bus-import-b) 16px, var(--bus-import-a) 32px); }
+    .bus.flowing.bus-export { background-image: repeating-linear-gradient(90deg, var(--bus-export-a) 0, var(--bus-export-b) 16px, var(--bus-export-a) 32px); }
+    .bus.flowing.bus-neutral { background-image: repeating-linear-gradient(90deg, var(--bus-neutral-a) 0, var(--bus-neutral-b) 16px, var(--bus-neutral-a) 32px); }
+    .bus.flowing { animation: busFlow 1.6s linear infinite; }
+    @keyframes busFlow { from { background-position-x: 0; } to { background-position-x: 32px; } }
 
     /* Device tile row: Grid / Battery / House */
     .tilerow { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--homey-su-2); }
     .tcol { display: flex; flex-direction: column; align-items: center; gap: var(--homey-su-1); }
-    /* Value-to-label gap kept separate from the icon-to-value gap above (.tcol's own gap) so
-       it can be tuned independently - bottom row only (.lbl/.val themselves are shared with
-       the header row's .htext, so they stay untouched). gap:0 here, not su-1 - .val's own
-       box (baseline-aligned, sized for a large font with no descenders in play) already
-       reserves a few px below the digits, and .lbl's line box reserves ~1-2px above its
-       capital letters even at gap:0 (confirmed via Range.getBoundingClientRect on the
-       glyphs, not just the boxes) - an explicit gap on top of both left visibly more
-       whitespace here than the icon-to-value gap above it. */
-    .tcol-text { display: flex; flex-direction: column; align-items: center; gap: 0; margin-top: var(--homey-su-1); }
+    .tcol-text { display: flex; flex-direction: column; align-items: center; margin-top: var(--homey-su-1); }
   </style>
 </head>
 <body class="homey-text-regular">
@@ -254,28 +304,25 @@
     <div class="headrow">
       <div class="hcol solar">
         <div class="hicon">
-          <div class="tile" id="solar-tile"></div>
+          <div class="tile icon-up" id="solar-tile"></div>
           <div class="conn" id="solar-conn"></div>
         </div>
         <div class="htext">
-          <div class="lbl homey-text-small-light">Solar</div>
           <div class="val" id="solar-val">–</div>
         </div>
       </div>
       <div class="hcol ev">
         <div class="htext">
-          <div class="lbl homey-text-small-light">EV</div>
           <div class="val" id="ev-val">–</div>
         </div>
         <div class="hicon">
           <div class="tile-wrap">
-            <div class="tile" id="ev-tile"></div>
+            <div class="tile icon-up" id="ev-tile"></div>
             <div class="mode-stack">
               <div class="chip" id="ev-chip"></div>
               <div class="mode-row">
                 <div class="mode-icon" id="mode-icon"></div>
                 <div class="mode-time homey-text-small-light" id="mode-time"></div>
-                <div class="boost-icon" id="mode-boost"></div>
               </div>
             </div>
           </div>
@@ -289,18 +336,16 @@
     <div class="tilerow">
       <div class="tcol homey-text-align-center">
         <div class="conn" id="grid-conn"></div>
-        <div class="tile" id="grid-tile"></div>
+        <div class="tile icon-down" id="grid-tile"></div>
         <div class="tcol-text">
           <div class="val" id="grid-val">–</div>
-          <div class="lbl homey-text-small-light">Grid</div>
         </div>
       </div>
       <div class="tcol homey-text-align-center">
         <div class="conn" id="battery-conn"></div>
-        <div class="tile" id="battery-tile"></div>
+        <div class="tile icon-down" id="battery-tile"></div>
         <div class="tcol-text">
           <div class="val" id="battery-val">–</div>
-          <div class="lbl homey-text-small-light">Battery</div>
         </div>
       </div>
       <div class="tcol homey-text-align-center">
@@ -308,7 +353,6 @@
         <div class="tile" id="house-tile"></div>
         <div class="tcol-text">
           <div class="val" id="house-val">–</div>
-          <div class="lbl homey-text-small-light">House</div>
         </div>
       </div>
     </div>
@@ -316,12 +360,18 @@
 
   <script type="text/javascript">
     var ICONS = {
-      ev: '<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 16v-3.5a1 1 0 0 1 .4-.8l2.2-1.7a2 2 0 0 1 1.2-.4h8.4a2 2 0 0 1 1.2.4l2.2 1.7a1 1 0 0 1 .4.8V16"/><path d="M3 16h18"/><path d="M6 10.5 7.5 6.5A1.5 1.5 0 0 1 9 5.5h6a1.5 1.5 0 0 1 1.5 1l1.5 4"/><circle cx="7.5" cy="16.3" r="1.6"/><circle cx="16.5" cy="16.3" r="1.6"/></svg>',
-      solar: '<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="12" rx="1.5"/><path d="M3 8h18M3 12h18M9 4v12M15 4v12"/><path d="M9 20l1.5-4M15 20l-1.5-4"/></svg>',
-      grid: '<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l7 20M12 2L5 22M9 22l1.5-6h3L15 22"/><path d="M7 14h10M8.3 8h7.4"/></svg>',
-      house: '<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11l9-7 9 7"/><path d="M5 9.5V21h14V9.5"/></svg>',
-      // Small "boost active" badge, shown next to the clock icon in scheduled mode.
-      boost: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M7 15l5-5 5 5"/><path d="M7 9l5-5 5 5"/></svg>',
+      ev: '<svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 16v-3.5a1 1 0 0 1 .4-.8l2.2-1.7a2 2 0 0 1 1.2-.4h8.4a2 2 0 0 1 1.2.4l2.2 1.7a1 1 0 0 1 .4.8V16"/><path d="M3 16h18"/><path d="M6 10.5 7.5 6.5A1.5 1.5 0 0 1 9 5.5h6a1.5 1.5 0 0 1 1.5 1l1.5 4"/><circle cx="7.5" cy="16.3" r="1.6"/><circle cx="16.5" cy="16.3" r="1.6"/></svg>',
+      solar: '<svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="12" rx="1.5"/><path d="M3 8h18M3 12h18M9 4v12M15 4v12"/><path d="M9 20l1.5-4M15 20l-1.5-4"/></svg>',
+      grid: '<svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l7 20M12 2L5 22M9 22l1.5-6h3L15 22"/><path d="M7 14h10M8.3 8h7.4"/></svg>',
+      house: '<svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11l9-7 9 7"/><path d="M5 9.5V21h14V9.5"/></svg>',
+      // "Boost active" badge - trails the amps value in the charging chip while a schedule
+      // window is actively raising current above its floor (see PF.showBoost). Three stacked
+      // chevrons (not two) to read more clearly as a "turbo"/fast-forward badge at this size.
+      boost: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M7 20l5-5 5 5"/><path d="M7 14l5-5 5 5"/><path d="M7 8l5-5 5 5"/></svg>',
+      // Charging-state glyph, leads the amps value in the EV chip while actively charging
+      // (replaces the old plain "CHARGING" text label). Filled, not stroked, like the boost
+      // badge above it reads better than a stroke outline at this size.
+      bolt: '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M13 2 3 14h7l-1 8 10-12h-7l1-8z"/></svg>',
     };
     // Mode icons: which derived mode is currently driving the charger, and (for solar)
     // whether there's currently enough excess to actually charge on it.
@@ -333,15 +383,15 @@
       idle: '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><line x1="9.5" y1="9" x2="9.5" y2="15"/><line x1="14.5" y1="9" x2="14.5" y2="15"/></svg>',
     };
     function batterySvg(v) {
-      return '<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="' + v.color + '" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">' +
+      return '<svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="' + v.color + '" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">' +
         '<rect x="7" y="4" width="10" height="17" rx="2.5"/>' +
         '<rect x="10.5" y="1.5" width="3" height="2.5" rx="1" fill="' + v.color + '" stroke="none"/>' +
         '<rect x="8.5" y="' + v.fillY + '" width="7" height="' + v.fillHeight + '" rx="1" fill="' + v.color + '" stroke="none"/>' +
         '</svg>';
     }
 
-    // House shares Grid's blue-600, and EV/Solar fall back to that same blue-600 when idle.
-    var ACCENT = { ev: 'var(--homey-color-green)', solar: 'var(--homey-color-green)', grid: 'var(--homey-color-blue-600)', house: 'var(--homey-color-blue-600)', inactive: 'var(--homey-color-blue-600)' };
+    // House shares Grid's icon blue, and EV/Solar fall back to that same blue when idle.
+    var ACCENT = { ev: 'var(--homey-color-green)', solar: 'var(--homey-color-green)', grid: 'var(--icon-blue)', house: 'var(--icon-blue)', inactive: 'var(--icon-blue)' };
 
     // === POWERFLOW-LOGIC-START (inlined so the widget is self-contained; the test
     // suite extracts this exact block, so keep it dependency-free) ===
@@ -398,8 +448,9 @@
       },
       // EV status chip, from the same evcharger_charging_state enum Homey's own UI uses
       // (computed once in ChargeController.toChargingState, just passed through here).
-      // Charging carries no label - the render layer fills it with a "CHARGING" label +
-      // live amps (via chargeAmps) instead of a static one.
+      // Charging carries no label - the render layer fills it with a bolt icon + live amps
+      // (via chargeAmps), plus a trailing boost badge when showBoost() is true, instead of
+      // a static label.
       evChip: function (s) {
         s = s || {};
         var c = s.charger || {};
@@ -474,12 +525,12 @@
           var w = s.batteryW || 0;
           var peak = w >= 0 ? lim.batteryChargePeakW : lim.batteryDischargePeakW;
           if (!(peak > 0)) return null;
-          return { pct: Math.max(0, Math.min(1, Math.abs(w) / peak)), color: 'var(--homey-color-blue-600)' };
+          return { pct: Math.max(0, Math.min(1, Math.abs(w) / peak)), color: 'var(--icon-blue)' };
         }
         if (kind === 'grid') {
           if (!(lim.gridMaxW > 0)) return null;
           var pct = Math.max(0, Math.min(1, Math.abs(s.gridW || 0) / lim.gridMaxW));
-          return { pct: pct, color: pct >= 0.95 ? 'var(--homey-text-color-danger)' : 'var(--homey-color-blue-600)' };
+          return { pct: pct, color: pct >= 0.95 ? 'var(--homey-text-color-danger)' : 'var(--icon-blue)' };
         }
         return null;
       },
@@ -557,7 +608,7 @@
       // both ends identically, so tightening/loosening it never favors one end over the other.
       meterHtml: function (m, edge) {
         if (!m) return '';
-        var TILE_PX = 44; // must match .tile's width
+        var TILE_PX = 48; // must match .tile's width
         var EDGE_PX = 5;
         var w;
         if (m.pct <= 0) w = 0;
@@ -611,12 +662,17 @@
 
       var chip = PF.evChip(s);
       var chipEl = document.getElementById('ev-chip');
-      chipEl.textContent = chip ? (chip.cls === 'charging' ? 'CHARGING ' + Math.round(PF.chargeAmps(s)) + 'A' : chip.label) : '';
+      if (chip && chip.cls === 'charging') {
+        chipEl.innerHTML = '<span class="chip-icon">' + ICONS.bolt + '</span>'
+          + Math.round(PF.chargeAmps(s)) + 'A'
+          + (PF.showBoost(s) ? '<span class="chip-icon chip-boost">' + ICONS.boost + '</span>' : '');
+      } else {
+        chipEl.innerHTML = chip ? chip.label : '';
+      }
       chipEl.className = 'chip homey-text-small' + (chip ? ' ' + chip.cls : '');
 
       document.getElementById('mode-icon').innerHTML = MODE_ICONS[PF.modeIconKey(s)] || '';
       document.getElementById('mode-time').textContent = PF.modeStatusText(s);
-      document.getElementById('mode-boost').innerHTML = PF.showBoost(s) ? ICONS.boost : '';
 
       document.getElementById('ev-val').innerHTML = PF.valHtml(ev.mag);
       document.getElementById('solar-val').innerHTML = PF.valHtml(solar.mag);
@@ -627,7 +683,12 @@
       var bv = PF.batteryVisual(s.batterySoc);
       document.getElementById('battery-tile').innerHTML = batterySvg(bv) + PF.meterHtml(PF.meter('battery', s), 'top');
 
-      document.getElementById('bus').className = 'bus bus-' + PF.busState(s.gridW);
+      // "Flowing" (drives the bus's left-to-right animated gradient, see .bus.flowing) reuses each
+      // flow's own .dir - the same >10W/<-10W deadband already gating the connectors' own
+      // dash animation (see .conn.active) - rather than re-deriving it from raw magnitudes,
+      // so the bus only animates in exact lockstep with the connectors it's summarizing.
+      var flowing = !!(ev.dir || solar.dir || grid.dir || battery.dir || house.dir);
+      document.getElementById('bus').className = 'bus bus-' + PF.busState(s.gridW) + (flowing ? ' flowing' : '');
 
       // All connectors flow in the same blue regardless of tile — the tile's own accent
       // color (or, for Battery, its charge-tier color) stays on the icon itself. Dash-scroll
