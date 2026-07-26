@@ -51,6 +51,11 @@ test('valHtml: passes through unchanged when fmtW has no unit to split off (e.g.
   assert.equal(PF.valHtml(null), '–');
 });
 
+test('valHtml: stacked=true (header row) omits the separating &nbsp; - the unit already renders on its own line', () => {
+  assert.equal(PF.valHtml(850, true), '850<span class="unit homey-text-small-light">W</span>');
+  assert.equal(PF.valHtml(2300, true), '2.3<span class="unit homey-text-small-light">kW</span>');
+});
+
 test('flow: ev reads charger.powerW, 0 when no charger paired', () => {
   assert.deepEqual(PF.flow('ev', { charger: { available: true, powerW: 2100 } }), { mag: 2100, dir: 'up' });
   assert.deepEqual(PF.flow('ev', { charger: { available: true, powerW: 0 } }), { mag: 0, dir: null });

@@ -28,27 +28,32 @@
     :root {
       /* Bus gradient reflects live grid state: importing (drawing from the grid), exporting
          (feeding it), or neutral (no meaningful grid flow). Same tones in both themes — these
-         are status colors, not surface colors. */
+         are status colors, not surface colors. Import (cross-hue red->amber) and neutral
+         (violet-500->violet-300, a 2-step lightness jump) both read as a clear gradient; export
+         originally used adjacent Tailwind steps (green-600->green-500) which are nearly the
+         same lightness, so the two colors barely showed against each other. Widened to
+         green-700->green-300 (a 4-step jump) for comparable contrast. */
       --bus-import-a: #ef4444; --bus-import-b: #f59e0b;
-      --bus-export-a: #16a34a; --bus-export-b: #22c55e;
+      --bus-export-a: #15803d; --bus-export-b: #86efac;
       --bus-neutral-a: #8b5cf6; --bus-neutral-b: #c4b5fd;
     }
     :root {
       --tile: color-mix(in srgb, var(--homey-text-color) 13%, var(--homey-background-color));
       --conn-static: color-mix(in srgb, var(--homey-text-color) 9%, var(--homey-background-color));
       --meter-track: color-mix(in srgb, var(--homey-text-color) 15%, transparent);
-      /* Icon/meter blue (Grid, idle House/EV/Solar, the battery and grid capacity meters) -
-         one shade lighter than Homey's own --homey-color-blue-600 default elsewhere (e.g.
-         .chip.ready), for a bit more pop against --tile's dark-ish neutral background. Both
-         the light default and the dark override below are still Homey's own semantic blue
-         tokens, not hand-picked hex - only the *shade number* is bespoke, so this still tracks
-         any future change to Homey's actual palette. Unlike --tile/--conn-static/--meter-track
-         above, there's no Homey-provided variable this can derive from to get a brighter
-         dark-mode shade for free, so this is the one color in the file that falls back to
-         @media (prefers-color-scheme: dark) below - with the same caveat the top-of-file
-         comment already gives for that media query: it tracks the OS theme, not necessarily
-         Homey's own configured theme, so it can show the wrong shade in the edge case where
-         the two are forced apart. */
+      /* Icon/meter blue (Grid, idle House/EV/Solar, the battery and grid capacity meters),
+         and now also the connectors' flow color and .chip.ready, so every blue-ish element
+         in the widget reads as the exact same blue - one shade lighter than Homey's own
+         --homey-color-blue-600 default, for a bit more pop against --tile's dark-ish
+         neutral background. Both the light default and the dark override below are still
+         Homey's own semantic blue tokens, not hand-picked hex - only the *shade number* is
+         bespoke, so this still tracks any future change to Homey's actual palette. Unlike
+         --tile/--conn-static/--meter-track above, there's no Homey-provided variable this
+         can derive from to get a brighter dark-mode shade for free, so this is the one color
+         in the file that falls back to @media (prefers-color-scheme: dark) below - with the
+         same caveat the top-of-file comment already gives for that media query: it tracks
+         the OS theme, not necessarily Homey's own configured theme, so it can show the
+         wrong shade in the edge case where the two are forced apart. */
       --icon-blue: var(--homey-color-blue-500);
     }
     @media (prefers-color-scheme: dark) {
@@ -162,7 +167,7 @@
        .val's own 24px) since the pair needs more vertical room; align-items:inherit picks up
        .htext's flex-end/flex-start per column so the block still hugs the icon's near edge. */
     .htext .val { flex-direction: column; align-items: inherit; height: auto; gap: 0; line-height: 1.15; }
-    .htext .val .unit { margin-top: 1px; }
+    .htext .val .unit { margin-top: 2px; }
 
     .tile-wrap { position: relative; }
 
@@ -189,7 +194,7 @@
        together via getBoundingClientRect (modeTime and .val .unit: top 40/bottom 60 in the
        same coordinate space), so retune them as a pair if either changes. */
     .mode-row { display: flex; align-items: center; gap: var(--homey-su-1); height: 24px;
-                position: relative; top: -3.5px; }
+                position: relative; top: -2.5px; }
     /* mode-icon sits exactly at .mode-row's own align-items:center position (no further paint
        offset) - a paint-only nudge, same technique as .mode-time's own top:1px below, so it
        doesn't disturb .mode-time's level-with-.val-.unit relationship that .mode-row's own
@@ -223,16 +228,22 @@
        the smaller .unit line beneath it (was flush at top:2.75px, confirmed via
        getBoundingClientRect: number line top 16/bottom 38, pill top 16.5/bottom 38.5 - nudged
        up 1px from there on request). align-items:center keeps the 14px/20px chip content
-       vertically centered within the taller box. */
+       vertically centered within the taller box. Horizontal padding is --homey-su-2 (8px, not
+       the tighter --homey-su-1/4px it started at) - the READY/UNPLUGGED text-only pills read
+       as too tight against the pill's own edges at su-1. */
     .chip { display: inline-flex; align-items: center; gap: 3px; height: 21.5px; white-space: nowrap;
-            text-transform: uppercase; padding: 0 var(--homey-su-1); position: relative; top: 1.75px; }
+            text-transform: uppercase; padding: 0 var(--homey-su-2); position: relative; top: 1.75px; }
     .chip:empty { display: none; }
     /* Bolt/boost glyphs inside the charging chip - sized off the same --homey-icon-size-small
        token as the (now-removed) standalone mode-row boost badge, so the icon reads at a
        consistent size wherever it appears. currentColor - the bolt inherits .chip.charging's
        green, and needs no override; the boost badge deliberately does (see .chip-boost) so it
-       still stands out as its own distinct signal now that it lives inside the colored pill. */
-    .chip-icon { width: var(--homey-icon-size-small); height: var(--homey-icon-size-small); display: inline-flex; flex: 0 0 auto; }
+       still stands out as its own distinct signal now that it lives inside the colored pill.
+       position:relative + top:-1px is a paint-only nudge (same technique as .mode-icon/
+       .mode-time elsewhere) that lifts just the icons 1px within the pill, independent of the
+       amps text next to them - .chip's own align-items:center still centers both before this
+       offset is applied, so the text's own position is untouched. */
+    .chip-icon { width: var(--homey-icon-size-small); height: var(--homey-icon-size-small); display: inline-flex; flex: 0 0 auto; position: relative; top: -1px; }
     .chip-icon svg { display: block; width: 100%; height: 100%; }
     .chip-boost { color: var(--homey-color-orange); }
     /* text-transform:uppercase text has no descenders, but align-items:center still centers the
@@ -255,8 +266,8 @@
     .chip::before { content: ''; position: absolute; left: 0; right: 0; top: -1.25px; bottom: 0.75px;
                      border-radius: var(--homey-border-radius-default); z-index: -1;
                      background: color-mix(in srgb, currentColor 18%, transparent); }
-    .chip.charging { color: var(--homey-color-green); }
-    .chip.ready { color: var(--homey-color-blue-600); }
+    .chip.charging { color: var(--homey-color-green-600); }
+    .chip.ready { color: var(--icon-blue); }
     .chip.unplugged { color: var(--homey-text-color-light); }
 
     /* Power bus: negative top/bottom margins pull it into both rows' connectors. Gradient
@@ -277,21 +288,37 @@
        resting/non-flowing look above intentionally stays the plain two-stop version instead of
        also using the repeating one at rest, since a static a-b-a would show a symmetric
        b-in-the-middle look rather than the original flat a-to-b sweep.
-       Stops are in *pixels* (a 0 / b 16px / a 32px), not percent, and PERIOD_PX below must
-       match that 32px span - percentage stops would make the pattern's one tile exactly as
-       wide as the bar itself (bg-size defaults to the element's own box), and animating
+       Stops are in *pixels* (a 0 / b 100px / a 200px), not percent, and the keyframes below
+       must match that 200px span - percentage stops would make the pattern's one tile exactly
+       as wide as the bar itself (bg-size defaults to the element's own box), and animating
        background-position by a percentage is a no-op whenever background-size equals the
        container size (offset = percent * (bg-size - container-size) = percent * 0) - found by
        the first version of this rendering as CSS with the class/animation-name/computed
        gradient all applying correctly, yet nothing visibly moved. Pixel units sidestep that:
-       the tile repeats every 32 real px regardless of the bar's own width, so a handful of
-       soft a-b-a waves are visible flowing across it at once (still a smooth gradient with no
-       hard edges, not the dashed/blocky look this replaced). */
-    .bus.flowing.bus-import { background-image: repeating-linear-gradient(90deg, var(--bus-import-a) 0, var(--bus-import-b) 16px, var(--bus-import-a) 32px); }
-    .bus.flowing.bus-export { background-image: repeating-linear-gradient(90deg, var(--bus-export-a) 0, var(--bus-export-b) 16px, var(--bus-export-a) 32px); }
-    .bus.flowing.bus-neutral { background-image: repeating-linear-gradient(90deg, var(--bus-neutral-a) 0, var(--bus-neutral-b) 16px, var(--bus-neutral-a) 32px); }
-    .bus.flowing { animation: busFlow 1.6s linear infinite; }
-    @keyframes busFlow { from { background-position-x: 0; } to { background-position-x: 32px; } }
+       the tile repeats every 200 real px regardless of the bar's own width, landing roughly
+       1-2 soft a-b-a waves across the bar at once - widened in two rounds on request, first
+       from an initial 32px period (~10 waves, read as busy/noisy) to 140px (2-3 waves), then
+       again here to 200px.
+       background-size:200px 100% (matching that same period) is required, not cosmetic - the
+       bar's own width (e.g. ~344px in this repo's own preview harness) is essentially never an
+       exact multiple of the period, and without an explicit size, `background-repeat`'s default
+       tiling paints independent bar-width-sized copies of the gradient side by side, each
+       restarting its OWN local a-b-a cycle at x=0 - so every copy boundary (every ~344px, not
+       every 200px) is a hard seam back to color a, and animating position slides that seam
+       into view partway across the bar, reading as "the gradient hard-cuts and resets to the
+       start around the middle" (confirmed as the actual on-device symptom of the earlier 140px
+       version, not merely a theoretical concern). Constraining the tile to exactly one 200px
+       period means every tile boundary already lands on a=a, so adjacent copies always meet
+       seamlessly regardless of how the bar's own width happens to divide by the period.
+       Duration: the 140px version ran at 140px/7s = 20px/s; scaling that same speed up to a
+       200px period would be 10s, and this is that figure sped up a further 33% on request
+       (10s / 1.33 = ~7.5s) - i.e. the bar now visibly scrolls faster than before, not just
+       across wider bands. */
+    .bus.flowing.bus-import { background-image: repeating-linear-gradient(90deg, var(--bus-import-a) 0, var(--bus-import-b) 100px, var(--bus-import-a) 200px); }
+    .bus.flowing.bus-export { background-image: repeating-linear-gradient(90deg, var(--bus-export-a) 0, var(--bus-export-b) 100px, var(--bus-export-a) 200px); }
+    .bus.flowing.bus-neutral { background-image: repeating-linear-gradient(90deg, var(--bus-neutral-a) 0, var(--bus-neutral-b) 100px, var(--bus-neutral-a) 200px); }
+    .bus.flowing { background-size: 200px 100%; animation: busFlow 7.5s linear infinite; }
+    @keyframes busFlow { from { background-position-x: 0; } to { background-position-x: 200px; } }
 
     /* Device tile row: Grid / Battery / House */
     .tilerow { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--homey-su-2); }
@@ -623,14 +650,19 @@
       // number's - and it has to be `&nbsp;`, not a plain space: .val is a flex container,
       // and .unit (a flex item) trims a leading *collapsible* space from its own content
       // the same way a block box would, so a literal " " was silently disappearing.
-      // &nbsp; isn't collapsible, so it survives. Used only for the primary power
-      // value/unit text (EV/Solar/Grid/Battery/House's .val) - not the EV chip's amps
-      // text or any other unit-like text.
-      valHtml: function (w) {
+      // &nbsp; isn't collapsible, so it survives. Used for the tile row's (Grid/Battery/
+      // House) single-line .val, where the unit sits right after the number on the same
+      // line and needs that space to separate them - not the EV chip's amps text or any
+      // other unit-like text. The header row (Solar/EV) passes stacked=true instead: its
+      // .val is column-flowed (see .htext .val), so the unit already renders on its own
+      // line below the number and needs no separating space of its own - a leading nbsp
+      // there would just show up as unwanted indent on that second line.
+      valHtml: function (w, stacked) {
         var str = PF.fmtW(w);
         var i = str.lastIndexOf(' ');
         if (i < 0) return str;
-        return str.slice(0, i) + '<span class="unit homey-text-small-light">&nbsp;' + str.slice(i + 1) + '</span>';
+        var sep = stacked ? '' : '&nbsp;';
+        return str.slice(0, i) + '<span class="unit homey-text-small-light">' + sep + str.slice(i + 1) + '</span>';
       },
     };
     // === POWERFLOW-LOGIC-END ===
@@ -674,8 +706,8 @@
       document.getElementById('mode-icon').innerHTML = MODE_ICONS[PF.modeIconKey(s)] || '';
       document.getElementById('mode-time').textContent = PF.modeStatusText(s);
 
-      document.getElementById('ev-val').innerHTML = PF.valHtml(ev.mag);
-      document.getElementById('solar-val').innerHTML = PF.valHtml(solar.mag);
+      document.getElementById('ev-val').innerHTML = PF.valHtml(ev.mag, true);
+      document.getElementById('solar-val').innerHTML = PF.valHtml(solar.mag, true);
       document.getElementById('grid-val').innerHTML = PF.valHtml(grid.mag);
       document.getElementById('battery-val').innerHTML = PF.valHtml(battery.mag);
       document.getElementById('house-val').innerHTML = PF.valHtml(house.mag);
@@ -690,15 +722,19 @@
       var flowing = !!(ev.dir || solar.dir || grid.dir || battery.dir || house.dir);
       document.getElementById('bus').className = 'bus bus-' + PF.busState(s.gridW) + (flowing ? ' flowing' : '');
 
-      // All connectors flow in the same blue regardless of tile — the tile's own accent
-      // color (or, for Battery, its charge-tier color) stays on the icon itself. Dash-scroll
-      // speed is driven by PF.connSpeed (each connector's share of the busiest flow on the
-      // diagram right now - see connSpeed's own comment).
-      setConn(document.getElementById('ev-conn'), 'var(--homey-color-blue-600)', ev, PF.connSpeed('ev', s));
-      setConn(document.getElementById('solar-conn'), 'var(--homey-color-blue-600)', solar, PF.connSpeed('solar', s));
-      setConn(document.getElementById('grid-conn'), 'var(--homey-color-blue-600)', grid, PF.connSpeed('grid', s));
-      setConn(document.getElementById('house-conn'), 'var(--homey-color-blue-600)', house, PF.connSpeed('house', s));
-      setConn(document.getElementById('battery-conn'), 'var(--homey-color-blue-600)', battery, PF.connSpeed('battery', s));
+      // All connectors flow in the same blue regardless of tile - the same --icon-blue
+      // token the Grid/idle House/EV/Solar tiles themselves use (see the --icon-blue CSS
+      // comment for why it's the one hand-picked-shade exception, incl. its own dark-mode
+      // override), so the connectors read as the same blue as the icons rather than a
+      // separately-tuned one. The tile's own accent color (or, for Battery, its charge-tier
+      // color) stays on the icon itself. Dash-scroll speed is driven by PF.connSpeed (each
+      // connector's share of the busiest flow on the diagram right now - see connSpeed's
+      // own comment).
+      setConn(document.getElementById('ev-conn'), 'var(--icon-blue)', ev, PF.connSpeed('ev', s));
+      setConn(document.getElementById('solar-conn'), 'var(--icon-blue)', solar, PF.connSpeed('solar', s));
+      setConn(document.getElementById('grid-conn'), 'var(--icon-blue)', grid, PF.connSpeed('grid', s));
+      setConn(document.getElementById('house-conn'), 'var(--icon-blue)', house, PF.connSpeed('house', s));
+      setConn(document.getElementById('battery-conn'), 'var(--icon-blue)', battery, PF.connSpeed('battery', s));
     }
 
     var CHECK_MS = 5000;   // how often we re-check staleness
