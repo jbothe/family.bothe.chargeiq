@@ -38,7 +38,11 @@ class FakeRpcClient implements RpcClient {
     return { status: 'Accepted' };
   }
 
-  async close(): Promise<void> { /* no-op */ }
+  closeOpts: Array<{ code?: number; reason?: string; force?: boolean } | undefined> = [];
+
+  async close(opts?: { code?: number; reason?: string; force?: boolean }): Promise<void> {
+    this.closeOpts.push(opts);
+  }
 
   on(_event: 'close', listener: () => void): void {
     this.closeListeners.push(listener);
@@ -157,6 +161,115 @@ test('a close from a superseded (stale) client is ignored - only the current cli
   clientB.closeListeners.forEach((l) => l());
   assert.equal(disconnects, 1);
   assert.equal(cp.connected, false);
+});
+
+// ---------------------------------------------------------------------------
+// Liveness watchdog
+// ---------------------------------------------------------------------------
+
+/** Resolve after `ms` of real time - the watchdog is a plain setTimeout. */
+const wait = (ms: number) => new Promise((r) => {
+  setTimeout(r, ms);
+});
+
+test('attach() records contact immediately, and every inbound message refreshes it', () => {
+  const cp = makeCp();
+  const client = new FakeRpcClient();
+  const before = Date.now();
+  cp.attach(client);
+
+  const onAttach = cp.getConnectionInfo();
+  assert.equal(onAttach.connected, true);
+  assert.ok(onAttach.lastSeenAt != null && onAttach.lastSeenAt >= before,
+    'the connection itself counts as contact - the watchdog must not start from the previous link');
+  assert.equal(onAttach.disconnectedAt, null);
+
+  client.dispatch('Heartbeat', {});
+  const afterBeat = cp.getConnectionInfo();
+  assert.ok(afterBeat.lastSeenAt != null && afterBeat.lastSeenAt >= onAttach.lastSeenAt!);
+});
+
+test('a link with no inbound traffic for the liveness window is declared stale and dropped', async () => {
+  const cp = new ChargePoint({
+    identity: 'TEST01', authorize: () => true, nextTransactionId: () => 1, livenessTimeoutMs: 30,
+  });
+  const client = new FakeRpcClient();
+  const stale: number[] = [];
+  let disconnects = 0;
+  cp.on('stale', (idleMs: number) => {
+    stale.push(idleMs);
+  });
+  cp.on('disconnect', () => {
+    disconnects += 1;
+  });
+  cp.attach(client);
+
+  await wait(60);
+  assert.equal(stale.length, 1, 'silence past the window is reported');
+  assert.equal(disconnects, 1, 'and drops the link, so the app learns the charger is gone');
+  assert.equal(cp.connected, false);
+  assert.ok(cp.getConnectionInfo().disconnectedAt != null);
+  // A half-open socket is exactly what would leave a polite close hanging on
+  // pending calls, so the teardown must terminate rather than negotiate.
+  assert.deepEqual(client.closeOpts, [{ code: 1001, reason: 'No OCPP traffic', force: true }]);
+
+  // The socket's own close may still arrive later (or never) - either way it
+  // must not double-report the disconnect.
+  client.closeListeners.forEach((l) => l());
+  assert.equal(disconnects, 1);
+});
+
+test('inbound traffic keeps pushing the liveness deadline out', async () => {
+  const cp = new ChargePoint({
+    identity: 'TEST01', authorize: () => true, nextTransactionId: () => 1, livenessTimeoutMs: 40,
+  });
+  const client = new FakeRpcClient();
+  let disconnects = 0;
+  cp.on('disconnect', () => {
+    disconnects += 1;
+  });
+  cp.attach(client);
+
+  for (let i = 0; i < 4; i += 1) {
+    await wait(25);
+    client.dispatch('Heartbeat', {});
+  }
+  assert.equal(disconnects, 0, 'total elapsed time is well past the window, but it was never silent for a whole one');
+  assert.equal(cp.connected, true);
+
+  await wait(80);
+  assert.equal(disconnects, 1, 'and it still fires once the traffic actually stops');
+});
+
+test('livenessTimeoutMs: 0 disables the watchdog entirely', async () => {
+  const cp = new ChargePoint({
+    identity: 'TEST01', authorize: () => true, nextTransactionId: () => 1, livenessTimeoutMs: 0,
+  });
+  const client = new FakeRpcClient();
+  let disconnects = 0;
+  cp.on('disconnect', () => {
+    disconnects += 1;
+  });
+  cp.attach(client);
+  await wait(40);
+  assert.equal(disconnects, 0);
+  assert.equal(cp.connected, true);
+});
+
+test('a close or detach stops the watchdog, so a dead ChargePoint cannot re-report itself', async () => {
+  const cp = new ChargePoint({
+    identity: 'TEST01', authorize: () => true, nextTransactionId: () => 1, livenessTimeoutMs: 30,
+  });
+  const client = new FakeRpcClient();
+  const stale: number[] = [];
+  cp.on('stale', (idleMs: number) => {
+    stale.push(idleMs);
+  });
+  cp.attach(client);
+  cp.detach();
+  await wait(60);
+  assert.deepEqual(stale, [], 'detach() already tore the link down - no watchdog left to fire');
+  assert.deepEqual(client.closeOpts, [], 'and nothing to close');
 });
 
 test('setAuthorizePolicy() replaces the policy used by subsequent Authorize calls', () => {

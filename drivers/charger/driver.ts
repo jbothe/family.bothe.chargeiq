@@ -28,6 +28,7 @@ interface FlowDevice {
   flowIsCharging(): boolean;
   flowModeIs(mode: string): boolean;
   flowWithinSchedule(): boolean;
+  flowIsOnline(): boolean;
   flowResumeAuto(): void;
 }
 
@@ -51,6 +52,8 @@ module.exports = class ChargerDriver extends Homey.Driver {
       .registerRunListener((args: { device: FlowDevice; mode: string }) => args.device.flowModeIs(args.mode));
     flow.getConditionCard('within_schedule')
       .registerRunListener((args: { device: FlowDevice }) => args.device.flowWithinSchedule());
+    flow.getConditionCard('charger_is_online')
+      .registerRunListener((args: { device: FlowDevice }) => args.device.flowIsOnline());
 
     this.log('ChargerDriver initialised');
   }

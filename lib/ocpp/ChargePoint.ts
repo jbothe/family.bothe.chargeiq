@@ -22,7 +22,10 @@ export interface RpcClient {
   // runtime, not known statically here) - any is the honest type, not a gap.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   call(method: string, params?: Record<string, unknown>): Promise<any>;
-  close(opts?: { code?: number; reason?: string }): Promise<void> | void;
+  // `force` skips the polite close handshake (and waiting on pending calls) and
+  // terminates the socket outright - the only thing that reliably tears down a
+  // half-open link, see onLivenessTimeout().
+  close(opts?: { code?: number; reason?: string; force?: boolean }): Promise<void> | void;
   on(event: 'close', listener: () => void): void;
 }
 
@@ -48,6 +51,17 @@ interface OcppGetConfigurationResult {
   unknownKey?: string[];
 }
 
+/** Point-in-time view of the OCPP link, for connectivity reporting. */
+export interface ConnectionInfo {
+  connected: boolean;
+  /** Epoch ms of the last inbound OCPP message, or null if none received yet. */
+  lastSeenAt: number | null;
+  /** Epoch ms the current (or most recent) client attached. */
+  connectedAt: number | null;
+  /** Epoch ms the link was last torn down, or null while connected. */
+  disconnectedAt: number | null;
+}
+
 export interface ChargePointEvents {
   boot: (info: BootNotificationReq) => void;
   status: (info: StatusNotificationReq) => void;
@@ -61,7 +75,21 @@ export interface ChargePointEvents {
   diagnosticsStatus: (status: string) => void;
   connect: () => void;
   disconnect: () => void;
+  /** The link went quiet past the liveness timeout and was dropped - see onLivenessTimeout(). */
+  stale: (idleMs: number) => void;
 }
+
+/**
+ * How many heartbeat intervals of total silence before the link is presumed
+ * dead. The charge point is told to heartbeat every `heartbeatIntervalSec` (in
+ * the BootNotification response), and MeterValues arrive far more often than
+ * that during a session, so three missed intervals is already well past any
+ * legitimate quiet period.
+ */
+const LIVENESS_HEARTBEAT_MULTIPLE = 3;
+
+/** Floor on the above, so a very short heartbeat interval can't cause flapping. */
+const MIN_LIVENESS_TIMEOUT_MS = 90_000;
 
 /**
  * Represents a single physical charge point (one OCPP identity). It survives
@@ -87,22 +115,49 @@ export class ChargePoint extends EventEmitter {
 
   private lastReadings: Readings | null = null;
 
+  /** Silence (ms) tolerated before the link is presumed dead; 0 disables the watchdog. */
+  private livenessTimeoutMs: number;
+
+  private lastSeenAt: number | null = null;
+
+  private connectedAt: number | null = null;
+
+  private disconnectedAt: number | null = null;
+
+  private livenessTimer: NodeJS.Timeout | null = null;
+
   constructor(opts: {
     identity: string;
     authorize: AuthorizePolicy;
     nextTransactionId: () => number;
     heartbeatIntervalSec?: number;
+    /** Override the derived liveness timeout (tests); 0 disables the watchdog. */
+    livenessTimeoutMs?: number;
   }) {
     super();
     this.identity = opts.identity;
     this.authorize = opts.authorize;
     this.nextTransactionId = opts.nextTransactionId;
     this.heartbeatIntervalSec = opts.heartbeatIntervalSec ?? 60;
+    this.livenessTimeoutMs = opts.livenessTimeoutMs ?? Math.max(
+      MIN_LIVENESS_TIMEOUT_MS,
+      this.heartbeatIntervalSec * 1000 * LIVENESS_HEARTBEAT_MULTIPLE,
+    );
   }
 
   /** Is the charge point currently connected? */
   get connected(): boolean {
     return this.client !== null;
+  }
+
+  /** Connection liveness, for the controller's offline detection/reporting. */
+  getConnectionInfo(): ConnectionInfo {
+    return {
+      connected: this.connected,
+      lastSeenAt: this.lastSeenAt,
+      connectedAt: this.connectedAt,
+      disconnectedAt: this.disconnectedAt,
+    };
   }
 
   /** Last known StatusNotification (for a device that binds after connect). */
@@ -126,8 +181,24 @@ export class ChargePoint extends EventEmitter {
 
   attach(client: RpcClient): void {
     this.client = client;
+    this.connectedAt = Date.now();
+    this.disconnectedAt = null;
+    // A brand-new connection counts as contact in its own right: the watchdog
+    // must start ticking from now, not from whenever the previous link last
+    // spoke (which for a reconnect after a long outage is hours ago).
+    this.markSeen();
 
-    client.handle('BootNotification', ({ params }) => {
+    // Every inbound message goes through this wrapper so it refreshes the
+    // liveness watchdog - registering a handler directly on `client` would
+    // silently opt that message out of counting as contact.
+    const handle = (method: string, fn: (ctx: { params: unknown }) => Record<string, unknown>) => {
+      client.handle(method, (ctx) => {
+        this.markSeen();
+        return fn(ctx);
+      });
+    };
+
+    handle('BootNotification', ({ params }) => {
       this.emit('boot', params as BootNotificationReq);
       return {
         currentTime: new Date().toISOString(),
@@ -136,18 +207,18 @@ export class ChargePoint extends EventEmitter {
       };
     });
 
-    client.handle('Heartbeat', () => {
+    handle('Heartbeat', () => {
       this.emit('heartbeat');
       return { currentTime: new Date().toISOString() };
     });
 
-    client.handle('StatusNotification', ({ params }) => {
+    handle('StatusNotification', ({ params }) => {
       this.lastStatus = params as StatusNotificationReq;
       this.emit('status', params as StatusNotificationReq);
       return {};
     });
 
-    client.handle('Authorize', ({ params }) => {
+    handle('Authorize', ({ params }) => {
       const { idTag } = params as { idTag: string };
       const accepted = this.authorize(idTag);
       const idTagInfo: IdTagInfo = { status: accepted ? 'Accepted' : 'Invalid' };
@@ -155,7 +226,7 @@ export class ChargePoint extends EventEmitter {
       return { idTagInfo };
     });
 
-    client.handle('StartTransaction', ({ params }) => {
+    handle('StartTransaction', ({ params }) => {
       const req = params as StartTransactionReq;
       const accepted = this.authorize(req.idTag);
       const transactionId = this.nextTransactionId();
@@ -164,13 +235,13 @@ export class ChargePoint extends EventEmitter {
       return { transactionId, idTagInfo };
     });
 
-    client.handle('StopTransaction', ({ params }) => {
+    handle('StopTransaction', ({ params }) => {
       const req = params as StopTransactionReq;
       this.emit('stopTransaction', req);
       return { idTagInfo: { status: 'Accepted' } as IdTagInfo };
     });
 
-    client.handle('MeterValues', ({ params }) => {
+    handle('MeterValues', ({ params }) => {
       const req = params as MeterValuesReq;
       const readings = parseMeterValues(req.meterValue);
       this.lastReadings = readings;
@@ -179,15 +250,15 @@ export class ChargePoint extends EventEmitter {
     });
 
     // Accept the optional messages so strictMode does not reject them.
-    client.handle('DataTransfer', ({ params }) => {
+    handle('DataTransfer', ({ params }) => {
       this.emit('dataTransfer', (params ?? {}) as { vendorId?: string; messageId?: string; data?: string });
       return { status: 'Accepted' };
     });
-    client.handle('FirmwareStatusNotification', ({ params }) => {
+    handle('FirmwareStatusNotification', ({ params }) => {
       this.emit('firmwareStatus', (params as { status?: string } | undefined)?.status ?? 'Unknown');
       return {};
     });
-    client.handle('DiagnosticsStatusNotification', ({ params }) => {
+    handle('DiagnosticsStatusNotification', ({ params }) => {
       this.emit('diagnosticsStatus', (params as { status?: string } | undefined)?.status ?? 'Unknown');
       return {};
     });
@@ -195,6 +266,8 @@ export class ChargePoint extends EventEmitter {
     client.on('close', () => {
       if (this.client === client) {
         this.client = null;
+        this.disconnectedAt = Date.now();
+        this.clearLiveness();
         this.emit('disconnect');
       }
     });
@@ -205,6 +278,62 @@ export class ChargePoint extends EventEmitter {
   /** Called when the underlying client disconnects outside a 'close' we tracked. */
   detach(): void {
     this.client = null;
+    this.disconnectedAt = Date.now();
+    this.clearLiveness();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Liveness
+  // ---------------------------------------------------------------------------
+
+  /** Record inbound contact and restart the silence countdown. */
+  private markSeen(): void {
+    this.lastSeenAt = Date.now();
+    if (!this.client || this.livenessTimeoutMs <= 0) return;
+    this.clearLiveness();
+    // eslint-disable-next-line homey-app/global-timers -- unref()'d below, cleared on close/detach
+    this.livenessTimer = setTimeout(() => this.onLivenessTimeout(), this.livenessTimeoutMs);
+    this.livenessTimer.unref?.();
+  }
+
+  private clearLiveness(): void {
+    if (this.livenessTimer) clearTimeout(this.livenessTimer);
+    this.livenessTimer = null;
+  }
+
+  /**
+   * Nothing inbound for the whole liveness window. A WebSocket that is merely
+   * half-open still looks OPEN to us - ocpp-rpc's own ping/pong is answered by
+   * the peer's ws layer, so it can keep a link "up" long after the charge point
+   * stopped participating in OCPP at all, and there is then no 'close' event to
+   * learn from. This is the only signal for that failure.
+   *
+   * The local side is dropped *first* and 'disconnect' emitted directly, rather
+   * than waiting for the close handshake to come back round: tearing down a
+   * half-open socket is exactly the case that can hang indefinitely, and the app
+   * must not depend on it to find out the charger is gone. The close-listener
+   * above is left in place but self-guards on `this.client === client`, so the
+   * eventual (or never-arriving) close cannot double-fire 'disconnect'.
+   */
+  private onLivenessTimeout(): void {
+    const { client } = this;
+    if (!client) return;
+    const idleMs = this.lastSeenAt ? Date.now() - this.lastSeenAt : this.livenessTimeoutMs;
+    this.client = null;
+    this.disconnectedAt = Date.now();
+    this.clearLiveness();
+    this.emit('stale', idleMs);
+    this.emit('disconnect');
+    try {
+      // force: terminate rather than negotiate - a polite close would first
+      // await pending calls settling, which on a dead link never happens.
+      const closing = client.close({ code: 1001, reason: 'No OCPP traffic', force: true });
+      if (closing && typeof (closing as Promise<void>).catch === 'function') {
+        (closing as Promise<void>).catch(() => { /* already gone */ });
+      }
+    } catch {
+      /* already gone */
+    }
   }
 
   // ---------------------------------------------------------------------------

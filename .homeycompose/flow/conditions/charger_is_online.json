@@ -1,0 +1,7 @@
+{
+  "title": { "en": "Charger !{{is|is not}} online" },
+  "hint": { "en": "Whether the charger currently has an OCPP connection to Homey. Pair with a repeating trigger to alert on a long outage." },
+  "args": [
+    { "type": "device", "name": "device", "filter": "driver_id=charger" }
+  ]
+}

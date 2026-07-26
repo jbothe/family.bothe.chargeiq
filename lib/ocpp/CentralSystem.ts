@@ -13,6 +13,8 @@ export interface CentralSystemOptions {
   /** Allocates the next transaction id; the app persists the counter. */
   allocateTransactionId: () => number;
   heartbeatIntervalSec?: number;
+  /** Silence (ms) tolerated before a charge point's link is presumed dead; 0 disables. */
+  livenessTimeoutMs?: number;
   logger?: (msg: string, ...args: unknown[]) => void;
 }
 
@@ -33,6 +35,8 @@ interface RpcServerLike {
  *  - 'chargePoint' (cp)  — a brand-new identity connected for the first time
  *  - 'connect'    (cp)   — a charge point (re)connected
  *  - 'disconnect' (cp)   — a charge point dropped
+ *  - 'stale' (cp, idleMs) — the link went silent past the liveness timeout and
+ *    was dropped by the watchdog; always followed by 'disconnect'
  */
 export class CentralSystem extends EventEmitter {
 
@@ -70,6 +74,11 @@ export class CentralSystem extends EventEmitter {
           authorize: this.opts.authorize,
           nextTransactionId: this.opts.allocateTransactionId,
           heartbeatIntervalSec: this.opts.heartbeatIntervalSec,
+          livenessTimeoutMs: this.opts.livenessTimeoutMs,
+        });
+        cp.on('stale', (idleMs: number) => {
+          this.log(`[OCPP] client ${identity} silent for ${Math.round(idleMs / 1000)}s - dropping the link`);
+          this.emit('stale', cp, idleMs);
         });
         cp.on('disconnect', () => {
           this.log(`[OCPP] client disconnected: ${identity}`);

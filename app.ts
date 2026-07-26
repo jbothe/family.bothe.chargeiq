@@ -26,6 +26,9 @@ interface ChargerDeviceLike {
     boostActive: boolean;
     solarEnough: boolean | null;
   };
+  getConnectionInfo?(): {
+    online: boolean | null; lastSeenAt: string | null; offlineSince: string | null;
+  };
   getSchedule?(): unknown[];
   setSchedule?(windows: unknown[]): Promise<void>;
 }
@@ -134,6 +137,11 @@ module.exports = class ChargeIQApp extends Homey.App {
     const modeInfo = dev?.getModeInfo?.() ?? {
       mode: null, scheduleEndAt: null, nextScheduleStartAt: null, boostActive: false, solarEnough: null,
     };
+    // OCPP link state. `online: null` = not yet resolved (startup grace) - the
+    // widget must not claim an outage on that, only on an explicit false.
+    // Without this the widget has no way to tell a live reading from the last
+    // one before the charger vanished, and renders 12-hour-old state as current.
+    const conn = dev?.getConnectionInfo?.() ?? { online: null, lastSeenAt: null, offlineSince: null };
     // Excess solar available to the car: from the loop when present, else grid export.
     const surplusW = diag ? diag.availableW : Math.max(0, -solar.gridSignedW);
     // solar.houseW is derived purely from the SolarEdge feed (pv + grid - battery), so it
@@ -160,6 +168,9 @@ module.exports = class ChargeIQApp extends Homey.App {
       },
       charger: {
         available: !!dev,
+        online: conn.online,
+        lastSeenAt: conn.lastSeenAt,
+        offlineSince: conn.offlineSince,
         powerW: (cap('measure_power') as number) ?? 0,
         currentA: (cap('measure_current') as number) ?? 0,
         limitA: (cap('charge_current_limit') as number) ?? null,

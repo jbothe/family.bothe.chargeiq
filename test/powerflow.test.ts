@@ -375,3 +375,84 @@ test('meterHtml: edge class selects which tile side the strip bleeds to', () => 
   assert.match(PF.meterHtml({ pct: 0.5, color: 'var(--homey-color-green)' }, 'bottom') as string, /class="meter bottom"/);
   assert.match(PF.meterHtml({ pct: 0.5, color: 'var(--homey-color-green)' }, 'top') as string, /class="meter top"/);
 });
+
+// ---------------------------------------------------------------------------
+// OCPP offline reporting
+// ---------------------------------------------------------------------------
+
+const NOW = Date.parse('2026-07-26T12:00:00Z');
+const offlineState = (hoursAgo: number) => ({
+  charger: {
+    available: true,
+    online: false,
+    chargingState: 'plugged_in',
+    limitA: 16,
+    powerW: 7200,
+    offlineSince: new Date(NOW - hoursAgo * 3_600_000).toISOString(),
+  },
+});
+
+test('isOffline only reports an outage on an explicit false, never on an unresolved link', () => {
+  assert.equal(PF.isOffline({ charger: { available: true, online: false } }), true);
+  assert.equal(PF.isOffline({ charger: { available: true, online: true } }), false);
+  assert.equal(
+    PF.isOffline({ charger: { available: true, online: null } }), false,
+    'null is the app\'s startup grace window - not yet known, so not an outage',
+  );
+  assert.equal(
+    PF.isOffline({ charger: { available: true } }), false,
+    'an older state payload with no online field must not suddenly read as offline',
+  );
+  assert.equal(PF.isOffline({ charger: { available: false, online: false } }), false);
+  assert.equal(PF.isOffline({}), false);
+});
+
+test('fmtAge renders a compact duration, matching fmtDuration() in ChargeController', () => {
+  assert.equal(PF.fmtAge(45_000), '45s');
+  assert.equal(PF.fmtAge(12 * 60_000), '12m');
+  assert.equal(PF.fmtAge(12 * 3_600_000), '12h');
+  assert.equal(PF.fmtAge(5 * 86_400_000), '5d');
+  assert.equal(PF.fmtAge(null), '');
+});
+
+test('offlineForMs measures from offlineSince, and is null whenever there is nothing to measure', () => {
+  assert.equal(PF.offlineForMs(offlineState(12), NOW), 12 * 3_600_000);
+  assert.equal(PF.offlineForMs({ charger: { available: true, online: true, offlineSince: null } }, NOW), null);
+  assert.equal(
+    PF.offlineForMs({ charger: { available: true, online: false } }, NOW), null,
+    'offline but never seen - the chip still says OFFLINE, just without an age',
+  );
+  assert.equal(PF.offlineForMs({ charger: { available: true, online: false, offlineSince: 'nonsense' } }, NOW), null);
+});
+
+test('evChip reports OFFLINE with the outage age, outranking any cached charging state', () => {
+  // The exact bug this exists for: a charger dark for 12 hours whose last
+  // StatusNotification said plugged_in, which rendered as READY indefinitely.
+  assert.deepEqual(PF.evChip(offlineState(12), NOW), { label: 'OFFLINE 12h', cls: 'offline' });
+  // Even a cached *charging* state loses to the link being down.
+  assert.deepEqual(
+    PF.evChip({ charger: { ...offlineState(2).charger, chargingState: 'plugged_in_charging' } }, NOW),
+    { label: 'OFFLINE 2h', cls: 'offline' },
+  );
+  assert.deepEqual(
+    PF.evChip({ charger: { available: true, online: false, chargingState: 'plugged_in' } }, NOW),
+    { label: 'OFFLINE', cls: 'offline' },
+    'no last-contact time to show, but still honestly labelled offline',
+  );
+  assert.deepEqual(
+    PF.evChip({ charger: { available: true, online: true, chargingState: 'plugged_in' } }, NOW),
+    { label: 'READY', cls: 'ready' },
+    'an online charger is unaffected',
+  );
+});
+
+test('an offline charger reports unknown EV power and no commanded amps, not the last reading before it vanished', () => {
+  assert.deepEqual(PF.flow('ev', offlineState(12)), { mag: null, dir: null });
+  assert.equal(PF.fmtW((PF.flow('ev', offlineState(12)) as { mag: number | null }).mag), '–');
+  assert.equal(PF.chargeAmps({ charger: { ...offlineState(12).charger, chargingState: 'plugged_in_charging' } }), 0);
+  // Unchanged while the link is up.
+  assert.deepEqual(
+    PF.flow('ev', { charger: { available: true, online: true, powerW: 7200 } }),
+    { mag: 7200, dir: 'up' },
+  );
+});

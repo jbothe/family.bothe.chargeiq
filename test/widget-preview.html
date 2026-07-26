@@ -133,6 +133,7 @@
         <button data-preset="gridCap">Grid near cap</button>
         <button data-preset="unknownBattery">Battery reading unknown</button>
         <button data-preset="unpluggedSchedule">Unplugged + schedule</button>
+        <button data-preset="offline">Charger offline 12h</button>
       </div>
     </section>
 
@@ -181,6 +182,22 @@
         charger: { available: true, powerW: 0, chargingState: 'plugged_out' },
         solarW: 1500, gridW: 0, batteryW: 800, houseW: 700, batterySoc: 68,
         mode: 'scheduled', scheduleEndAt: new Date(Date.now() + 5400000).toISOString(),
+      },
+      // The charger has been unreachable for 12h, but the last OCPP state it did
+      // report said plugged-in and drawing 7.2kW. Everything under `charger` here
+      // is deliberately stale-but-plausible: the point is that none of it renders
+      // as if it were current.
+      offline: {
+        charger: {
+          available: true,
+          online: false,
+          offlineSince: new Date(Date.now() - 12 * 3600000).toISOString(),
+          powerW: 7200,
+          limitA: 31,
+          chargingState: 'plugged_in',
+        },
+        solarW: 0, gridW: 640, batteryW: 0, houseW: 640, batterySoc: 42,
+        mode: 'solar', solarEnough: false,
       },
     };
 

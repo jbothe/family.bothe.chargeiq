@@ -1,0 +1,10 @@
+{
+  "title": { "en": "Charger came back online" },
+  "hint": { "en": "The OCPP connection to the charger was re-established after an outage." },
+  "tokens": [
+    { "name": "offline_minutes", "type": "number", "title": { "en": "Minutes offline" } }
+  ],
+  "args": [
+    { "type": "device", "name": "device", "filter": "driver_id=charger" }
+  ]
+}

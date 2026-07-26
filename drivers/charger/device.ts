@@ -40,6 +40,10 @@ module.exports = class ChargerDevice extends Homey.Device {
 
   private vehicleDisconnectedTrigger!: Homey.FlowCardTriggerDevice;
 
+  private offlineTrigger!: Homey.FlowCardTriggerDevice;
+
+  private onlineTrigger!: Homey.FlowCardTriggerDevice;
+
   private onSolarSample?: (s: SolarSample) => void;
 
   private lastSolarSample: SolarSample | null = null;
@@ -64,6 +68,8 @@ module.exports = class ChargerDevice extends Homey.Device {
     this.faultTrigger = this.homey.flow.getDeviceTriggerCard('charger_fault');
     this.vehicleConnectedTrigger = this.homey.flow.getDeviceTriggerCard('vehicle_connected');
     this.vehicleDisconnectedTrigger = this.homey.flow.getDeviceTriggerCard('vehicle_disconnected');
+    this.offlineTrigger = this.homey.flow.getDeviceTriggerCard('charger_offline');
+    this.onlineTrigger = this.homey.flow.getDeviceTriggerCard('charger_online');
 
     const app = this.homey.app as ChargeIQApp;
     this.controller = new ChargeController(this.buildHost(), app.getCentralSystem());
@@ -130,6 +136,11 @@ module.exports = class ChargerDevice extends Homey.Device {
     return this.controller?.getModeInfo();
   }
 
+  /** OCPP link state (for the widget's offline reporting). */
+  getConnectionInfo() {
+    return this.controller?.getConnectionInfo();
+  }
+
   // --- Flow card entry points -------------------------------------------------
 
   flowStart(current?: number) {
@@ -154,6 +165,10 @@ module.exports = class ChargerDevice extends Homey.Device {
 
   flowWithinSchedule() {
     return this.controller.isWithinSchedule();
+  }
+
+  flowIsOnline() {
+    return this.controller.isOnline();
   }
 
   flowResumeAuto() {
@@ -230,6 +245,21 @@ module.exports = class ChargerDevice extends Homey.Device {
       },
       onVehicleDisconnected: () => {
         this.vehicleDisconnectedTrigger.trigger(this, {}, {}).catch(this.error);
+      },
+      onConnectivityChanged: (online, offlineForMs) => {
+        if (online) {
+          this.onlineTrigger.trigger(this, {
+            offline_minutes: offlineForMs != null ? Math.round(offlineForMs / 60000) : 0,
+          }, {}).catch(this.error);
+        } else {
+          // A local-time string, not an ISO stamp: this token lands straight in
+          // a user's notification text. Homey's OS clock is UTC regardless of
+          // the configured timezone, so it has to be passed explicitly.
+          const seen = offlineForMs != null
+            ? new Date(Date.now() - offlineForMs).toLocaleString('en-GB', { timeZone: this.homey.clock.getTimezone() })
+            : 'never';
+          this.offlineTrigger.trigger(this, { last_seen: seen }, {}).catch(this.error);
+        }
       },
       // Homey's underlying OS clock runs in UTC regardless of the timezone
       // configured in the Homey app, so schedule windows need this explicitly.

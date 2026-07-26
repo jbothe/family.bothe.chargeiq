@@ -1,0 +1,10 @@
+{
+  "title": { "en": "Charger went offline" },
+  "hint": { "en": "The OCPP connection to the charger dropped, or it stopped reporting entirely." },
+  "tokens": [
+    { "name": "last_seen", "type": "string", "title": { "en": "Last seen" } }
+  ],
+  "args": [
+    { "type": "device", "name": "device", "filter": "driver_id=charger" }
+  ]
+}

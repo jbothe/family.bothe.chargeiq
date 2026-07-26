@@ -269,6 +269,9 @@
     .chip.charging { color: var(--homey-color-green-600); }
     .chip.ready { color: var(--icon-blue); }
     .chip.unplugged { color: var(--homey-text-color-light); }
+    /* Offline is a fault-ish state, not a charging state - red, matching how the
+       charger's own alarm_generic reads elsewhere in Homey. */
+    .chip.offline { color: var(--homey-color-red); }
 
     /* Power bus: negative top/bottom margins pull it into both rows' connectors. Gradient
        reflects live grid state (see PF.busState). */
@@ -438,11 +441,44 @@
       // above the bus (Solar) but 'up' when it's below (discharging Battery, exporting Grid);
       // a sink (draws from the bus) is the mirror: 'up' above the bus (EV), 'down' below it
       // (House, charging Battery, importing Grid).
+      // Is the OCPP link to the charger confirmed down? Strictly `=== false`:
+      // `null`/absent means "not resolved yet" (the app's startup grace window,
+      // or an older state payload), which must not be reported as an outage.
+      isOffline: function (s) {
+        s = s || {};
+        var c = s.charger || {};
+        return !!c.available && c.online === false;
+      },
+      // How long the charger has been out of contact, in ms, or null if unknown.
+      offlineForMs: function (s, now) {
+        if (!PF.isOffline(s)) return null;
+        var since = (s.charger || {}).offlineSince;
+        if (!since) return null;
+        var t = new Date(since).getTime();
+        if (isNaN(t)) return null;
+        return Math.max(0, (now || Date.now()) - t);
+      },
+      // Compact age for the OFFLINE chip - matches fmtDuration() in ChargeController.
+      fmtAge: function (ms) {
+        if (ms == null) return '';
+        var s = Math.round(ms / 1000);
+        if (s < 60) return s + 's';
+        var m = Math.round(s / 60);
+        if (m < 60) return m + 'm';
+        var h = Math.round(m / 60);
+        if (h < 48) return h + 'h';
+        return Math.round(h / 24) + 'd';
+      },
       flow: function (kind, s) {
         s = s || {};
         var w;
         if (kind === 'ev') {
           var c = s.charger || {};
+          // Offline: the last reading is as old as the outage, and the car may
+          // or may not still be drawing on the charger's own last profile -
+          // null renders '–' (see fmtW), which is the honest answer. Showing
+          // the stale figure is what made a 12-hour outage look live.
+          if (PF.isOffline(s)) return { mag: null, dir: null };
           w = c.available ? (c.powerW || 0) : 0;
           return { mag: w, dir: w > 10 ? 'up' : null };
         }
@@ -478,10 +514,17 @@
       // Charging carries no label - the render layer fills it with a bolt icon + live amps
       // (via chargeAmps), plus a trailing boost badge when showBoost() is true, instead of
       // a static label.
-      evChip: function (s) {
+      evChip: function (s, now) {
         s = s || {};
         var c = s.charger || {};
         if (!c.available) return null;
+        // Offline outranks every cached OCPP state: chargingState is only ever
+        // as fresh as the last StatusNotification, so a dropped charger would
+        // otherwise keep reporting READY (or even CHARGING) indefinitely.
+        if (PF.isOffline(s)) {
+          var age = PF.fmtAge(PF.offlineForMs(s, now));
+          return { label: age ? 'OFFLINE ' + age : 'OFFLINE', cls: 'offline' };
+        }
         if (c.chargingState === 'plugged_in_charging') return { cls: 'charging' };
         if (c.chargingState === 'plugged_in') return { label: 'READY', cls: 'ready' };
         if (c.chargingState === 'plugged_out') return { label: 'UNPLUGGED', cls: 'unplugged' };
@@ -494,7 +537,7 @@
       chargeAmps: function (s) {
         s = s || {};
         var c = s.charger || {};
-        if (!c.available || c.chargingState !== 'plugged_in_charging') return 0;
+        if (!c.available || PF.isOffline(s) || c.chargingState !== 'plugged_in_charging') return 0;
         return c.limitA != null ? c.limitA : 0;
       },
       // Which icon represents the current mode - solar splits into two glyphs depending on
@@ -692,7 +735,7 @@
       document.getElementById('house-tile').innerHTML = ICONS.house;
       document.getElementById('house-tile').style.color = ACCENT.house;
 
-      var chip = PF.evChip(s);
+      var chip = PF.evChip(s, Date.now());
       var chipEl = document.getElementById('ev-chip');
       if (chip && chip.cls === 'charging') {
         chipEl.innerHTML = '<span class="chip-icon">' + ICONS.bolt + '</span>'

@@ -72,6 +72,14 @@ export interface ControllerHost {
   /** Fired on a genuine plugged-in -> unplugged edge. */
   onVehicleDisconnected?(): void;
   /**
+   * Fired when the OCPP link to the charger is confirmed down or back up.
+   * `offlineForMs` is how long it had been out of contact: at the moment of
+   * going offline that is the age of the last inbound message; on recovery it
+   * is the length of the outage. null when there is no last-seen time to
+   * measure from (the charger has never been in contact this install).
+   */
+  onConnectivityChanged?(online: boolean, offlineForMs: number | null): void;
+  /**
    * IANA timezone Homey is configured for (e.g. "Europe/Amsterdam"), via
    * `this.homey.clock.getTimezone()`. The underlying OS clock runs in UTC
    * regardless of this setting, so schedule windows must be evaluated against
@@ -163,6 +171,28 @@ const TICK_MS = 15000;
 // still-live transaction/manual-latch) is debounced by this long so that
 // blip can't be mistaken for a genuine idle charger.
 const IDLE_RECONCILE_DELAY_MS = 5000;
+// How long after init() to wait for the charger to (re)connect before calling
+// it offline. A charge point reconnects within seconds of the app starting, so
+// without this every app restart/update would report a spurious offline->online
+// round trip - and fire the Flow trigger for it. Connectivity stays `null`
+// (unknown, reported as neither) until either a bind or this timer resolves it.
+const STARTUP_GRACE_MS = 120000;
+// How often the last-seen timestamp is written through to the device store
+// while the link is healthy. It only needs to be roughly right (it exists to
+// measure outages in hours, not seconds), and a store write on every tick for
+// the lifetime of the app would be pure churn.
+const LAST_SEEN_PERSIST_MS = 5 * 60000;
+
+/** Compact human duration for logs/diagnostics: "45s", "12m", "3h", "2d". */
+export function fmtDuration(ms: number): string {
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 60) return `${s}s`;
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.round(m / 60);
+  if (h < 48) return `${h}h`;
+  return `${Math.round(h / 24)}d`;
+}
 
 /** OCPP statuses that mean a vehicle is connected. */
 const PLUGGED = ['Preparing', 'Charging', 'SuspendedEV', 'SuspendedEVSE', 'Finishing'];
@@ -287,6 +317,26 @@ export class ChargeController {
   /** Debounces idle-reconciliation on an Available report - see IDLE_RECONCILE_DELAY_MS. */
   private pendingIdleReconcile: NodeJS.Timeout | null = null;
 
+  /**
+   * OCPP link state: true/false once known, null while still unresolved during
+   * the startup grace window (see STARTUP_GRACE_MS). Deliberately tri-state -
+   * "we haven't heard yet" is not the same claim as "it's offline", and only
+   * the latter should be reported to the user.
+   */
+  private online: boolean | null = null;
+
+  /**
+   * Epoch ms of the last inbound OCPP message, persisted so an outage that
+   * spans an app restart is still measurable. Without it a restart resets the
+   * clock and a charger that has been dark for 12 hours reads as freshly gone.
+   */
+  private lastSeenAt: number | null = null;
+
+  /** Value of lastSeenAt at the last store write - see noteLastSeen(). */
+  private lastSeenPersistedAt = 0;
+
+  private startupGrace: NodeJS.Timeout | null = null;
+
   constructor(host: ControllerHost, cs: CentralSystem) {
     this.host = host;
     this.cs = cs;
@@ -305,6 +355,8 @@ export class ChargeController {
     this.scheduler.setWindows(this.host.getStore<ScheduleWindow[]>('schedule') ?? []);
     this.wasInSchedule = this.scheduler.isActive(new Date());
 
+    this.lastSeenAt = this.host.getStore<number>('ocppLastSeenAt') ?? null;
+
     const existing = this.cs.getChargePoint(this.host.identity);
     if (existing) this.bind(existing);
 
@@ -312,12 +364,15 @@ export class ChargeController {
       if (cp.identity === this.host.identity) this.bind(cp);
     });
     this.cs.on('disconnect', (cp: ChargePoint) => {
-      if (cp.identity === this.host.identity) {
-        this.cp = null;
-        this.host.log('[charger] disconnected');
-        this.host.setUnavailable('Charger offline');
-      }
+      if (cp.identity !== this.host.identity) return;
+      this.cp = null;
+      this.noteLastSeen(cp.getConnectionInfo().lastSeenAt, true);
+      this.setOnline(false);
     });
+
+    // Nothing connected yet: give the charge point its reconnect window before
+    // concluding it's offline (see STARTUP_GRACE_MS).
+    if (this.online === null) this.armStartupGrace();
 
     this.tick(new Date(), 'init'); // establish initial mode capability; also arms the backstop timer
   }
@@ -326,9 +381,11 @@ export class ChargeController {
     if (this.tickTimer) clearTimeout(this.tickTimer);
     if (this.pendingWrite) clearTimeout(this.pendingWrite);
     if (this.pendingIdleReconcile) clearTimeout(this.pendingIdleReconcile);
+    if (this.startupGrace) clearTimeout(this.startupGrace);
     this.tickTimer = null;
     this.pendingWrite = null;
     this.pendingIdleReconcile = null;
+    this.startupGrace = null;
   }
 
   refreshConfig(): void {
@@ -387,8 +444,89 @@ export class ChargeController {
     };
   }
 
+  // ---------------------------------------------------------------------------
+  // Connectivity
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Current OCPP link state for the widget / settings UI. `lastSeenAt` prefers
+   * the live ChargePoint's own figure and falls back to the persisted one, so
+   * it survives an app restart (see the field's comment). `offlineSince` is
+   * only set while genuinely offline - during the startup grace window it stays
+   * null rather than asserting an outage that may not exist.
+   */
+  getConnectionInfo(): { online: boolean | null; lastSeenAt: string | null; offlineSince: string | null } {
+    const seen = this.cp?.getConnectionInfo().lastSeenAt ?? this.lastSeenAt;
+    const iso = (ms: number | null) => (ms ? new Date(ms).toISOString() : null);
+    return {
+      online: this.online,
+      lastSeenAt: iso(seen),
+      offlineSince: this.online === false ? iso(seen) : null,
+    };
+  }
+
+  /** True only when the link is confirmed up - used by the Flow condition card. */
+  isOnline(): boolean {
+    return this.online === true;
+  }
+
+  private armStartupGrace(): void {
+    if (this.startupGrace) clearTimeout(this.startupGrace);
+    // eslint-disable-next-line homey-app/global-timers -- unref()'d below, cleared in destroy()
+    this.startupGrace = setTimeout(() => {
+      this.startupGrace = null;
+      if (this.online === null) this.setOnline(false);
+    }, STARTUP_GRACE_MS);
+    this.startupGrace.unref?.();
+  }
+
+  /**
+   * Record the most recent contact, never moving it backwards. The write
+   * through to the store is throttled (see LAST_SEEN_PERSIST_MS) except when
+   * `persist` forces it - the disconnect edge is the one moment the exact value
+   * matters, since it is what any later outage is measured from.
+   */
+  private noteLastSeen(at: number | null | undefined, persist = false): void {
+    if (at == null || (this.lastSeenAt != null && at <= this.lastSeenAt)) return;
+    this.lastSeenAt = at;
+    if (!persist && at - this.lastSeenPersistedAt < LAST_SEEN_PERSIST_MS) return;
+    this.lastSeenPersistedAt = at;
+    this.host.setStore('ocppLastSeenAt', at).catch((e) => this.host.error('persist ocppLastSeenAt', e));
+  }
+
+  /**
+   * Apply an OCPP link transition. Only genuine transitions are reported: a
+   * first-ever resolve to online (null -> true) is the normal app-start path
+   * and fires no Flow trigger, whereas resolving to offline is always worth
+   * reporting - null -> false means the grace window expired with no charger.
+   */
+  private setOnline(next: boolean): void {
+    if (this.online === next) return;
+    const wasKnown = this.online !== null;
+    this.online = next;
+    if (this.startupGrace) {
+      clearTimeout(this.startupGrace);
+      this.startupGrace = null;
+    }
+    const offlineForMs = this.lastSeenAt != null ? Date.now() - this.lastSeenAt : null;
+    if (next) {
+      this.host.log(`[ocpp] online${wasKnown && offlineForMs != null ? ` after ${fmtDuration(offlineForMs)} offline` : ''}`);
+      this.host.setAvailable();
+      if (wasKnown) this.host.onConnectivityChanged?.(true, offlineForMs);
+    } else {
+      const since = offlineForMs != null ? `last seen ${fmtDuration(offlineForMs)} ago` : 'never seen';
+      this.host.log(`[ocpp] offline (${since})`);
+      this.host.setUnavailable('Charger offline - no OCPP connection');
+      this.host.onConnectivityChanged?.(false, offlineForMs);
+    }
+  }
+
   private bind(cp: ChargePoint): void {
-    this.host.setAvailable();
+    // Order matters: setOnline() measures the outage against the *previous*
+    // last-contact time, so the new connection's own timestamp must not be
+    // folded in until after - otherwise every recovery reports ~0s downtime.
+    this.setOnline(true);
+    this.noteLastSeen(cp.getConnectionInfo().lastSeenAt);
     if (this.cp === cp) {
       // Same ChargePoint reconnected (its client was swapped) - not a fresh
       // bind, but still worth a fresh status to reconcile any staleness.
@@ -795,6 +933,15 @@ export class ChargeController {
     // don't trust it as confirmed-0 either while transactionId is still on
     // record (i.e. not yet reconciled away as genuinely idle).
     if (this.lastStatusValue === 'Available' && this.transactionId != null) return null;
+    // Link down while the last thing we knew was 'Charging': the charge point
+    // keeps running the profile it was last given, so the car may well still be
+    // drawing - but lastPowerW is now as old as the outage itself and asserting
+    // it as a live reading is exactly the staleness this whole path guards
+    // against. A non-Charging last status still nets as a confirmed 0: that's
+    // the conservative direction (it never credits the charger with headroom it
+    // may not have), and it keeps a never-connected charger from leaving every
+    // solar/household calc permanently unavailable, per the note above.
+    if (this.online === false && this.isDeliveringPower()) return null;
     if (!this.isDeliveringPower()) return 0;
     return this.lastPowerW;
   }
@@ -803,6 +950,7 @@ export class ChargeController {
   private chargerPowerUnknownReason(): string {
     if (this.lastStatusValue == null) return 'no status received yet this connection';
     if (this.lastStatusValue === 'Available') return 'Available but a transaction is still on record, not yet reconciled';
+    if (this.online === false) return 'OCPP link down - last reading is as old as the outage';
     return 'Charging but no MeterValues yet this connection';
   }
 
@@ -1125,6 +1273,12 @@ export class ChargeController {
       this.solarLoop?.reset();
     }
 
+    // Keep the persisted last-seen figure roughly current while the link is
+    // healthy, so an outage that starts with an ungraceful app exit (no
+    // disconnect event to force a write) is still measured from close to the
+    // real last contact rather than from whenever the controller last bound.
+    if (this.cp?.connected) this.noteLastSeen(this.cp.getConnectionInfo().lastSeenAt);
+
     const decision = this.resolveDetailed(now);
     this.updateMode(decision.mode);
 
@@ -1182,8 +1336,14 @@ export class ChargeController {
     }
 
     const finalDesc = amps <= 0 ? 'paused' : `${amps}A`;
+    // The link state is part of every decision line: a resolved target the
+    // charger can't be told about reads identically to one it accepted, which
+    // is exactly how a long outage hides behind a plausible-looking log.
+    const linkNote = this.online === false
+      ? ` | OFFLINE${this.lastSeenAt != null ? ` for ${fmtDuration(Date.now() - this.lastSeenAt)}` : ''} (not sent)`
+      : '';
     this.host.log(`[decision:${trigger}] ${decision.reason}${
-      capNotes.length ? ` | ${capNotes.join('; ')}` : ''} -> ${finalDesc}`);
+      capNotes.length ? ` | ${capNotes.join('; ')}` : ''} -> ${finalDesc}${linkNote}`);
 
     this.ensureCharging(amps, capTightened);
 

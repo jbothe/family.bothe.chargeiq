@@ -3,7 +3,9 @@
 import test from 'node:test';
 import assert from 'node:assert';
 import { EventEmitter } from 'events';
-import { ChargeController, ControllerHost, ChargingTokens } from '../lib/control/ChargeController';
+import {
+  ChargeController, ControllerHost, ChargingTokens, fmtDuration,
+} from '../lib/control/ChargeController';
 import { CentralSystem } from '../lib/ocpp/CentralSystem';
 import { ChargePoint, RpcClient } from '../lib/ocpp/ChargePoint';
 import { ScheduleWindow } from '../lib/control/Scheduler';
@@ -486,11 +488,11 @@ test('the 10s backstop timer reschedules on every tick instead of firing on its 
   const realSetTimeout = global.setTimeout;
   const realClearTimeout = global.clearTimeout;
   let nextId = 0;
-  const scheduled: number[] = [];
+  const all: { id: number; ms: number }[] = [];
   const cleared: number[] = [];
-  (global as unknown as { setTimeout: unknown }).setTimeout = ((_fn: unknown, _ms: number) => {
+  (global as unknown as { setTimeout: unknown }).setTimeout = ((_fn: unknown, ms: number) => {
     const id = ++nextId;
-    scheduled.push(id);
+    all.push({ id, ms });
     return { id } as unknown as NodeJS.Timeout;
   }) as typeof setTimeout;
   (global as unknown as { clearTimeout: unknown }).clearTimeout = ((handle: unknown) => {
@@ -498,19 +500,25 @@ test('the 10s backstop timer reschedules on every tick instead of firing on its 
     if (id != null) cleared.push(id);
   }) as typeof clearTimeout;
 
+  // init() also arms the one-shot OCPP startup-grace timer (120s), which is a
+  // different concern entirely - filter to the 15s backstop this test is about.
+  const backstops = () => all.filter((t) => t.ms === 15000).map((t) => t.id);
+
   try {
     const { c } = makeController([]);
+    assert.deepEqual(all.filter((t) => t.ms === 120000).length, 1,
+      'the OCPP startup-grace timer is armed exactly once, on init');
     // init() fires one tick, which arms the first backstop timer.
-    assert.deepEqual(scheduled, [1], 'one backstop timer armed on init');
+    assert.deepEqual(backstops(), [2], 'one backstop timer armed on init');
     assert.deepEqual(cleared, [], 'nothing to cancel yet');
 
     c.setSolarTarget(10); // a tick from a different trigger
-    assert.deepEqual(cleared, [1], 'the previous backstop was cancelled, not left to fire independently');
-    assert.deepEqual(scheduled, [1, 2], 'a fresh backstop was armed instead');
+    assert.deepEqual(cleared, [2], 'the previous backstop was cancelled, not left to fire independently');
+    assert.deepEqual(backstops(), [2, 3], 'a fresh backstop was armed instead');
 
     c.setSolarTarget(0); // another unrelated tick
-    assert.deepEqual(cleared, [1, 2]);
-    assert.deepEqual(scheduled, [1, 2, 3], 'each tick keeps pushing the backstop out, never stacking timers');
+    assert.deepEqual(cleared, [2, 3]);
+    assert.deepEqual(backstops(), [2, 3, 4], 'each tick keeps pushing the backstop out, never stacking timers');
   } finally {
     global.setTimeout = realSetTimeout;
     global.clearTimeout = realClearTimeout;
@@ -1779,8 +1787,9 @@ test('binds on a connect event, treats a rebind of the same ChargePoint as a rec
   assert.equal(logs.filter((l) => l.includes('Controller bound to')).length, 0, 'not treated as a fresh bind a second time');
 
   cs.emit('disconnect', cp);
-  assert.equal(unavailableMsg, 'Charger offline');
-  assert.ok(logs.some((l) => l.includes('[charger] disconnected')));
+  assert.equal(unavailableMsg, 'Charger offline - no OCPP connection');
+  assert.ok(logs.some((l) => l.includes('[ocpp] offline')));
+  assert.equal(c.isOnline(), false);
 });
 
 // ---------------------------------------------------------------------------
@@ -2481,4 +2490,219 @@ test('resumeAutomatic() is a no-op when no manual latch is set', () => {
   const { c, store } = makeBoundController();
   c.resumeAutomatic();
   assert.equal(store.manualLatch, undefined, 'setStore was never called - nothing to clear');
+});
+
+// ---------------------------------------------------------------------------
+// OCPP connectivity: offline detection + reporting
+// ---------------------------------------------------------------------------
+
+interface ConnHarness {
+  c: ChargeController;
+  cp: ChargePoint;
+  cs: CentralSystem;
+  store: Record<string, unknown>;
+  logs: string[];
+  unavailable: (string | null)[];
+  availableCount: () => number;
+  conn: { online: boolean; offlineForMs: number | null }[];
+  /** Run the pending startup-grace callback, standing in for its 120s elapsing. */
+  fireGrace: () => void;
+}
+
+/**
+ * A controller wired to a CentralSystem we can drive connect/disconnect on.
+ * init() runs with setTimeout stubbed so the one-shot startup-grace timer can be
+ * fired on demand instead of waiting out STARTUP_GRACE_MS.
+ */
+function makeConnController(extraStore: Record<string, unknown> = {}): ConnHarness {
+  const fakeClient: RpcClient = {
+    identity: 'X', handle: () => {}, call: async () => ({ status: 'Accepted' }), close: async () => {}, on: () => {},
+  };
+  // Watchdog off: this harness drives disconnects explicitly, and its own
+  // coverage lives in charge-point.test.ts.
+  const cp = new ChargePoint({
+    identity: 'X', authorize: () => true, nextTransactionId: () => 1, livenessTimeoutMs: 0,
+  });
+  cp.attach(fakeClient);
+
+  const store: Record<string, unknown> = { schedule: [], ...extraStore };
+  const settings: Record<string, unknown> = {
+    minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdA: 14000 / 230, householdPhases: 1,
+  };
+  const logs: string[] = [];
+  const unavailable: (string | null)[] = [];
+  const conn: { online: boolean; offlineForMs: number | null }[] = [];
+  const h = { availableCount: 0 };
+  const host: ControllerHost = {
+    identity: 'X',
+    setCapability: () => {},
+    getSetting: <T>(k: string) => settings[k] as T,
+    getStore: <T>(k: string) => store[k] as T,
+    setStore: async (k, v) => {
+      store[k] = v;
+    },
+    setAvailable: () => {
+      h.availableCount += 1;
+    },
+    setUnavailable: (msg) => {
+      unavailable.push(msg);
+    },
+    setWarning: () => {},
+    log: (...a) => {
+      logs.push(a.join(' '));
+    },
+    error: () => {},
+    onConnectivityChanged: (online, offlineForMs) => {
+      conn.push({ online, offlineForMs });
+    },
+  };
+  // Nothing bound at init(), so the startup grace window applies.
+  const cs = Object.assign(new EventEmitter(), {
+    getChargePoint: (): ChargePoint | undefined => undefined,
+  }) as unknown as CentralSystem;
+  const c = new ChargeController(host, cs);
+
+  let grace: (() => void) | null = null;
+  const realSetTimeout = global.setTimeout;
+  (global as unknown as { setTimeout: unknown }).setTimeout = ((fn: () => void, ms: number) => {
+    if (ms === 120000) grace = fn;
+    return { id: 1 } as unknown as NodeJS.Timeout;
+  }) as typeof setTimeout;
+  try {
+    c.init();
+  } finally {
+    global.setTimeout = realSetTimeout;
+  }
+
+  return {
+    c,
+    cp,
+    cs,
+    store,
+    logs,
+    unavailable,
+    availableCount: () => h.availableCount,
+    conn,
+    fireGrace: () => {
+      if (!grace) throw new Error('no startup-grace timer was armed');
+      grace();
+    },
+  };
+}
+
+test('fmtDuration renders a compact age across every unit boundary', () => {
+  assert.equal(fmtDuration(0), '0s');
+  assert.equal(fmtDuration(45_000), '45s');
+  assert.equal(fmtDuration(12 * 60_000), '12m');
+  assert.equal(fmtDuration(3 * 3_600_000), '3h');
+  assert.equal(fmtDuration(12 * 3_600_000), '12h');
+  assert.equal(fmtDuration(5 * 86_400_000), '5d');
+});
+
+test('connectivity starts unknown, not offline - an app restart must not report an outage that may not exist', () => {
+  const h = makeConnController();
+  assert.equal(h.c.getConnectionInfo().online, null, 'unresolved during the startup grace window');
+  assert.equal(h.c.isOnline(), false, 'and isOnline() only ever claims a confirmed link');
+  assert.deepEqual(h.conn, [], 'nothing reported yet');
+  assert.deepEqual(h.unavailable, [], 'the device is not marked unavailable on a hunch');
+});
+
+test('a charger that connects within the grace window comes up silently, firing no Flow trigger', () => {
+  const h = makeConnController();
+  h.cs.emit('connect', h.cp);
+  assert.equal(h.c.getConnectionInfo().online, true);
+  assert.equal(h.c.isOnline(), true);
+  assert.equal(h.availableCount(), 1);
+  assert.deepEqual(h.conn, [], 'null -> true is the normal app-start path, not a recovery worth alerting on');
+});
+
+test('the grace window expiring with nothing connected reports the charger offline', () => {
+  const h = makeConnController();
+  h.fireGrace();
+  assert.equal(h.c.getConnectionInfo().online, false);
+  assert.deepEqual(h.unavailable, ['Charger offline - no OCPP connection']);
+  assert.equal(h.conn.length, 1);
+  assert.equal(h.conn[0].online, false);
+  assert.equal(h.conn[0].offlineForMs, null, 'never seen this install - no last-contact time to measure from');
+});
+
+test('an outage spanning an app restart is still measured from the persisted last-contact time', () => {
+  const twelveHoursAgo = Date.now() - 12 * 3_600_000;
+  const h = makeConnController({ ocppLastSeenAt: twelveHoursAgo });
+  h.fireGrace();
+
+  const info = h.c.getConnectionInfo();
+  assert.equal(info.online, false);
+  assert.equal(info.offlineSince, new Date(twelveHoursAgo).toISOString(),
+    'the outage predates this process - without the persisted value it would read as freshly gone');
+  assert.equal(h.conn.length, 1);
+  assert.ok(h.conn[0].offlineForMs! >= 12 * 3_600_000);
+  assert.ok(h.logs.some((l) => l.includes('[ocpp] offline') && l.includes('12h ago')));
+});
+
+test('a disconnect reports offline, and the reconnect reports how long the outage lasted', () => {
+  const h = makeConnController();
+  h.cs.emit('connect', h.cp);
+  h.conn.length = 0;
+
+  // The link's last contact was an hour ago as far as the charge point knows.
+  const hourAgo = Date.now() - 3_600_000;
+  h.cp.emit('disconnect'); // not the CentralSystem's own event - see below
+  assert.deepEqual(h.conn, [], 'the controller listens to the CentralSystem, not the ChargePoint directly');
+
+  h.cs.emit('disconnect', h.cp);
+  assert.equal(h.c.getConnectionInfo().online, false);
+  assert.equal(h.c.isOnline(), false);
+  assert.equal(h.conn.length, 1);
+  assert.equal(h.conn[0].online, false);
+  assert.ok(h.store.ocppLastSeenAt != null, 'the disconnect edge forces the last-seen write through');
+
+  // Rewind the persisted figure to simulate an hour of downtime, then reconnect.
+  h.store.ocppLastSeenAt = hourAgo;
+  const h2 = makeConnController({ ocppLastSeenAt: hourAgo });
+  h2.fireGrace();
+  h2.cs.emit('connect', h2.cp);
+  const recovery = h2.conn.filter((e) => e.online);
+  assert.equal(recovery.length, 1, 'false -> true is a genuine recovery and is reported');
+  assert.ok(recovery[0].offlineForMs! >= 3_600_000);
+  assert.ok(h2.logs.some((l) => l.includes('[ocpp] online') && l.includes('offline')));
+});
+
+test('a repeated disconnect does not re-report an outage already reported', () => {
+  const h = makeConnController();
+  h.cs.emit('connect', h.cp);
+  h.cs.emit('disconnect', h.cp);
+  h.cs.emit('disconnect', h.cp);
+  assert.equal(h.conn.filter((e) => !e.online).length, 1);
+});
+
+test('while offline, a last-known-Charging draw is reported unknown rather than as a live reading', () => {
+  const h = makeConnController();
+  h.cs.emit('connect', h.cp);
+  h.cp.emit('status', { connectorId: 1, errorCode: 'NoError', status: 'Charging' });
+  h.cp.emit('meterValues', { power: 7200 });
+  assert.equal(h.c.getDiagnostics().chargerPowerW, 7200, 'live and known while connected');
+
+  h.cs.emit('disconnect', h.cp);
+  assert.equal(h.c.getDiagnostics().chargerPowerW, null,
+    'the reading is now as old as the outage - null is "unknown", which callers must not default to 0');
+});
+
+test('while offline, a last-known-idle charger still nets as a confirmed zero', () => {
+  const h = makeConnController();
+  h.cs.emit('connect', h.cp);
+  h.cp.emit('status', { connectorId: 1, errorCode: 'NoError', status: 'Available' });
+  h.cs.emit('disconnect', h.cp);
+  assert.equal(h.c.getDiagnostics().chargerPowerW, 0,
+    'the conservative direction, and it keeps a never-connected charger from disabling every cap');
+});
+
+test('the decision log calls out that a resolved target could not be sent while offline', () => {
+  const h = makeConnController();
+  h.fireGrace();
+  h.logs.length = 0;
+  h.c.tick(new Date(), 'timer');
+  const line = h.logs.filter((l) => l.startsWith('[decision:')).pop();
+  assert.ok(line?.includes('OFFLINE'), `expected the link state in the decision line, got: ${line}`);
+  assert.ok(line?.includes('not sent'));
 });

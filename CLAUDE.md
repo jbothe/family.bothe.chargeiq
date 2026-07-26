@@ -31,7 +31,8 @@ The **App** (`app.ts`) owns the long-lived services and exposes them to the devi
 - `lib/ocpp/CentralSystem.ts` — wraps the `ocpp-rpc` `RPCServer` (strictMode), one `ChargePoint`
   per OCPP identity. `ChargePoint.ts` holds inbound handlers + outbound command wrappers and
   survives reconnects (swap the underlying client via `attach`). `types.ts` has message shapes
-  and the `parseMeterValues` → W/A/V/kWh helper.
+  and the `parseMeterValues` → W/A/V/kWh helper. `ChargePoint` also owns the **liveness
+  watchdog** — see the OCPP connectivity section below.
 - `lib/solar/SolarFeed.ts` — reads the user's SolarEdge app (`bothe.family.solaredge`) over the
   HomeyAPI: `measure_power` on inverter/meter/battery + `measure_battery` SoC. Emits a merged
   `SolarSample`; **house load is derived** (`pv + gridSigned − batterySigned`). Best-effort —
@@ -101,6 +102,44 @@ legitimately raises the safety-cap ceiling — the home battery must never fund 
 beyond the configured floor, only genuine spare circuit capacity may. This discharge-blocks-boost
 rule itself only applies when `sharedCircuitIncludeBattery` is on — otherwise the battery isn't part
 of this circuit and its state has no bearing on it.
+
+### OCPP connectivity (offline detection + reporting)
+The app is the OCPP *server*, so "is the charger there?" is only ever inferred — nothing polls it.
+Three layers, because each covers a failure the others miss:
+- **`ChargePoint`'s liveness watchdog.** Every inbound message goes through the `handle()` wrapper
+  in `attach()` (register a handler on `client` directly and it silently stops counting as contact)
+  which stamps `lastSeenAt` and restarts a `livenessTimeoutMs` countdown — `max(90s, heartbeat × 3)`,
+  0 to disable. On expiry it emits `stale` + `disconnect`, drops `this.client` **first**, and only
+  then force-terminates the socket. Order matters: a *half-open* socket is exactly the case where the
+  close handshake never returns, and `ocpp-rpc`'s own ping/pong is answered by the peer's ws layer,
+  so a charge point that has stopped participating in OCPP entirely can still look connected
+  indefinitely with no `close` event to learn from. `force: true` skips awaiting pending calls, which
+  on a dead link never settle. The existing close listener self-guards on `this.client === client`,
+  so a late (or never-arriving) close can't double-fire `disconnect`.
+- **`ChargeController`'s link state.** Tri-state on purpose: `online` is `null` until either a bind
+  or `STARTUP_GRACE_MS` (120s) resolves it — "we haven't heard yet" is not the claim "it's offline",
+  and without the grace window every app restart would report a spurious offline→online round trip
+  and fire the Flow trigger for it. `null → true` is therefore silent; `null → false` (grace expired,
+  nothing there) and `true → false` both report. `lastSeenAt` is **persisted** (`ocppLastSeenAt`
+  store key, written through at most every `LAST_SEEN_PERSIST_MS`, forced on the disconnect edge) so
+  an outage spanning an app restart is still measurable — without it a 12-hour-dark charger reads as
+  freshly gone. In `bind()`, `setOnline(true)` must run **before** `noteLastSeen()`, or the recovery
+  measures the outage against the reconnect it just made and always reports ~0s.
+- **Reporting.** `setUnavailable()` on the device, `charger_offline`/`charger_online` Flow triggers
+  (+ a `charger_is_online` condition, for "every hour, if offline, notify me"), `online`/`lastSeenAt`
+  /`offlineSince` in the widget state, and an `OFFLINE <age>` note on every `[decision:…]` line.
+
+`nettedChargerW()` treats offline-while-last-known-`Charging` as **unknown** (`null`), a fourth
+variant of the same don't-guess rule as the three below: the charge point keeps running whatever
+profile it was last given, so the car may well still be drawing, and `lastPowerW` is now as old as
+the outage. A non-`Charging` last status still nets as a confirmed `0` — conservative, and it keeps a
+never-connected charger from disabling every cap permanently.
+
+The widget's own `.stale` dimming is **not** this: it only fires when the *app's* 10s broadcast stops,
+which a charger outage doesn't affect at all. That is what let a 12-hour-old `plugged_in` render as a
+live `READY` chip. `PF.isOffline()` gates strictly on `online === false` so `null`/absent (grace
+window, or an older state payload) never reads as an outage, and offline outranks any cached
+`chargingState`; EV power renders `–` (unknown), not the last figure before the charger vanished.
 
 ### Key invariants / gotchas
 - **Amps are always floored** (never rounded up) when converting W→A, in `SolarLoop`, the
@@ -308,6 +347,13 @@ handlers with no branching) and one third-party-library catch branch (`CentralSy
 to reach one log line.
 
 ## Not yet verified on hardware
+The **liveness watchdog** firing against a genuinely half-open link (the failure it exists for) —
+`ChargePoint`'s unit tests drive it with a short `livenessTimeoutMs` and a fake client, which proves
+the timer/teardown logic but not that a real wedged Wallbox link reaches it before `ocpp-rpc`'s own
+ping timeout does. Whether the 12h outage that prompted this fired `disconnect` at all is unknown
+(the old code logged nothing distinguishable); `[ocpp] offline (…)` now makes the next one legible
+either way.
+
 `SetChargingProfile` behaviour at exactly 6A (as opposed to 0A, confirmed below), and a live schedule
 window actually *starting* a charge from cold (`Preparing` → accepted `RemoteStartTransaction` →
 `StartTransaction`) — plausibly untestable on this charger at all, see below. Confirmed on-device:
