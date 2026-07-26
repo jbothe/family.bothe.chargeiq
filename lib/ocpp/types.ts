@@ -104,8 +104,6 @@ export interface Readings {
   voltage?: number;
   /** Energy.Active.Import.Register in kWh. */
   energyKwh?: number;
-  /** Current offered by the EVSE (the applied limit) in A. */
-  currentOffered?: number;
   /** Timestamp of the batch. */
   timestamp?: string;
 }
@@ -156,10 +154,6 @@ export function parseMeterValues(meterValue: MeterValue[]): Readings {
         }
         case 'Current.Import': {
           out.current = Math.max(out.current ?? 0, num);
-          break;
-        }
-        case 'Current.Offered': {
-          out.currentOffered = num;
           break;
         }
         case 'Voltage': {

@@ -14,15 +14,6 @@ test('parseMeterValues returns an empty object for a missing or empty batch', ()
   assert.deepEqual(parseMeterValues(undefined as any), {});
 });
 
-test('Current.Offered is captured separately from Current.Import', () => {
-  const out = parseMeterValues([mv([
-    { value: '16', measurand: 'Current.Import' },
-    { value: '32', measurand: 'Current.Offered' },
-  ])]);
-  assert.equal(out.current, 16);
-  assert.equal(out.currentOffered, 32);
-});
-
 test('an unrecognised measurand is ignored rather than crashing', () => {
   const out = parseMeterValues([mv([
     { value: '1', measurand: 'SoC' },
