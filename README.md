@@ -59,7 +59,7 @@ App id: `family.bothe.chargeiq` · SDK v3, TypeScript · platform: `local`.
 
 ## Getting started
 
-1. Install the app on your Homey Pro and add an **EV Charger** device.
+1. Install the app on your Homey Pro and add an **OCPP Smart EV Charger** device.
 2. Point your Wallbox's OCPP backend URL at `ws://<homey-ip>:9000/<identity>`
    (the identity Homey assigns during pairing).
 3. Configure electrical limits (phases/voltage/min-max current) and load

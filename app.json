@@ -415,7 +415,7 @@
   "drivers": [
     {
       "name": {
-        "en": "EV Charger"
+        "en": "OCPP Smart EV Charger"
       },
       "class": "evcharger",
       "capabilities": [

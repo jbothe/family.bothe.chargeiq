@@ -8,8 +8,8 @@ test('offers every connected identity when no charger is paired yet', () => {
   const result = resolvePairList(0, ['CP-A', 'CP-B']);
   assert.ok('devices' in result);
   assert.deepEqual(result.devices, [
-    { name: 'EV Charger (CP-A)', data: { id: 'CP-A' } },
-    { name: 'EV Charger (CP-B)', data: { id: 'CP-B' } },
+    { name: 'OCPP Smart EV Charger (CP-A)', data: { id: 'CP-A' } },
+    { name: 'OCPP Smart EV Charger (CP-B)', data: { id: 'CP-B' } },
   ]);
 });
 

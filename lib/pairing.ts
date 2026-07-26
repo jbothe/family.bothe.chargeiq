@@ -34,7 +34,7 @@ export function resolvePairList(
   }
   return {
     devices: connectedIdentities.map((identity) => ({
-      name: `EV Charger (${identity})`,
+      name: `OCPP Smart EV Charger (${identity})`,
       data: { id: identity },
     })),
   };

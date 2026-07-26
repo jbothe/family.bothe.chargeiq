@@ -1,5 +1,5 @@
 {
-  "name": { "en": "EV Charger" },
+  "name": { "en": "OCPP Smart EV Charger" },
   "class": "evcharger",
   "capabilities": [
     "evcharger_charging",
