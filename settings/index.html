@@ -5,128 +5,267 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <script type="text/javascript" src="/homey.js" data-origin="settings"></script>
   <style>
+    /*
+      Styled with Homey's own Style Library (`.homey-header`/`.homey-title`/`.homey-subtitle`,
+      `.homey-form-*`, `.homey-button-*` - see
+      https://apps.developer.homey.app/advanced/custom-views/html-and-css-styling) instead of
+      hand-rolled colors/fonts, same treatment as drivers/charger/pair/start.html. Documented as
+      available on Homey Cloud and Homey Pro since firmware v8.1.0/v8.1.1 (well under this app's
+      own >=12.4.5 floor), applied automatically alongside the required
+      <script src="/homey.js" data-origin="settings"> tag - no separate stylesheet <link> needed.
+      Colors/spacing/dark-mode now come from Homey's own real in-app theme instead of a guessed
+      palette. `.homey-form-input`'s documented input types are text/number/password/url, not
+      time - applied to the time inputs anyway as a best effort (worst case they render as plain
+      unstyled native time inputs, same as before this change, not a regression).
+      The one thing Homey's library doesn't document at all - a compact 7-day picker grid - stays
+      hand-rolled below, but themed via Homey's injected --homey-* tokens rather than guessed hex,
+      same as the pair screen's undocumented URL/code block.
+    */
     * { box-sizing: border-box; }
-    body {
-      font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
-      margin: 0; padding: 16px; color: #1a1a1a; background: #f7f8fa;
-    }
-    h1 { font-size: 18px; margin: 0 0 4px; }
-    p.hint { color: #6b7280; font-size: 13px; margin: 0 0 16px; line-height: 1.4; }
+    body { margin: 0; padding: var(--homey-su-4); }
 
-    .window {
-      background: #fff;
-      border: 1px solid #e5e7eb;
-      border-radius: 12px;
-      padding: 14px;
-      margin-bottom: 12px;
-      box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
-      transition: opacity .15s ease;
-    }
-    .window.disabled { opacity: 0.55; }
-    .window.conflict { border-color: #e0533d; box-shadow: 0 0 0 1px #e0533d inset; }
+    /* The Style Library draws its own divider line under the header (undocumented exactly how -
+       plausibly a pseudo-element or an injected <hr>, since this file has no <hr> of its own) -
+       overridden defensively on every plausible mechanism since only the selector that actually
+       matches Homey's real rule has any effect. */
+    .homey-header { text-align: center; border-bottom: none !important; }
+    .homey-header::after, .homey-header::before, .homey-header hr { display: none !important; }
+    .homey-subtitle { margin: 0 0 var(--homey-su-4); }
+    .add-row { text-align: center; margin-bottom: var(--homey-su-4); }
 
-    .window-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
-    .window-title { font-size: 13px; font-weight: 600; color: #374151; }
+    /* Each schedule window is a <fieldset> styled via .homey-form-fieldset. Title and Remove used
+       to be a real <legend> plus a separate row - a <legend> is laid out specially by the browser
+       (outside/interrupting normal flow) and can't easily share a flex row with a sibling button,
+       so the title is now a plain <span> reusing .homey-form-legend purely for its typography,
+       sitting in the same flex row as Remove. The disabled/conflict states are our own modifiers
+       layered on top - undocumented by the Style Library, so themed via --homey-* tokens rather
+       than guessed hex. */
+    /* A bare <fieldset> carries its own native UA padding/border (nothing to do with Homey) that
+       we never reset - confirmed as the actual cause of everything reading as indented from the
+       page's own left edge with no visible frame around it (padding without a visible border,
+       since .homey-form-fieldset's border doesn't appear to render here either - the same story
+       as --homey-line above). Reset it and take padding under our own explicit control instead of
+       an unknown UA/library default, so this window's content lines up with the header above it. */
+    .window { margin-bottom: var(--homey-su-4); padding: 0 !important; border: none !important; }
+    .window.disabled { opacity: 0.55; transition: opacity .15s ease; }
+    .window.conflict { box-shadow: 0 0 0 1px var(--homey-color-red) inset; }
 
-    /* enable/disable switch */
-    .switch { position: relative; display: inline-block; width: 38px; height: 22px; flex: none; }
-    .switch input { opacity: 0; width: 0; height: 0; }
-    .slider {
-      position: absolute; cursor: pointer; inset: 0;
-      background: #d1d5db; border-radius: 999px; transition: background .15s ease;
-    }
-    .slider::before {
-      content: ""; position: absolute; height: 16px; width: 16px; left: 3px; bottom: 3px;
-      background: #fff; border-radius: 50%; transition: transform .15s ease;
-      box-shadow: 0 1px 2px rgba(0,0,0,.2);
-    }
-    .switch input:checked + .slider { background: #16a34a; }
-    .switch input:checked + .slider::before { transform: translateX(16px); }
-    .switch-row { display: flex; align-items: center; gap: 8px; }
+    .window-head-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: var(--homey-su-2); gap: var(--homey-su-2); }
+    /* Fallback in case .homey-form-legend's real rule is qualified by the `legend` tag rather
+       than the class alone, now that it's applied to a <span> instead. */
+    .window-title { font-weight: var(--homey-font-weight-bold); font-size: var(--homey-font-size-large); }
+    /* .window.disabled's opacity already dims the whole row, but the toggle's own bold title/
+       chevron are the one part of it meant to read as text, not a decorative element - fade
+       those to the lighter text color directly too, on top of the opacity, rather than relying
+       on opacity alone to communicate "disabled". */
+    .window.disabled .window-title, .window.disabled .chevron { color: var(--homey-text-color-light); }
 
-    /* days: grid so it never wraps to a second line */
-    .days { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; margin-bottom: 12px; }
+    /* 7-day picker grid - no Style Library equivalent, so hand-rolled but themed via --homey-*
+       tokens (same undocumented-but-themed treatment as the pair screen's URL box). Grid (not
+       flex-wrap) so it never wraps to a second line at narrow widths. --homey-line is documented
+       for widgets, not settings pages (a separate Style Library surface) - confirmed on-device it
+       doesn't actually resolve here (the .time-box border below rendered as nothing), so every
+       use now carries a literal fallback instead of assuming it's injected. */
+    .days { display: grid; grid-template-columns: repeat(7, 1fr); gap: var(--homey-su-1); margin-bottom: var(--homey-su-2); }
     .day {
-      border: 1px solid #d1d5db; border-radius: 7px; padding: 7px 0; text-align: center;
-      cursor: pointer; user-select: none; font-size: 12px; color: #374151;
+      border: var(--homey-line, 1px solid rgba(128, 128, 128, .35)); border-radius: var(--homey-border-radius-small); padding: var(--homey-su-1) 0;
+      text-align: center; cursor: pointer; user-select: none;
+      font-size: var(--homey-font-size-small); color: var(--homey-text-color);
       transition: background .1s ease, color .1s ease, border-color .1s ease;
     }
-    .day.on { background: #16a34a; color: #fff; border-color: #16a34a; }
+    .day.on { background: var(--homey-color-green); color: var(--homey-text-color-white); border-color: var(--homey-color-green); }
 
-    .fields { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; }
-    .field label {
-      font-size: 11px; font-weight: 600; letter-spacing: .02em; text-transform: uppercase;
-      color: #9ca3af; display: block; margin-bottom: 4px;
+    /* Fixed flex-basis widths (108/140px) assumed the fieldset's real interior width without
+       ever measuring it - the fieldset's own Style Library padding turned out to leave less room
+       than that, so Start/End/Amps wrapped onto three separate lines instead of sharing one.
+       Letting the time/amps fields shrink (flex-grow/shrink with a floor) instead of holding a
+       fixed basis keeps them on one row on whatever width is actually available, while Boost's
+       100% basis always forces it onto its own line below regardless of remaining space. */
+    .fields { display: flex; gap: var(--homey-su-2) var(--homey-su-3); align-items: flex-start; flex-wrap: wrap; }
+    /* min-width is a hard floor, not just a starting point - a native time control silently
+       hides/compresses its own hour/minute/AM-PM segments (not a CSS overflow the box model
+       reports) once given less room than it needs. Below this floor .fields' own wrap takes
+       Amps down to its own line instead of clipping. */
+    .field-time { flex: 1 1 80px; min-width: 80px; max-width: 100px; }
+    /* .homey-form-input is documented for text/number/password/url only - confirmed on-device
+       that type=time instead keeps the platform's own native fill with no visible border, and
+       that styling the <input> directly (even with -webkit-appearance: none) doesn't reliably
+       draw one - the control's own shadow DOM seemingly still paints over it. Drawing the border
+       on a plain wrapper <div> instead sidesteps that entirely, since a div is never subject to
+       native form-control quirks; the input itself goes fully transparent/borderless inside it.
+       Still rendered as no border at all on-device even on this plain div, though - see the
+       --homey-line fallback note above the day picker; same fix applies here. */
+    /* height is explicit and shared with .stepper .homey-form-input below (rather than left to
+       each control's own padding+content) because a native time control has its own intrinsic
+       minimum content height for its segmented hour/minute/AM-PM UI, independent of padding -
+       confirmed on-device the two rows still rendered at different heights even once padding
+       matched. input[type=time] gets height:100% so it fills that fixed box instead of forcing
+       it taller. */
+    .time-box {
+      border: var(--homey-line, 1px solid rgba(128, 128, 128, .35)); border-radius: var(--homey-border-radius-small);
+      padding: 0 2px; height: 34px; background: var(--homey-background-color);
     }
-    input[type=time] {
-      padding: 7px 8px; border: 1px solid #d1d5db; border-radius: 8px; font-size: 14px; width: 100px;
+    .time-box input[type=time] {
+      -webkit-appearance: none; appearance: none;
+      background: transparent; border: none; padding: 0; margin: 0; width: 100%; height: 100%;
+      color: var(--homey-text-color); font-size: var(--homey-font-size-default); font-family: inherit;
+      text-align: left;
     }
+    /* The clock icon is a distinct pseudo-element from the rest of the native control, not
+       removed by -webkit-appearance: none above - hiding it doesn't lose the picker itself,
+       clicking anywhere else on the field still opens it. */
+    .time-box input[type=time]::-webkit-calendar-picker-indicator { display: none; -webkit-appearance: none; }
+    .field-amps { flex: 1 1 110px; min-width: 100px; max-width: 140px; }
+    .field-boost { flex: 1 1 100%; }
+    /* The Style Library sizes .homey-form-group's own vertical spacing for a single full-width
+       column (documented as "equal vertical spacing between all inputs") - confirmed on-device
+       to be far larger than any of this file's own --homey-su tokens, and to survive a plain
+       margin-bottom override, so it's evidently applied some other way (e.g. margin-top via an
+       adjacent-sibling rule) that a same-specificity override can lose to. Reset every box-model
+       property on all plausible selector shapes, with !important so this wins regardless of
+       which mechanism Homey's injected stylesheet actually uses - .fields' own gap is what
+       spaces these fields instead. */
+    .fields .homey-form-group,
+    .fields .homey-form-group + .homey-form-group { margin: 0 !important; padding: 0 !important; }
+    /* Confirmed on-device the gap between the day grid and this row is still oversized even with
+       the group reset above - .homey-form-label evidently carries its own share of that "equal
+       vertical spacing" system independent of its parent .homey-form-group, since it's the label
+       (not the group) that's the first thing after .days here. Reset directly rather than assume
+       the group-level fix already covers it. */
+    .fields .homey-form-label { margin: 0 0 var(--homey-su-1) !important; padding: 0 !important; }
 
-    /* amps number picker (stepper) */
-    .stepper { display: flex; align-items: stretch; border: 1px solid #d1d5db; border-radius: 8px; overflow: hidden; width: 132px; }
+    /* Amps stepper: three discrete Style Library controls (small transparent buttons + a regular
+       form input) fused into one joined control - no gap between them, with each element's inner
+       edge pulled -1px to overlap its neighbor's border rather than doubling up, and only the
+       outer two corners rounded so it reads as a single pill. */
+    .stepper { display: flex; align-items: center; gap: 0; }
+    /* Explicit height here (rather than trusting Homey's own .homey-form-input default) so this
+       matches .time-box's height exactly - see the comment there for why the two rows didn't
+       already match on padding alone. */
+    .stepper .homey-form-input {
+      flex: 1; width: 0; min-width: 0; text-align: center; -moz-appearance: textfield;
+      padding: 0 2px !important; height: 34px !important; margin-left: -1px !important;
+      border-radius: 0 !important; position: relative; z-index: 0;
+    }
+    .stepper .homey-form-input::-webkit-outer-spin-button,
+    .stepper .homey-form-input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+    /* .homey-button-transparent has no border by design (it's "transparent") - confirmed on-device
+       it really does render with none at all, so one is forced here the same defensive way as
+       --homey-line elsewhere in this file. .homey-button-small's own generous touch-target sizing
+       is also reset (padding alone wasn't the whole story - a min-width/min-height and default
+       line-height were still holding it open). */
     .stepper button {
-      width: 28px; border: 0; background: #f3f4f6; color: #374151; font-size: 16px; line-height: 1;
-      cursor: pointer; padding: 0;
+      flex: none; min-width: 0 !important; min-height: 0 !important; line-height: 1 !important;
+      padding: 2px var(--homey-su-1) !important; height: 34px !important;
+      border: var(--homey-line, 1px solid rgba(128, 128, 128, .35)) !important;
+      background: var(--homey-background-color) !important; border-radius: 0 !important;
+      position: relative;
     }
-    .stepper button:active { background: #e5e7eb; }
-    .stepper button:disabled { color: #d1d5db; cursor: default; background: #f3f4f6; }
-    .stepper input[type=number] {
-      flex: 1; width: 0; border: 0; text-align: center; font-size: 14px; padding: 7px 2px;
-      -moz-appearance: textfield;
+    .stepper .dec {
+      border-top-left-radius: var(--homey-border-radius-small) !important;
+      border-bottom-left-radius: var(--homey-border-radius-small) !important;
     }
-    .stepper input[type=number]::-webkit-outer-spin-button,
-    .stepper input[type=number]::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
-    .amps-unit { font-size: 11px; color: #9ca3af; padding-right: 6px; align-self: center; }
-
-    .boost-field { display: flex; align-items: center; }
-    .boost-field label.boost-check {
-      display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 400;
-      letter-spacing: normal; text-transform: none; color: #374151;
-      cursor: pointer; user-select: none; margin-bottom: 0; padding-bottom: 7px;
-    }
-    .boost-check input { margin: 0; }
-
-    .spacer { flex: 1; }
-    button.remove {
-      background: transparent; color: #e0533d; border: 0; font-size: 13px; padding: 4px 6px; cursor: pointer;
+    .stepper .inc {
+      border-top-right-radius: var(--homey-border-radius-small) !important;
+      border-bottom-right-radius: var(--homey-border-radius-small) !important;
+      margin-left: -1px !important; z-index: 1;
     }
 
-    .conflict-msg { color: #e0533d; font-size: 12px; margin-top: 8px; font-weight: 500; }
+    /* Same oversized-default story as .homey-form-group above, confirmed on-device for
+       .homey-form-checkbox too (the Enabled row's checkbox and the Boost row's checkbox both
+       carry it) - reset with !important for the same reason. .enabled-row still wants *some*
+       breathing room before the day grid below it, just not the library's oversized default -
+       re-declared after this (same specificity, later wins) with our own smaller amount. */
+    .window .homey-form-checkbox { margin-bottom: 0 !important; }
+    .window .enabled-row { margin-bottom: var(--homey-su-2) !important; }
 
-    button.add {
-      background: #eef2ff; color: #3730a3; border: 0; border-radius: 8px; padding: 9px 14px;
-      font-size: 14px; cursor: pointer;
+    /* Expand/collapse toggle wraps the chevron + title as one clickable control, left-aligned
+       and unstyled beyond that (it sits next to the Remove button in window-head-row, not as a
+       standalone button). Confirmed on-device this still picked up a shaded pill background from
+       somewhere (a plain <button>'s native UA chrome, or a Homey base button rule keying off the
+       tag rather than a homey-button-* class - either way, same story as .window's fieldset
+       padding above) despite already setting background/border/padding here, so every property
+       that could be drawing it is repeated with !important. */
+    .toggle {
+      display: flex; align-items: center; gap: var(--homey-su-2);
+      background: none !important; border: none !important; box-shadow: none !important;
+      padding: 0 !important; margin: 0; cursor: pointer; text-align: left;
     }
-    .bar { display: flex; justify-content: space-between; align-items: center; margin-top: 14px; }
-    .status { font-size: 13px; color: #6b7280; }
-    .status.error { color: #e0533d; }
-    button.save {
-      background: #16a34a; color: #fff; border: 0; border-radius: 8px; padding: 9px 18px;
-      font-size: 14px; cursor: pointer;
+    .chevron {
+      display: inline-block; font-size: var(--homey-font-size-large); color: var(--homey-text-color-light);
+      transition: transform .15s ease;
     }
-    button.save:disabled { background: #9ca3af; cursor: not-allowed; }
+    .toggle[aria-expanded="true"] .chevron { transform: rotate(90deg); }
+    .summary { color: var(--homey-text-color-light); font-size: var(--homey-font-size-small); }
+
+    .conflict-msg { color: var(--homey-text-color-red); font-size: var(--homey-font-size-small); margin-top: var(--homey-su-2); font-weight: var(--homey-font-weight-medium); }
+
+    /* Weekly coverage chart: a 7-column (Mon..Sun) x 24-row (hour) grid, one narrow label column
+       on the left. Built as plain HTML/CSS grid rather than SVG - the whole page is already
+       string-templated HTML, and a grid of divs needs no coordinate math. Cell background comes
+       from an inline style (per-window color), not a class, since the color is data-driven.
+       Uncovered-cell background is a literal rgba rather than a --homey-* token, same defensive
+       reasoning as --homey-line elsewhere in this file. */
+    .chart { margin-top: var(--homey-su-4); }
+    .chart-title { font-weight: var(--homey-font-weight-bold); margin-bottom: var(--homey-su-2); text-align: center; }
+    .chart-empty { color: var(--homey-text-color-light); font-size: var(--homey-font-size-small); }
+    .chart-grid {
+      display: grid; grid-template-columns: 34px repeat(7, 1fr); grid-template-rows: auto repeat(24, 8px);
+      gap: 1px; width: 100%;
+    }
+    .chart-day-label {
+      text-align: center; font-size: var(--homey-font-size-small); color: var(--homey-text-color-light);
+      padding-bottom: var(--homey-su-1);
+    }
+    .chart-hour-label {
+      text-align: right; padding-right: var(--homey-su-1); font-size: 9px; line-height: 8px;
+      color: var(--homey-text-color-light); white-space: nowrap;
+    }
+    .chart-slot { background: rgba(128, 128, 128, .12); border-radius: 1px; }
+    /* Per-window color now shown as a swatch on the window's own title (window-swatch below)
+       instead of a separate chart legend. */
+    .window-swatch { width: 10px; height: 10px; border-radius: 2px; display: inline-block; flex: none; }
+
+    /* Stacked rather than the status/button side-by-side row this used to be - a full-width
+       Save button needs the row to itself. */
+    .bar { display: flex; flex-direction: column; gap: var(--homey-su-2); margin-top: var(--homey-su-4); }
+    .status { font-size: var(--homey-font-size-small); color: var(--homey-text-color-light); }
+    .status.error { color: var(--homey-text-color-red); }
+    #save { width: 100%; }
   </style>
 </head>
 <body>
-  <h1 data-i18n="settings.title">Charging schedule</h1>
-  <p class="hint">
-    Configure weekly charging windows. These schedules have priority over solar surplus charging.
-    Turn a window off to keep it configured without deleting it.
-  </p>
+  <header class="homey-header">
+    <h1 class="homey-title">Charging schedule</h1>
+    <p class="homey-subtitle">
+      Configure weekly charging windows. These schedules have priority over solar surplus charging.
+    </p>
+  </header>
+
+  <div class="add-row">
+    <button type="button" class="homey-button-secondary-shadow" id="add">+ Add window</button>
+  </div>
 
   <div id="windows"></div>
-  <button class="add" id="add">+ Add window</button>
+  <div id="chart"></div>
 
   <div class="bar">
     <span class="status" id="status"></span>
-    <button class="save" id="save">Save</button>
+    <button type="button" class="homey-button-primary" id="save">Save</button>
   </div>
 
   <script type="text/javascript">
     var DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
     var DAY_NUM = [1, 2, 3, 4, 5, 6, 0]; // map UI index -> JS getDay()
     var MIN_A = 6, MAX_A = 32;
+    // Cycled by window index for the weekly coverage chart, so each window reads as a distinct
+    // color there and in its own window-swatch.
+    var WINDOW_COLORS = ['#0082fa', '#3fc700', '#ff8400', '#c0392b', '#8e44ad', '#16a085'];
     var windows = [];
+    // Chart renders from this, not the live `windows` array - it's a snapshot of the last
+    // successfully saved state, only replaced after a save actually succeeds (see the save
+    // handler below), so edits in progress don't change the chart until they're saved.
+    var savedWindows = [];
     var homeyRef = null;
 
     function conflicts() {
@@ -181,44 +320,151 @@
       return false;
     }
 
+    // Collapsed-row summary, e.g. "Mon-Fri, 9am-2pm". Runs day ranges in Mon..Sun (UI) order,
+    // not w.days' raw JS-getDay() order, so a Mon-Fri selection reads as one range instead of
+    // splitting at the Sun=0 wraparound.
+    function summarizeDays(days) {
+      if (!days || !days.length) return 'No days selected';
+      if (days.length === 7) return 'Every day';
+      var idx = days.map(function (d) { return DAY_NUM.indexOf(d); }).sort(function (a, b) { return a - b; });
+      var ranges = [];
+      var start = idx[0], prev = idx[0];
+      for (var k = 1; k <= idx.length; k++) {
+        var cur = idx[k];
+        if (cur === prev + 1) { prev = cur; continue; }
+        ranges.push(start === prev ? DAYS[start] : DAYS[start] + '-' + DAYS[prev]);
+        start = prev = cur;
+      }
+      return ranges.join(', ');
+    }
+    function formatTime12(t) {
+      var m = toMinutes(t);
+      if (m == null) return t || '';
+      var h24 = Math.floor(m / 60), min = m % 60;
+      var h12 = h24 % 12 || 12;
+      return h12 + (min ? ':' + (min < 10 ? '0' + min : min) : '') + (h24 < 12 ? 'am' : 'pm');
+    }
+    function windowSummary(w) {
+      return summarizeDays(w.days) + ', ' + formatTime12(w.start) + '-' + formatTime12(w.end) +
+        ', ' + (w.currentA ? w.currentA + ' amps' : 'max amps') + (w.boostToCap ? ' (boosted)' : '');
+    }
+
+    // Strips UI-only fields (expanded) down to what actually gets saved/charted - shared by the
+    // save payload and the savedWindows snapshot the chart renders from, so both stay in sync.
+    function toPayload(list) {
+      return list.map(function (w) {
+        return { days: w.days, start: w.start, end: w.end, currentA: w.currentA, enabled: w.enabled, boostToCap: w.boostToCap };
+      });
+    }
+
+    // Does window w cover the hour [hour, hour+1) on UI day column uiDayIndex (0=Mon..6=Sun)?
+    // Handles the overnight case where a window starting on one calendar day (e.g. Fri 22:00)
+    // spills into the next day's early hours (Sat 00:00-06:00) - that spillover day is often not
+    // itself in w.days, so it can't be checked by day-membership alone.
+    function cellCovered(w, uiDayIndex, hour) {
+      var s = toMinutes(w.start), e = toMinutes(w.end);
+      if (s == null || e == null) return false;
+      var overnight = e <= s;
+      var cellStart = hour * 60, cellEnd = cellStart + 60;
+      var dayNum = DAY_NUM[uiDayIndex];
+      var prevDayNum = DAY_NUM[(uiDayIndex + 6) % 7];
+      var coveredSameDay = w.days.indexOf(dayNum) !== -1 &&
+        (overnight ? cellEnd > s : cellStart < e && cellEnd > s);
+      var coveredFromPrevDay = overnight && w.days.indexOf(prevDayNum) !== -1 && cellStart < e;
+      return coveredSameDay || coveredFromPrevDay;
+    }
+
+    var CHART_TITLE = 'Weekly schedule (save to update)';
+
+    function renderChart() {
+      var el = document.getElementById('chart');
+      if (!el) return;
+      if (!savedWindows.length) {
+        el.innerHTML = '<div class="chart"><div class="chart-title">' + CHART_TITLE + '</div>' +
+          '<div class="chart-empty">Add a window to see it here.</div></div>';
+        return;
+      }
+      var cells = '<div class="chart-cell"></div>' +
+        DAYS.map(function (d) { return '<div class="chart-day-label">' + d + '</div>'; }).join('');
+      for (var h = 0; h < 24; h++) {
+        cells += '<div class="chart-hour-label">' + (h % 6 === 0 ? formatTime12((h < 10 ? '0' : '') + h + ':00') : '') + '</div>';
+        for (var c = 0; c < 7; c++) {
+          var style = '';
+          for (var wi = savedWindows.length - 1; wi >= 0; wi--) {
+            if (cellCovered(savedWindows[wi], c, h)) {
+              var color = WINDOW_COLORS[wi % WINDOW_COLORS.length];
+              var opacity = savedWindows[wi].enabled === false ? 0.25 : 0.85;
+              style = 'background:' + color + ';opacity:' + opacity + ';';
+              break;
+            }
+          }
+          cells += '<div class="chart-slot" style="' + style + '"></div>';
+        }
+      }
+      el.innerHTML = '<div class="chart"><div class="chart-title">' + CHART_TITLE + '</div>' +
+        '<div class="chart-grid">' + cells + '</div></div>';
+    }
+
     function render() {
       var root = document.getElementById('windows');
       root.innerHTML = '';
       var bad = conflicts();
       windows.forEach(function (w, i) {
-        var el = document.createElement('div');
-        el.className = 'window' + (w.enabled === false ? ' disabled' : '') + (bad[i] ? ' conflict' : '');
+        var el = document.createElement('fieldset');
+        el.className = 'window homey-form-fieldset' + (w.enabled === false ? ' disabled' : '') + (bad[i] ? ' conflict' : '');
         var days = DAYS.map(function (d, di) {
           var on = w.days.indexOf(DAY_NUM[di]) !== -1;
           return '<span class="day ' + (on ? 'on' : '') + '" data-w="' + i + '" data-d="' + DAY_NUM[di] + '">' + d + '</span>';
         }).join('');
         var amps = w.currentA || '';
+        var body = w.expanded
+          ? (
+            '<label class="homey-form-checkbox enabled-row">' +
+            '<input type="checkbox" class="homey-form-checkbox-input enabled" data-w="' + i + '" ' + (w.enabled === false ? '' : 'checked') + '>' +
+            '<span class="homey-form-checkbox-checkmark"></span>' +
+            '<span class="homey-form-checkbox-text">Enabled</span>' +
+            '</label>' +
+            '<div class="days">' + days + '</div>' +
+            '<div class="fields">' +
+            '<div class="homey-form-group field-time"><label class="homey-form-label">Start</label><div class="time-box"><input type="time" class="homey-form-input" data-w="' + i + '" data-f="start" value="' + w.start + '"></div></div>' +
+            '<div class="homey-form-group field-time"><label class="homey-form-label">End</label><div class="time-box"><input type="time" class="homey-form-input" data-w="' + i + '" data-f="end" value="' + w.end + '"></div></div>' +
+            '<div class="homey-form-group field-amps"><label class="homey-form-label" title="Leave blank to charge at your configured Maximum current setting">Amps</label>' +
+            '<div class="stepper">' +
+            '<button type="button" class="homey-button-transparent homey-button-small dec" data-w="' + i + '">−</button>' +
+            '<input type="number" class="homey-form-input" min="' + MIN_A + '" max="' + MAX_A + '" data-w="' + i + '" data-f="currentA" value="' + amps + '" placeholder="max" title="Leave blank to charge at your configured Maximum current setting">' +
+            '<button type="button" class="homey-button-transparent homey-button-small inc" data-w="' + i + '">+</button>' +
+            '</div></div>' +
+            '<div class="homey-form-group field-boost">' +
+            '<label class="homey-form-checkbox" title="Boost above the Amps value when the charger circuit has spare capacity">' +
+            '<input type="checkbox" class="homey-form-checkbox-input boost" data-w="' + i + '" ' + (w.boostToCap ? 'checked' : '') + '>' +
+            '<span class="homey-form-checkbox-checkmark"></span>' +
+            '<span class="homey-form-checkbox-text">Boost above Amps if spare capacity</span>' +
+            '</label>' +
+            '</div>' +
+            '</div>'
+          )
+          : '<div class="summary">' + windowSummary(w) + '</div>';
         el.innerHTML =
-          '<div class="window-head">' +
-          '<span class="window-title">Window ' + (i + 1) + '</span>' +
-          '<div class="switch-row">' +
-          '<label class="switch"><input type="checkbox" class="enabled" data-w="' + i + '" ' + (w.enabled === false ? '' : 'checked') + '><span class="slider"></span></label>' +
-          '<button class="remove" data-w="' + i + '">Remove</button>' +
+          '<div class="window-head-row">' +
+          '<button type="button" class="toggle" data-w="' + i + '" aria-expanded="' + (w.expanded ? 'true' : 'false') + '">' +
+          '<span class="chevron">▸</span>' +
+          '<span class="window-swatch" style="background:' + WINDOW_COLORS[i % WINDOW_COLORS.length] + '"></span>' +
+          '<span class="homey-form-legend window-title">Window ' + (i + 1) + '</span>' +
+          '</button>' +
+          '<button type="button" class="homey-button-danger-shadow homey-button-small remove" data-w="' + i + '">Remove</button>' +
           '</div>' +
-          '</div>' +
-          '<div class="days">' + days + '</div>' +
-          '<div class="fields">' +
-          '<div class="field"><label>Start</label><input type="time" data-w="' + i + '" data-f="start" value="' + w.start + '"></div>' +
-          '<div class="field"><label>End</label><input type="time" data-w="' + i + '" data-f="end" value="' + w.end + '"></div>' +
-          '<div class="field"><label>Amps (optional)</label>' +
-          '<div class="stepper">' +
-          '<button type="button" class="dec" data-w="' + i + '">−</button>' +
-          '<input type="number" min="' + MIN_A + '" max="' + MAX_A + '" data-w="' + i + '" data-f="currentA" value="' + amps + '" placeholder="max">' +
-          '<button type="button" class="inc" data-w="' + i + '">+</button>' +
-          '</div></div>' +
-          '<div class="field boost-field">' +
-          '<label class="boost-check"><input type="checkbox" class="boost" data-w="' + i + '" ' + (w.boostToCap ? 'checked' : '') + '> Boost above Amps when the charger circuit has spare capacity</label>' +
-          '</div>' +
-          '</div>' +
+          body +
           (bad[i] ? '<div class="conflict-msg">Overlaps another enabled window</div>' : '');
         root.appendChild(el);
       });
 
+      root.querySelectorAll('.toggle').forEach(function (btn) {
+        btn.onclick = function () {
+          var wi = +btn.getAttribute('data-w');
+          windows[wi].expanded = !windows[wi].expanded;
+          render();
+        };
+      });
       root.querySelectorAll('.day').forEach(function (d) {
         d.onclick = function () {
           var wi = +d.getAttribute('data-w'); var dn = +d.getAttribute('data-d');
@@ -227,10 +473,21 @@
           render();
         };
       });
-      root.querySelectorAll('input[type=time], input[type=number]').forEach(function (inp) {
+      // Time inputs use the platform's native time picker (hour/minute/AM-PM in one
+      // control). A full render() rebuilds the input element, which closes that
+      // picker after the first segment is set - so only patch the conflict UI here,
+      // leaving the input (and its open picker) alone.
+      root.querySelectorAll('input[type=time]').forEach(function (inp) {
         inp.onchange = function () {
           var wi = +inp.getAttribute('data-w'); var f = inp.getAttribute('data-f');
-          windows[wi][f] = f === 'currentA' ? (inp.value ? +inp.value : undefined) : inp.value;
+          windows[wi][f] = inp.value;
+          updateConflictUI();
+        };
+      });
+      root.querySelectorAll('input[type=number]').forEach(function (inp) {
+        inp.onchange = function () {
+          var wi = +inp.getAttribute('data-w'); var f = inp.getAttribute('data-f');
+          windows[wi][f] = inp.value ? +inp.value : undefined;
           render();
         };
       });
@@ -263,6 +520,27 @@
       document.getElementById('save').disabled = Object.keys(bad).length > 0;
     }
 
+    // Lightweight counterpart to render(): re-evaluates conflicts and patches
+    // just the .window/conflict-msg classes + save button, without touching any
+    // input element (see the time-input handler above for why that matters).
+    function updateConflictUI() {
+      var bad = conflicts();
+      var els = document.querySelectorAll('#windows > .window');
+      els.forEach(function (el, i) {
+        el.classList.toggle('conflict', !!bad[i]);
+        var msg = el.querySelector('.conflict-msg');
+        if (bad[i] && !msg) {
+          msg = document.createElement('div');
+          msg.className = 'conflict-msg';
+          msg.textContent = 'Overlaps another enabled window';
+          el.appendChild(msg);
+        } else if (!bad[i] && msg) {
+          msg.remove();
+        }
+      });
+      document.getElementById('save').disabled = Object.keys(bad).length > 0;
+    }
+
     function setStatus(t, isError) {
       var el = document.getElementById('status');
       el.textContent = t;
@@ -273,17 +551,21 @@
       homeyRef = Homey;
       Homey.ready();
       Homey.api('GET', '/getSchedule', null, function (err, result) {
+        // Windows load collapsed by default (expanded is UI-only state, never persisted -
+        // see the save handler below, which strips it back out before sending).
         windows = (!err && Array.isArray(result)) ? result.map(function (w) {
           return {
             days: w.days || [], start: w.start || '22:00', end: w.end || '06:00', currentA: w.currentA,
-            enabled: w.enabled !== false, boostToCap: w.boostToCap === true,
+            enabled: w.enabled !== false, boostToCap: w.boostToCap === true, expanded: false,
           };
         }) : [];
+        savedWindows = toPayload(windows);
         render();
+        renderChart();
       });
 
       document.getElementById('add').onclick = function () {
-        windows.push({ days: [1, 2, 3, 4, 5], start: '22:00', end: '06:00', enabled: true });
+        windows.push({ days: [1, 2, 3, 4, 5, 6, 0], start: '22:00', end: '06:00', enabled: true, expanded: true });
         render();
       };
       document.getElementById('save').onclick = function () {
@@ -291,9 +573,21 @@
           setStatus('Fix overlapping windows before saving.', true);
           return;
         }
+        var saveBtn = document.getElementById('save');
+        saveBtn.textContent = 'Saving...';
+        saveBtn.disabled = true;
         setStatus('Saving…');
-        Homey.api('POST', '/setSchedule', { windows: windows }, function (err) {
-          setStatus(err ? ('Error: ' + (err.message || err)) : 'Saved.', !!err);
+        var payload = toPayload(windows);
+        Homey.api('POST', '/setSchedule', { windows: payload }, function (err) {
+          saveBtn.textContent = 'Save';
+          saveBtn.disabled = Object.keys(conflicts()).length > 0;
+          if (err) {
+            setStatus('Error: ' + (err.message || err), true);
+          } else {
+            setStatus('');
+            savedWindows = payload;
+            renderChart();
+          }
         });
       };
     }

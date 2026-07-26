@@ -3,39 +3,66 @@
 <head>
   <meta charset="utf-8" />
   <style>
-    body { font-family: -apple-system, "Segoe UI", Roboto, sans-serif; padding: 20px; color: #1a1a1a; }
-    h2 { font-size: 18px; margin: 0 0 8px; }
-    p { font-size: 14px; line-height: 1.5; color: #374151; }
-    ol { font-size: 14px; line-height: 1.6; padding-left: 20px; }
-    .url { margin: 14px 0; padding: 12px 14px; background: #0f172a; color: #e2e8f0; border-radius: 8px;
-           font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 14px; word-break: break-all; }
-    .url b { color: #fbbf24; }
-    .note { font-size: 13px; color: #6b7280; }
+    /*
+      Styled with Homey's own Style Library (`.homey-header`/`.homey-title`/`.homey-subtitle`,
+      `.homey-text-*` - see https://apps.developer.homey.app/advanced/custom-views/html-and-css-styling)
+      instead of hand-rolled colors/fonts, matching family.bothe.dexcom's drivers/follower/pair/login.html.
+      Applied to custom pair views without an explicit stylesheet <link> or <script src="/homey.js">
+      tag - same as this file's existing direct use of Homey.emit() below. This step declares
+      "navigation": { "next": "list_devices" } in driver.compose.json, so Homey renders its own
+      native Continue button chrome; this view supplies no button of its own.
+    */
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 0; }
+    /* Mirrors the on-device divider override in dexcom's login.html - Homey's real Style Library
+       renders a border under the title/subtitle block that test/-less repos can't reproduce or
+       verify without a real device. No-op if a future firmware removes that native divider. */
+    .homey-header { border-bottom: none; box-shadow: none; text-align: center; }
+
+    ol.homey-text-regular { margin: 0; padding-left: var(--homey-su-5); text-align: left; }
+    ol.homey-text-regular li + li { margin-top: var(--homey-su-1); }
+
+    /* No Style Library class documents a code/URL block. A bordered/shaded box was tried here,
+       but on a real device the border/background didn't actually render (only the box's own
+       padding did, visibly indenting the text past the rest of step 2) - so this is now plain
+       monospace text, flush left with the rest of step 2's text, no box at all. */
+    .url {
+      margin: 0;
+      color: var(--homey-text-color);
+      font-family: ui-monospace, Menlo, Consolas, monospace;
+      font-size: var(--homey-font-size-small);
+      word-break: break-all;
+    }
   </style>
 </head>
 <body>
-  <h2>Connect your charger</h2>
-  <p>Connect your charger and point your charger's OCPP client at this Homey:</p>
+  <header class="homey-header">
+    <h1 class="homey-title">Connect your charger</h1>
+    <div class="homey-subtitle">Connect your charger and point your charger's OCPP client at this Homey:</div>
+  </header>
 
-  <ol>
+  <ol class="homey-text-regular">
     <li>Open your charger's OCPP settings.</li>
-    <li>Set the OCPP URL to the address below.</li>
-    <li>Use OCPP <b>1.6J</b> over WebSocket. Leave the charge point identity as is.</li>
+    <li>
+      Set the URL to the address below.
+      <div class="url" id="url">ws://…</div>
+    </li>
+    <li>Leave <b>Charge point identity</b> as whatever your charger already filled in (or set your own).</li>
+    <li>Use OCPP <b>1.6J</b> over WebSocket.</li>
     <li>Save and let the charger connect, then continue.</li>
   </ol>
 
-  <div class="url" id="url">ws://…</div>
-  <p class="note">The last path segment is your charger's own identity (Charge Point ID). Once it connects it will appear on the next screen.</p>
-
   <script type="application/javascript">
+    // No charge-point-id path segment here - the charger's own OCPP client appends its
+    // "Charge point identity" (a separate field in its own settings, see step 3) to this
+    // base URL by itself. Homey never needs to know that value ahead of time; it just
+    // reads whatever the charger connects with (list_devices in driver.ts).
     Homey.emit('getConnectionInfo', null).then(function (info) {
       var ip = (info && info.ip) || '<homey-ip>';
       var port = (info && info.port) || 9000;
-      document.getElementById('url').innerHTML =
-        'ws://' + ip + ':' + port + '/<b>&lt;charge-point-id&gt;</b>';
+      document.getElementById('url').textContent = 'ws://' + ip + ':' + port;
     }).catch(function () {
-      document.getElementById('url').innerHTML =
-        'ws://&lt;homey-ip&gt;:9000/<b>&lt;charge-point-id&gt;</b>';
+      document.getElementById('url').textContent = 'ws://<homey-ip>:9000';
     });
   </script>
 </body>
