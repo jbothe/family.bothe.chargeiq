@@ -115,6 +115,9 @@ export class ChargePoint extends EventEmitter {
 
   private lastReadings: Readings | null = null;
 
+  /** Transaction id granted to this charge point, if a session is on record - see getLastTransactionId(). */
+  private lastTransactionId: number | null = null;
+
   /** Silence (ms) tolerated before the link is presumed dead; 0 disables the watchdog. */
   private livenessTimeoutMs: number;
 
@@ -168,6 +171,22 @@ export class ChargePoint extends EventEmitter {
   /** Last known parsed readings (for a device that binds after connect). */
   getLastReadings(): Readings | null {
     return this.lastReadings;
+  }
+
+  /**
+   * The transaction id most recently granted to this charge point, or null if
+   * no session is on record. Tracked here, rather than only in the controller,
+   * because the id is allocated and returned to the charger inside the
+   * StartTransaction handler - which runs whether or not a controller happens
+   * to be listening yet. Without this, an id handed out before the device
+   * finished initialising would be known to the charger and to nobody else,
+   * leaving every subsequent TxProfile write pointing at a stale id (observed
+   * on real hardware: the app wrote tx=48 against a live session 49, and both
+   * writes came back rejected). Same rationale as getLastStatus()/
+   * getLastReadings(): a late-binding device must be able to catch up.
+   */
+  getLastTransactionId(): number | null {
+    return this.lastTransactionId;
   }
 
   /** Update the authorize policy at runtime (e.g. settings change). */
@@ -231,12 +250,20 @@ export class ChargePoint extends EventEmitter {
       const accepted = this.authorize(req.idTag);
       const transactionId = this.nextTransactionId();
       const idTagInfo: IdTagInfo = { status: accepted ? 'Accepted' : 'Invalid' };
-      if (accepted) this.emit('startTransaction', transactionId, req);
+      // Recorded before the emit, so it is set even if no controller is
+      // listening yet (see getLastTransactionId()). Only on acceptance: a
+      // rejected idTag still gets an id in the response per OCPP, but there is
+      // no session to track.
+      if (accepted) {
+        this.lastTransactionId = transactionId;
+        this.emit('startTransaction', transactionId, req);
+      }
       return { transactionId, idTagInfo };
     });
 
     handle('StopTransaction', ({ params }) => {
       const req = params as StopTransactionReq;
+      this.lastTransactionId = null;
       this.emit('stopTransaction', req);
       return { idTagInfo: { status: 'Accepted' } as IdTagInfo };
     });

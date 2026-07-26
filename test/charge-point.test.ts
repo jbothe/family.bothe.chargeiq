@@ -300,3 +300,44 @@ test('clearChargingProfile() sends ClearChargingProfile, with or without a speci
   await cp.clearChargingProfile(5);
   assert.deepEqual(client.calls[client.calls.length - 1], { method: 'ClearChargingProfile', params: { id: 5 } });
 });
+
+// ---------------------------------------------------------------------------
+// Transaction id bookkeeping (for a controller that binds after the fact)
+// ---------------------------------------------------------------------------
+
+test('the transaction id handed to the charger is recorded even with no listener attached', () => {
+  let next = 48;
+  const cp = new ChargePoint({
+    identity: 'TEST01',
+    authorize: () => true,
+    nextTransactionId: () => {
+      next += 1; return next;
+    },
+  });
+  const client = new FakeRpcClient();
+  cp.attach(client);
+  assert.equal(cp.getLastTransactionId(), null, 'no session yet');
+
+  // Nothing is listening for 'startTransaction' here - exactly the race where
+  // the OCPP connection beats the device's own init.
+  const res = client.dispatch('StartTransaction', {
+    connectorId: 1, idTag: 'X', meterStart: 0, timestamp: '',
+  });
+  assert.equal(res.transactionId, 49);
+  assert.equal(cp.getLastTransactionId(), 49,
+    'the charge point remembers what it told the charger, so a late-binding controller can catch up');
+
+  client.dispatch('StopTransaction', { transactionId: 49, meterStop: 10, timestamp: '' });
+  assert.equal(cp.getLastTransactionId(), null, 'cleared once the session ends');
+});
+
+test('a rejected idTag records no transaction id, since there is no session to track', () => {
+  const cp = makeCp(() => false);
+  const client = new FakeRpcClient();
+  cp.attach(client);
+  const res = client.dispatch('StartTransaction', {
+    connectorId: 1, idTag: 'X', meterStart: 0, timestamp: '',
+  });
+  assert.deepEqual(res.idTagInfo, { status: 'Invalid' });
+  assert.equal(cp.getLastTransactionId(), null);
+});

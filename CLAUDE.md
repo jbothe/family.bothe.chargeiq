@@ -141,6 +141,45 @@ live `READY` chip. `PF.isOffline()` gates strictly on `online === false` so `nul
 window, or an older state payload) never reads as an outage, and offline outranks any cached
 `chargingState`; EV power renders `–` (unknown), not the last figure before the charger vanished.
 
+### A resolved target is not an applied one
+`[decision:…]` logs what the controller *decided*; two separate things can stop that reaching the
+charger, and both now say so on the same line rather than reading like a successful apply:
+- `OFFLINE …(not sent)` — no OCPP link (see the connectivity section above).
+- `NOT SENT (<reason>)` — connected, but `ensureCharging()` isn't write-eligible. `writeBlockedBecause()`
+  mirrors that eligibility test purely to report it. The reason that matters is **`Finishing`**: it is
+  in `PLUGGED` but explicitly excluded from `ensureCharging()`'s `plugged`, and `onStatus()`'s
+  Finishing branch clears `transactionId`, so `eligible` is false *for as long as the charger sits
+  there*. Confirmed on real hardware: a charger restart mid-schedule ended its session with
+  `PowerLoss`, the Wallbox parked in `Finishing`, and the app then spent 3m14s resolving 21A → 22A →
+  23A — updating `desiredAmps` and `charge_current_limit` each time — without attempting one write,
+  while every log line still read `-> 23A`. Only a physical unplug/replug (`Finishing → Available →
+  SuspendedEV`) cleared it, which is the documented Wallbox behaviour, not something the app can
+  drive. So the app **reports** it (`needsReplug` → a device warning asking for the replug) rather
+  than trying to force its way out. `Available`/"nothing plugged in" is logged the same way but
+  deliberately raises **no** warning — that's an ordinary idle state, not something to nag about.
+- `refreshWarning()` is the single owner of `setWarning`: a fault outranks the replug prompt, and
+  neither can clobber the other. `onStatus()` previously wrote the banner directly on every status,
+  which cleared anything set between reports.
+- Becoming write-eligible again (`regained`) is **urgent** — it bypasses `writeThrottleMs` like a
+  tightening cap does. The charger is running whatever profile predates the gap, and the target
+  usually hasn't changed across the transition (it kept moving while blocked), so the write is
+  triggered only by the eligibility edge; making it wait out the throttle would leave the charger
+  wrong for up to 15s right after the user physically intervened.
+
+### `transactionId` has two sources, and the charge point's wins
+`ChargePoint`'s `StartTransaction` handler allocates the id and answers the charger **whether or not
+a controller is listening** — a device still initialising while the OCPP connection is already up
+misses the `startTransaction` event entirely, and nothing persists the id. Confirmed on real
+hardware: the app held 48 while the charger's live session was 49, so every `TxProfile` write went to
+a transaction that didn't exist and came back `rejected`. `ChargePoint` therefore records what it
+handed out (`getLastTransactionId()`, same late-binder rationale as `getLastStatus()`/
+`getLastReadings()`), and `bind()` → `adoptTransactionId()` takes it over the stored value. A **null**
+on the charge point's side is never adopted — that just means no `StartTransaction` this connection,
+which is exactly the restart-onto-a-live-session case the stored id exists for. `onStopTransaction()`
+logs any surviving mismatch, and a rejected `TxProfile` now retries once as `TxDefaultProfile`
+(no id needed, and already confirmed obeyed on this hardware) instead of waiting for the target to
+next move.
+
 ### Key invariants / gotchas
 - **Amps are always floored** (never rounded up) when converting W→A, in `SolarLoop`, the
   household cap, and `clampAmps` — a target must never exceed available surplus/limit.

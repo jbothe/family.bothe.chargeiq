@@ -2206,9 +2206,18 @@ function makeBoundController(extraStore: Record<string, unknown> = {}, extraSett
   c: ChargeController; cp: ChargePoint; caps: Record<string, unknown>; store: Record<string, unknown>;
   events: { event: string; tokens: ChargingTokens }[]; faults: string[];
   connectEvents: true[]; disconnectEvents: true[];
+  logs: string[]; warnings: (string | null)[];
+  calls: { method: string; params?: Record<string, unknown> }[];
 } {
+  const calls: { method: string; params?: Record<string, unknown> }[] = [];
   const fakeClient: RpcClient = {
-    identity: 'X', handle: () => {}, call: async () => ({ status: 'Accepted' }), close: async () => {}, on: () => {},
+    identity: 'X',
+    handle: () => {},
+    call: async (method: string, params?: Record<string, unknown>) => {
+      calls.push({ method, params }); return { status: 'Accepted' };
+    },
+    close: async () => {},
+    on: () => {},
   };
   const cp = new ChargePoint({ identity: 'X', authorize: () => true, nextTransactionId: () => 1 });
   cp.attach(fakeClient);
@@ -2222,6 +2231,8 @@ function makeBoundController(extraStore: Record<string, unknown> = {}, extraSett
   const faults: string[] = [];
   const connectEvents: true[] = [];
   const disconnectEvents: true[] = [];
+  const logs: string[] = [];
+  const warnings: (string | null)[] = [];
   const host: ControllerHost = {
     identity: 'X',
     setCapability: (k, v) => {
@@ -2234,8 +2245,12 @@ function makeBoundController(extraStore: Record<string, unknown> = {}, extraSett
     },
     setAvailable: () => {},
     setUnavailable: () => {},
-    setWarning: () => {},
-    log: () => {},
+    setWarning: (msg) => {
+      warnings.push(msg);
+    },
+    log: (...a) => {
+      logs.push(a.join(' '));
+    },
     error: () => {},
     onChargingEvent: (event, tokens) => {
       events.push({ event, tokens });
@@ -2254,7 +2269,7 @@ function makeBoundController(extraStore: Record<string, unknown> = {}, extraSett
   const c = new ChargeController(host, cs);
   c.init();
   return {
-    c, cp, caps, store, events, faults, connectEvents, disconnectEvents,
+    c, cp, caps, store, events, faults, connectEvents, disconnectEvents, logs, warnings, calls,
   };
 }
 
@@ -2705,4 +2720,251 @@ test('the decision log calls out that a resolved target could not be sent while 
   const line = h.logs.filter((l) => l.startsWith('[decision:')).pop();
   assert.ok(line?.includes('OFFLINE'), `expected the link state in the decision line, got: ${line}`);
   assert.ok(line?.includes('not sent'));
+});
+
+// ---------------------------------------------------------------------------
+// The Finishing deadlock, and the stale transaction id behind it
+// (both reproduced from a real hardware log: charger restarted mid-schedule,
+// PowerLoss ended its session, and the app then spent 3m14s resolving
+// 21A -> 22A -> 23A without attempting a single write)
+// ---------------------------------------------------------------------------
+
+const status = (s: string) => ({ connectorId: 1, errorCode: 'NoError', status: s });
+const decisions = (logs: string[]) => logs.filter((l) => l.startsWith('[decision:'));
+
+test('a target the charger cannot be given is logged as NOT SENT, never as if it had been applied', () => {
+  const { c, cp, logs } = makeBoundController();
+  cp.emit('startTransaction', 49, {
+    connectorId: 1, idTag: 'X', meterStart: 0, timestamp: '',
+  });
+  cp.emit('status', status('Charging'));
+  c.setSolarTarget(21);
+  assert.ok(decisions(logs).pop()?.includes('-> 21A'));
+  assert.ok(!decisions(logs).pop()?.includes('NOT SENT'), 'a live session applies normally');
+
+  // PowerLoss ends the session; the Wallbox parks in Finishing, which clears
+  // the transaction id and leaves ensureCharging() with nothing to write to.
+  logs.length = 0;
+  cp.emit('status', status('Finishing'));
+  const line = decisions(logs).pop();
+  assert.ok(line?.includes('-> 21A'), 'the decision itself is unchanged - solar still wants 21A');
+  assert.ok(line?.includes('NOT SENT'), `expected a NOT SENT note, got: ${line}`);
+  assert.ok(line?.includes('Finishing'), 'and it names the actual reason');
+});
+
+test('parking in Finishing with a live target raises a replug warning, cleared once it recovers', () => {
+  const { c, cp, warnings } = makeBoundController();
+  cp.emit('startTransaction', 49, {
+    connectorId: 1, idTag: 'X', meterStart: 0, timestamp: '',
+  });
+  cp.emit('status', status('Charging'));
+  c.setSolarTarget(21);
+  warnings.length = 0;
+
+  cp.emit('status', status('Finishing'));
+  assert.equal(warnings.length, 1);
+  assert.ok(String(warnings[0]).includes('unplug and replug'),
+    'the one thing the user actually has to do, said out loud');
+
+  // The physical replug: Finishing -> Available -> SuspendedEV, as on hardware.
+  cp.emit('status', status('Available'));
+  cp.emit('status', status('SuspendedEV'));
+  assert.equal(warnings[warnings.length - 1], null, 'cleared once the charger can be driven again');
+});
+
+test('the replug warning does not fire for an ordinary idle charger with nothing plugged in', () => {
+  const {
+    c, cp, warnings, logs,
+  } = makeBoundController();
+  cp.emit('status', status('Available'));
+  c.setSolarTarget(21);
+  assert.deepEqual(warnings.filter((w) => w != null), [], 'no car plugged in is not something to nag about');
+  assert.ok(decisions(logs).pop()?.includes('NOT SENT'), 'still logged honestly, just not escalated to a banner');
+});
+
+test('a fault warning is not clobbered by the next non-Faulted status report', () => {
+  const { cp, warnings } = makeBoundController();
+  cp.emit('status', { connectorId: 1, errorCode: 'GroundFailure', status: 'Faulted' });
+  assert.ok(String(warnings[warnings.length - 1]).includes('GroundFailure'));
+  cp.emit('status', status('Charging'));
+  assert.equal(warnings[warnings.length - 1], null, 'and does clear once the fault actually goes away');
+});
+
+test('recovering from Finishing writes the profile even though the target never changed while blocked', () => {
+  const { c, cp, logs } = makeBoundController();
+  cp.emit('startTransaction', 49, {
+    connectorId: 1, idTag: 'X', meterStart: 0, timestamp: '',
+  });
+  cp.emit('status', status('Charging'));
+  c.setSolarTarget(21);
+  cp.emit('status', status('Finishing'));
+
+  // Targets keep moving while blocked - exactly what the hardware log showed -
+  // so on recovery the value itself is unchanged and only the eligibility
+  // transition can trigger the write.
+  c.setSolarTarget(23);
+  logs.length = 0;
+  assert.equal(logs.filter((l) => l.includes('setting profile')).length, 0, 'nothing written while parked');
+
+  cp.emit('status', status('Available'));
+  cp.emit('status', status('SuspendedEV'));
+  assert.ok(logs.some((l) => l.includes('setting profile: 23A')),
+    'becoming write-eligible again must flush the current target, not wait for it to move');
+});
+
+test('bind() adopts the charge point\'s own transaction id over a stale stored one', () => {
+  // Captures whatever attach() registers, so the real StartTransaction handler
+  // can be driven - the point of this test is the id the *handler* records
+  // while no controller is listening, which faking the event would skip.
+  let startTransaction: ((ctx: { params: unknown }) => Record<string, unknown>) | null = null;
+  const fakeClient: RpcClient = {
+    identity: 'X',
+    handle: (m: unknown, h?: unknown) => {
+      if (m === 'StartTransaction') startTransaction = h as typeof startTransaction;
+    },
+    call: async () => ({ status: 'Accepted' }),
+    close: async () => {},
+    on: () => {},
+  };
+  const cp = new ChargePoint({ identity: 'X', authorize: () => true, nextTransactionId: () => 49 });
+  cp.attach(fakeClient);
+
+  const store: Record<string, unknown> = { schedule: [], transactionId: 48 };
+  const logs: string[] = [];
+  const host: ControllerHost = {
+    identity: 'X',
+    setCapability: () => {},
+    getSetting: <T>(k: string) => ({
+      minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdA: 60, householdPhases: 1,
+    } as Record<string, unknown>)[k] as T,
+    getStore: <T>(k: string) => store[k] as T,
+    setStore: async (k, v) => {
+      store[k] = v;
+    },
+    setAvailable: () => {},
+    setUnavailable: () => {},
+    setWarning: () => {},
+    log: (...a) => {
+      logs.push(a.join(' '));
+    },
+    error: () => {},
+  };
+  const cs = Object.assign(new EventEmitter(), {
+    getChargePoint: (): ChargePoint | undefined => undefined,
+  }) as unknown as CentralSystem;
+  const c = new ChargeController(host, cs);
+  c.init();
+  assert.equal(store.transactionId, 48, 'nothing bound yet - the stored id stands');
+
+  // The charge point answers a StartTransaction with 49 while nobody is
+  // listening (device init racing the OCPP connection), then the controller
+  // binds. Nothing persisted the id, so the store still says 48.
+  const res = startTransaction!({
+    params: {
+      connectorId: 1, idTag: 'X', meterStart: 0, timestamp: '',
+    },
+  });
+  assert.equal(res.transactionId, 49, 'the charger was told 49');
+  assert.equal(store.transactionId, 48, 'and nothing wrote it down');
+  cs.emit('connect', cp);
+
+  assert.equal(store.transactionId, 49, 'the live connection wins over a previous process\'s record');
+  assert.ok(logs.some((l) => l.includes('adopting transaction 49')));
+  assert.ok(c.isCharging(), 'and the controller now tracks a session it would otherwise have missed');
+});
+
+test('a StopTransaction for an id we were not tracking is called out explicitly', () => {
+  const { cp, logs } = makeBoundController();
+  cp.emit('startTransaction', 48, {
+    connectorId: 1, idTag: 'X', meterStart: 0, timestamp: '',
+  });
+  logs.length = 0;
+  cp.emit('stopTransaction', {
+    transactionId: 49, meterStop: 5324929, timestamp: '', reason: 'PowerLoss',
+  });
+  assert.ok(logs.some((l) => l.includes('transaction id mismatch') && l.includes('49') && l.includes('48')),
+    'the tell-tale for a write that was going to a dead session');
+});
+
+/**
+ * A controller whose charger can be told to reject any TxProfile (i.e. not
+ * recognise the transaction id), for the write-retry path.
+ */
+function makeRetryController(rejectTxProfile: boolean): {
+  c: ChargeController; cp: ChargePoint; logs: string[];
+  profileTxIds: () => (number | undefined)[];
+} {
+  const calls: { method: string; params?: Record<string, unknown> }[] = [];
+  const fakeClient: RpcClient = {
+    identity: 'X',
+    handle: () => {},
+    call: async (method: string, params?: Record<string, unknown>) => {
+      calls.push({ method, params });
+      if (method !== 'SetChargingProfile') return { status: 'Accepted' };
+      const profile = (params as { csChargingProfiles?: { transactionId?: number } }).csChargingProfiles;
+      return { status: profile?.transactionId != null && rejectTxProfile ? 'Rejected' : 'Accepted' };
+    },
+    close: async () => {},
+    on: () => {},
+  };
+  const cp = new ChargePoint({ identity: 'X', authorize: () => true, nextTransactionId: () => 1 });
+  cp.attach(fakeClient);
+
+  const store: Record<string, unknown> = { schedule: [], transactionId: 48 };
+  const logs: string[] = [];
+  const host: ControllerHost = {
+    identity: 'X',
+    setCapability: () => {},
+    getSetting: <T>(k: string) => ({
+      minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdA: 60, householdPhases: 1,
+    } as Record<string, unknown>)[k] as T,
+    getStore: <T>(k: string) => store[k] as T,
+    setStore: async (k, v) => {
+      store[k] = v;
+    },
+    setAvailable: () => {},
+    setUnavailable: () => {},
+    setWarning: () => {},
+    log: (...a) => {
+      logs.push(a.join(' '));
+    },
+    error: () => {},
+  };
+  const cs = { getChargePoint: () => cp, on: () => {} } as unknown as CentralSystem;
+  const c = new ChargeController(host, cs);
+  c.init();
+  return {
+    c,
+    cp,
+    logs,
+    profileTxIds: () => calls.filter((x) => x.method === 'SetChargingProfile')
+      .map((x) => (x.params as { csChargingProfiles: { transactionId?: number } }).csChargingProfiles.transactionId),
+  };
+}
+
+/** Let writeProfile()'s awaits settle - it is fired from a synchronous path. */
+const settle = () => new Promise((r) => {
+  setImmediate(r);
+});
+
+test('a rejected TxProfile write is retried once as TxDefaultProfile, which needs no transaction id', async () => {
+  const {
+    c, cp, logs, profileTxIds,
+  } = makeRetryController(true);
+  cp.emit('status', { connectorId: 1, errorCode: 'NoError', status: 'Charging' });
+  c.setSolarTarget(21);
+  await settle();
+
+  assert.deepEqual(profileTxIds(), [48, undefined],
+    'the rejected TxProfile is followed immediately by a TxDefaultProfile, not left until the target next moves');
+  assert.ok(logs.some((l) => l.includes('retrying as TxDefaultProfile')));
+  assert.ok(logs.some((l) => l.includes('profile retry accepted')));
+});
+
+test('an accepted TxProfile write is not followed by a pointless retry', async () => {
+  const { c, cp, profileTxIds } = makeRetryController(false);
+  cp.emit('status', { connectorId: 1, errorCode: 'NoError', status: 'Charging' });
+  c.setSolarTarget(21);
+  await settle();
+  assert.deepEqual(profileTxIds(), [48], 'the retry is specific to a rejection');
 });
