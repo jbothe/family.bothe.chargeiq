@@ -3,16 +3,16 @@
     "type": "group",
     "label": { "en": "Household electrical" },
     "children": [
-      { "id": "voltage", "type": "number", "label": { "en": "Nominal voltage (V)" }, "hint": { "en": "Grid voltage used for watt/amp conversions everywhere - with Household phases below for the household cap, and with the EV charger's own Phases setting for solar and charger-circuit calculations. Use the nominal value for your grid (e.g. 230) - it doesn't need to track the live measured voltage." }, "value": 230, "min": 100, "max": 480 },
-      { "id": "maxHouseholdA", "type": "number", "label": { "en": "Household main fuse rating (A)" }, "hint": { "en": "Your home's main fuse/breaker rating per phase, matching Household phases below - most main breakers are amp-rated, not watt-rated. Charging is throttled in any mode so total grid import never exceeds this. Set 0 to disable." }, "value": 63, "min": 0, "max": 250 },
-      { "id": "householdPhases", "type": "number", "label": { "en": "Household phases" }, "hint": { "en": "How many phases your home's main supply has (independent of the EV charger's own Phases setting below - a single-phase charger on a 3-phase household connection is common). Used with Main fuse rating and Nominal voltage above to compute the household grid cap." }, "value": 1, "min": 1, "max": 3, "step": 1 }
+      { "id": "householdPhases", "type": "number", "label": { "en": "Household phases" }, "hint": { "en": "How many phases your home's main supply has (independent of the EV charger's own Charger phases setting below - a single-phase charger on a 3-phase household connection is common). Used with Main fuse rating and Nominal voltage below to compute the household grid cap." }, "value": 1, "min": 1, "max": 3, "step": 1 },
+      { "id": "voltage", "type": "number", "label": { "en": "Nominal voltage (V)" }, "hint": { "en": "Grid voltage used for watt/amp conversions everywhere - with Household phases above for the household cap, and with the EV charger's own Charger phases setting for solar and charger-circuit calculations. Use the nominal value for your grid (e.g. 230) - it doesn't need to track the live measured voltage." }, "value": 230, "min": 100, "max": 480 },
+      { "id": "maxHouseholdA", "type": "number", "label": { "en": "Household main fuse rating (A)" }, "hint": { "en": "Your home's main fuse/breaker rating per phase, matching Household phases above - most main breakers are amp-rated, not watt-rated. Charging is throttled in any mode so total grid import never exceeds this. Set 0 to disable." }, "value": 63, "min": 0, "max": 250 }
     ]
   },
   {
     "type": "group",
     "label": { "en": "EV charger electrical" },
     "children": [
-      { "id": "phases", "type": "number", "label": { "en": "Phases" }, "hint": { "en": "How many phases the charger is wired on (1 or 3). Used with Nominal voltage (under Household electrical above) for solar and charger-circuit watt/amp conversions, and sent to the charger in every charging profile." }, "value": 1, "min": 1, "max": 3, "step": 1 },
+      { "id": "phases", "type": "number", "label": { "en": "Charger phases" }, "hint": { "en": "How many phases the charger is wired on (1 or 3). Used with Nominal voltage (under Household electrical above) for solar and charger-circuit watt/amp conversions, and sent to the charger in every charging profile." }, "value": 1, "min": 1, "max": 3, "step": 1 },
       { "id": "minAmps", "type": "number", "label": { "en": "Minimum current (A)" }, "hint": { "en": "Lowest current ever sent to the charger once it's told to charge - manual, scheduled, and solar targets are all floored to this. Also the surplus threshold: solar charging only starts once available surplus reaches at least this many amps." }, "value": 6, "min": 1, "max": 32 },
       { "id": "maxAmps", "type": "number", "label": { "en": "Maximum current (A)" }, "hint": { "en": "Highest current ever sent to the charger, in any mode. Manual, scheduled, and solar targets are all capped to this - match it to what the charger and your home's wiring/breaker support." }, "value": 32, "min": 6, "max": 80 }
     ]

@@ -28,6 +28,9 @@
     "meter_power": {
       "title": { "en": "Energy (total)" }
     },
+    "measure_power": {
+      "insights": false
+    },
     "meter_power.session": {
       "title": { "en": "Energy (session)" },
       "insights": false
