@@ -114,10 +114,26 @@ module.exports = class ChargerDevice extends Homey.Device {
     }
   }
 
+  /**
+   * Homey re-initialises a device without deleting it (app reload, device
+   * repair), so onDeleted() alone is not enough: the controller subscribes to
+   * the app-lifetime CentralSystem/ChargePoint, and the solar feed holds a
+   * listener into this instance. Both have to go whenever this instance stops
+   * being the live one, not only when the device is removed for good.
+   */
+  async onUninit() {
+    this.teardown();
+  }
+
   async onDeleted() {
+    this.teardown();
+  }
+
+  private teardown() {
     this.controller?.destroy();
     if (this.onSolarSample) {
       (this.homey.app as ChargeIQApp).getSolarFeed()?.removeListener('sample', this.onSolarSample);
+      this.onSolarSample = undefined;
     }
   }
 

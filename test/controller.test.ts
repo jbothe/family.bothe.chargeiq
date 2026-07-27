@@ -17,6 +17,17 @@ function at(day: number, hh: number, mm: number): Date {
   return d;
 }
 
+/**
+ * A CentralSystem stand-in with real EventEmitter semantics, for tests that
+ * drive connect/disconnect themselves. Nothing is connected at init() time, so
+ * the controller binds only when the test emits 'connect'.
+ */
+class FakeCentralSystem extends EventEmitter {
+  getChargePoint(): ChargePoint | undefined {
+    return undefined;
+  }
+}
+
 const SCHED: ScheduleWindow[] = [{
   days: [1, 2, 3, 4, 5], start: '09:00', end: '17:00', currentA: 20,
 }];
@@ -48,7 +59,7 @@ function makeController(schedule: ScheduleWindow[], extraSettings: Record<string
     },
     error: () => {},
   };
-  const cs = { getChargePoint: () => undefined, on: () => {} } as unknown as CentralSystem;
+  const cs = { getChargePoint: () => undefined, on: () => {}, removeListener: () => {} } as unknown as CentralSystem;
   const c = new ChargeController(host, cs);
   c.init();
   return {
@@ -173,7 +184,7 @@ test('manual latch persists across restart (restored from store)', async () => {
     log: () => {},
     error: () => {},
   };
-  const cs = { getChargePoint: () => undefined, on: () => {} } as unknown as CentralSystem;
+  const cs = { getChargePoint: () => undefined, on: () => {}, removeListener: () => {} } as unknown as CentralSystem;
   const c2 = new ChargeController(host2, cs);
   c2.init();
   assert.equal(c2.resolve(new Date()).mode, 'manual');
@@ -562,7 +573,7 @@ test('household cap nets out the charger\'s own draw once Charging, even without
     log: () => {},
     error: () => {},
   };
-  const cs = { getChargePoint: () => cp, on: () => {} } as unknown as CentralSystem;
+  const cs = { getChargePoint: () => cp, on: () => {}, removeListener: () => {} } as unknown as CentralSystem;
   const c = new ChargeController(host, cs);
   c.init();
   await c.startManual(31);
@@ -604,7 +615,7 @@ test('the solar surplus calc sees the charger\'s real power once Charging, even 
     log: () => {},
     error: () => {},
   };
-  const cs = { getChargePoint: () => cp, on: () => {} } as unknown as CentralSystem;
+  const cs = { getChargePoint: () => cp, on: () => {}, removeListener: () => {} } as unknown as CentralSystem;
   const c = new ChargeController(host, cs);
   c.init();
   cp.emit('status', { connectorId: 1, errorCode: 'NoError', status: 'Charging' });
@@ -651,7 +662,7 @@ test('household cap is unavailable, not a guessed-low value, while Charging with
     log: () => {},
     error: () => {},
   };
-  const cs = { getChargePoint: () => cp, on: () => {} } as unknown as CentralSystem;
+  const cs = { getChargePoint: () => cp, on: () => {}, removeListener: () => {} } as unknown as CentralSystem;
   const c = new ChargeController(host, cs);
   c.init();
   await c.startManual(31);
@@ -704,7 +715,7 @@ test('solar surplus evaluation is skipped, not zeroed, while Charging with no Me
     },
     error: () => {},
   };
-  const cs = { getChargePoint: () => cp, on: () => {} } as unknown as CentralSystem;
+  const cs = { getChargePoint: () => cp, on: () => {}, removeListener: () => {} } as unknown as CentralSystem;
   const c = new ChargeController(host, cs);
   c.init();
   cp.emit('status', { connectorId: 1, errorCode: 'NoError', status: 'Charging' }); // no meterValues emitted yet
@@ -744,7 +755,7 @@ test('household cap is unavailable, not a guessed pause, before any status arriv
     },
     error: () => {},
   };
-  const cs = { getChargePoint: () => undefined, on: () => {} } as unknown as CentralSystem;
+  const cs = { getChargePoint: () => undefined, on: () => {}, removeListener: () => {} } as unknown as CentralSystem;
   const c = new ChargeController(host, cs);
   c.init(); // loads transactionId=29 from store - no status has ever been received yet
 
@@ -800,7 +811,7 @@ test('household cap is unavailable, not a guessed-low value, on a transient Avai
     },
     error: () => {},
   };
-  const cs = { getChargePoint: () => cp, on: () => {} } as unknown as CentralSystem;
+  const cs = { getChargePoint: () => cp, on: () => {}, removeListener: () => {} } as unknown as CentralSystem;
   const c = new ChargeController(host, cs);
   c.init(); // loads transactionId=29 from store
   c.onSolarSample({ gridSignedW: 13330, pvW: 80, batteryW: 3290 }); // primes solar data
@@ -845,7 +856,7 @@ test('a genuinely idle Available (no known transaction) still nets as a confirme
     },
     error: () => {},
   };
-  const cs = { getChargePoint: () => cp, on: () => {} } as unknown as CentralSystem;
+  const cs = { getChargePoint: () => cp, on: () => {}, removeListener: () => {} } as unknown as CentralSystem;
   const c = new ChargeController(host, cs);
   c.init();
   c.onSolarSample({ gridSignedW: 13330, pvW: 80, batteryW: 3290 });
@@ -888,7 +899,7 @@ test('profile writes reach the charger (TxDefaultProfile) even without a known t
     log: () => {},
     error: () => {},
   };
-  const cs = { getChargePoint: () => cp, on: () => {} } as unknown as CentralSystem;
+  const cs = { getChargePoint: () => cp, on: () => {}, removeListener: () => {} } as unknown as CentralSystem;
   const c = new ChargeController(host, cs);
   c.init();
   await c.startManual(15);
@@ -945,7 +956,7 @@ test('a pause (0A) decision reaches an already-mid-session charger, real-hardwar
     log: () => {},
     error: () => {},
   };
-  const cs = { getChargePoint: () => cp, on: () => {} } as unknown as CentralSystem;
+  const cs = { getChargePoint: () => cp, on: () => {}, removeListener: () => {} } as unknown as CentralSystem;
   const c = new ChargeController(host, cs);
   c.init();
   assert.deepEqual(c.resolve(new Date()), { mode: 'solar', amps: 0 }, 'idle/paused from the very first tick');
@@ -993,7 +1004,7 @@ test('RemoteStartTransaction is only attempted while Preparing, not once already
     log: () => {},
     error: () => {},
   };
-  const cs = { getChargePoint: () => cp, on: () => {} } as unknown as CentralSystem;
+  const cs = { getChargePoint: () => cp, on: () => {}, removeListener: () => {} } as unknown as CentralSystem;
   const c = new ChargeController(host, cs);
   c.init();
   await c.startManual(15);
@@ -1040,7 +1051,7 @@ test('a repeated identical status does not re-trigger the decision log/tick', ()
     },
     error: () => {},
   };
-  const cs = { getChargePoint: () => cp, on: () => {} } as unknown as CentralSystem;
+  const cs = { getChargePoint: () => cp, on: () => {}, removeListener: () => {} } as unknown as CentralSystem;
   const c = new ChargeController(host, cs);
   c.init();
 
@@ -1106,7 +1117,7 @@ test('a transient Available (reconnect blip) does not wipe a live transaction', 
       log: () => {},
       error: () => {},
     };
-    const cs = { getChargePoint: () => cp, on: () => {} } as unknown as CentralSystem;
+    const cs = { getChargePoint: () => cp, on: () => {}, removeListener: () => {} } as unknown as CentralSystem;
     const c = new ChargeController(host, cs);
     c.init();
 
@@ -1165,7 +1176,7 @@ test('a genuinely sustained Available eventually reconciles a stale transaction 
       log: () => {},
       error: () => {},
     };
-    const cs = { getChargePoint: () => cp, on: () => {} } as unknown as CentralSystem;
+    const cs = { getChargePoint: () => cp, on: () => {}, removeListener: () => {} } as unknown as CentralSystem;
     const c = new ChargeController(host, cs);
     c.init();
 
@@ -1227,7 +1238,7 @@ test('EV-initiated Finishing (no StopTransaction) clears the stale transaction a
     log: () => {},
     error: () => {},
   };
-  const cs = { getChargePoint: () => cp, on: () => {} } as unknown as CentralSystem;
+  const cs = { getChargePoint: () => cp, on: () => {}, removeListener: () => {} } as unknown as CentralSystem;
   const c = new ChargeController(host, cs);
   c.init();
   await c.startManual(16); // manual latch: always try to charge
@@ -1285,7 +1296,7 @@ test('manual off pauses at 0A (keeps the transaction) instead of hard-stopping',
     log: () => {},
     error: () => {},
   };
-  const cs = { getChargePoint: () => cp, on: () => {} } as unknown as CentralSystem;
+  const cs = { getChargePoint: () => cp, on: () => {}, removeListener: () => {} } as unknown as CentralSystem;
   const c = new ChargeController(host, cs);
   c.init();
   await c.startManual(16);
@@ -1339,7 +1350,7 @@ test('manual latch set while unplugged is cleared by the fresh plug-in (never de
     log: () => {},
     error: () => {},
   };
-  const cs = { getChargePoint: () => cp, on: () => {} } as unknown as CentralSystem;
+  const cs = { getChargePoint: () => cp, on: () => {}, removeListener: () => {} } as unknown as CentralSystem;
   const c = new ChargeController(host, cs);
   c.init();
 
@@ -1387,7 +1398,7 @@ test('a transactionId restored from store at boot is never hard-stopped, confirm
     log: () => {},
     error: () => {},
   };
-  const cs = { getChargePoint: () => cp, on: () => {} } as unknown as CentralSystem;
+  const cs = { getChargePoint: () => cp, on: () => {}, removeListener: () => {} } as unknown as CentralSystem;
   const c = new ChargeController(host, cs);
   c.init(); // fires an initial tick synchronously; transactionId=42 was restored from store
   c.setSolarTarget(null);
@@ -1441,7 +1452,7 @@ test('onStartTransaction persists the transaction id/meter start, flips the capa
     log: () => {},
     error: () => {},
   };
-  const cs = { getChargePoint: () => cp, on: () => {} } as unknown as CentralSystem;
+  const cs = { getChargePoint: () => cp, on: () => {}, removeListener: () => {} } as unknown as CentralSystem;
   const c = new ChargeController(host, cs);
   c.init();
   await c.startManual(16); // sets desiredAmps, but not yet eligible to write (no transaction id, not plugged)
@@ -1487,7 +1498,7 @@ test('onStopTransaction clears the transaction id and flips the charging capabil
     log: () => {},
     error: () => {},
   };
-  const cs = { getChargePoint: () => cp, on: () => {} } as unknown as CentralSystem;
+  const cs = { getChargePoint: () => cp, on: () => {}, removeListener: () => {} } as unknown as CentralSystem;
   const c = new ChargeController(host, cs);
   c.init();
   assert.ok(c.isCharging(), 'transaction id restored from store on init');
@@ -1637,7 +1648,7 @@ test('getDiagnostics().chargerPowerW nets the charger\'s own draw for the widget
     log: () => {},
     error: () => {},
   };
-  const cs = { getChargePoint: () => cp, on: () => {} } as unknown as CentralSystem;
+  const cs = { getChargePoint: () => cp, on: () => {}, removeListener: () => {} } as unknown as CentralSystem;
   const c = new ChargeController(host, cs);
   c.init();
   assert.equal(c.getDiagnostics().chargerPowerW, 0, 'confirmed not delivering - nothing to net out yet');
@@ -1709,6 +1720,101 @@ test('destroy() clears every timer it scheduled', () => {
   }
 });
 
+test('destroy() unsubscribes from the CentralSystem and ChargePoint, so a later reconnect cannot revive it', () => {
+  const fakeClient: RpcClient = {
+    identity: 'X', handle: () => {}, call: async () => ({ status: 'Accepted' }), close: async () => {}, on: () => {},
+  };
+  const cp = new ChargePoint({
+    identity: 'X', authorize: () => true, nextTransactionId: () => 1, livenessTimeoutMs: 0,
+  });
+  cp.attach(fakeClient);
+
+  const store: Record<string, unknown> = { schedule: [] };
+  const settings: Record<string, unknown> = {
+    minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdA: 14000 / 230, householdPhases: 1,
+  };
+  const logs: string[] = [];
+  const host: ControllerHost = {
+    identity: 'X',
+    setCapability: () => {},
+    getSetting: <T>(k: string) => settings[k] as T,
+    getStore: <T>(k: string) => store[k] as T,
+    setStore: async (k, v) => {
+      store[k] = v;
+    },
+    setAvailable: () => {},
+    setUnavailable: () => {},
+    setWarning: () => {},
+    log: (...a) => {
+      logs.push(a.join(' '));
+    },
+    error: () => {},
+  };
+  const cs = new FakeCentralSystem() as unknown as CentralSystem;
+  const c = new ChargeController(host, cs);
+  c.init();
+
+  cs.emit('connect', cp);
+  assert.equal(logs.filter((l) => l.includes('Controller bound to')).length, 1, 'bound once');
+  assert.ok(cp.listenerCount('status') > 0, 'bind() subscribed to the charge point');
+
+  c.destroy();
+  assert.equal(cs.listenerCount('connect'), 0, 'destroy() released the CentralSystem connect listener');
+  assert.equal(cs.listenerCount('disconnect'), 0, 'destroy() released the CentralSystem disconnect listener');
+  assert.equal(cp.listenerCount('status'), 0, 'destroy() released the ChargePoint listeners');
+
+  // The failure this guards: CentralSystem/ChargePoint live on the App, so a
+  // still-subscribed dead controller gets revived by the next reconnect and
+  // starts writing profiles again alongside the live one.
+  const before = logs.length;
+  cs.emit('connect', cp);
+  cp.emit('status', { connectorId: 1, errorCode: 'NoError', status: 'Charging' });
+  cp.emit('meterValues', { power: 3000 });
+  assert.equal(logs.length, before, 'a destroyed controller reacts to nothing');
+  assert.equal(logs.filter((l) => l.includes('Controller bound to')).length, 1, 'never re-bound');
+});
+
+test('re-binding a different ChargePoint instance drops the previous one\'s listeners', () => {
+  const fakeClient: RpcClient = {
+    identity: 'X', handle: () => {}, call: async () => ({ status: 'Accepted' }), close: async () => {}, on: () => {},
+  };
+  const mkCp = () => {
+    const cp = new ChargePoint({
+      identity: 'X', authorize: () => true, nextTransactionId: () => 1, livenessTimeoutMs: 0,
+    });
+    cp.attach(fakeClient);
+    return cp;
+  };
+  const first = mkCp();
+  const second = mkCp();
+
+  const settings: Record<string, unknown> = {
+    minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdA: 14000 / 230, householdPhases: 1,
+  };
+  const host: ControllerHost = {
+    identity: 'X',
+    setCapability: () => {},
+    getSetting: <T>(k: string) => settings[k] as T,
+    getStore: <T>(k: string) => ({ schedule: [] } as Record<string, unknown>)[k] as T,
+    setStore: async () => {},
+    setAvailable: () => {},
+    setUnavailable: () => {},
+    setWarning: () => {},
+    log: () => {},
+    error: () => {},
+  };
+  const cs = new FakeCentralSystem() as unknown as CentralSystem;
+  const c = new ChargeController(host, cs);
+  c.init();
+
+  cs.emit('connect', first);
+  assert.ok(first.listenerCount('status') > 0);
+  cs.emit('connect', second);
+  assert.equal(first.listenerCount('status'), 0, 'the superseded charge point is no longer listened to');
+  assert.ok(second.listenerCount('status') > 0, 'the new one is');
+  c.destroy();
+});
+
 // ---------------------------------------------------------------------------
 // isWithinSchedule()
 // ---------------------------------------------------------------------------
@@ -1765,11 +1871,6 @@ test('binds on a connect event, treats a rebind of the same ChargePoint as a rec
     },
     error: () => {},
   };
-  class FakeCentralSystem extends EventEmitter {
-    getChargePoint(): ChargePoint | undefined {
-      return undefined; // nothing connected yet at init() time
-    }
-  }
   const cs = new FakeCentralSystem() as unknown as CentralSystem;
   const c = new ChargeController(host, cs);
   c.init();
@@ -1834,7 +1935,7 @@ test('a boot event triggers configureCharger(), which logs rather than throws on
     },
     error: () => {},
   };
-  const cs = { getChargePoint: () => cp, on: () => {} } as unknown as CentralSystem;
+  const cs = { getChargePoint: () => cp, on: () => {}, removeListener: () => {} } as unknown as CentralSystem;
   const c = new ChargeController(host, cs);
   c.init();
   calls.length = 0;
@@ -1890,7 +1991,7 @@ test('a failed remote start attempt resets awaitingStart and reports the error, 
       errors.push(a);
     },
   };
-  const cs = { getChargePoint: () => cp, on: () => {} } as unknown as CentralSystem;
+  const cs = { getChargePoint: () => cp, on: () => {}, removeListener: () => {} } as unknown as CentralSystem;
   const c = new ChargeController(host, cs);
   c.init();
   await c.startManual(16);
@@ -1936,7 +2037,7 @@ test('a failed SetChargingProfile write is caught and reported, not thrown', asy
       errors.push(a);
     },
   };
-  const cs = { getChargePoint: () => cp, on: () => {} } as unknown as CentralSystem;
+  const cs = { getChargePoint: () => cp, on: () => {}, removeListener: () => {} } as unknown as CentralSystem;
   const c = new ChargeController(host, cs);
   c.init();
   cp.emit('status', { connectorId: 1, errorCode: 'NoError', status: 'Charging' }); // plugged -> eligible to write
@@ -1983,7 +2084,7 @@ test('scheduleWrite() defers a write until writeThrottleMs has elapsed since the
     log: () => {},
     error: () => {},
   };
-  const cs = { getChargePoint: () => cp, on: () => {} } as unknown as CentralSystem;
+  const cs = { getChargePoint: () => cp, on: () => {}, removeListener: () => {} } as unknown as CentralSystem;
   const c = new ChargeController(host, cs);
   c.init();
   cp.emit('status', { connectorId: 1, errorCode: 'NoError', status: 'Charging' });
@@ -2050,7 +2151,7 @@ test('a hard cap tightening further jumps the write throttle instead of waiting 
     log: () => {},
     error: () => {},
   };
-  const cs = { getChargePoint: () => cp, on: () => {} } as unknown as CentralSystem;
+  const cs = { getChargePoint: () => cp, on: () => {}, removeListener: () => {} } as unknown as CentralSystem;
   const c = new ChargeController(host, cs);
   c.init();
   // Solar data primed before the transaction exists, so desiredAmps is
@@ -2102,7 +2203,7 @@ test('a routine decrease with no cap tightening still respects the write throttl
     log: () => {},
     error: () => {},
   };
-  const cs = { getChargePoint: () => cp, on: () => {} } as unknown as CentralSystem;
+  const cs = { getChargePoint: () => cp, on: () => {}, removeListener: () => {} } as unknown as CentralSystem;
   const c = new ChargeController(host, cs);
   c.init();
   cp.emit('status', { connectorId: 1, errorCode: 'NoError', status: 'Charging' });
@@ -2164,7 +2265,7 @@ test('an urgent cap-tightening write cancels an already-pending throttled write,
     log: () => {},
     error: () => {},
   };
-  const cs = { getChargePoint: () => cp, on: () => {} } as unknown as CentralSystem;
+  const cs = { getChargePoint: () => cp, on: () => {}, removeListener: () => {} } as unknown as CentralSystem;
   const c = new ChargeController(host, cs);
   c.init();
   // Latch the manual target before the charger is plugged in, so the only
@@ -2265,7 +2366,7 @@ function makeBoundController(extraStore: Record<string, unknown> = {}, extraSett
       disconnectEvents.push(true);
     },
   };
-  const cs = { getChargePoint: () => cp, on: () => {} } as unknown as CentralSystem;
+  const cs = { getChargePoint: () => cp, on: () => {}, removeListener: () => {} } as unknown as CentralSystem;
   const c = new ChargeController(host, cs);
   c.init();
   return {
@@ -2930,7 +3031,7 @@ function makeRetryController(rejectTxProfile: boolean): {
     },
     error: () => {},
   };
-  const cs = { getChargePoint: () => cp, on: () => {} } as unknown as CentralSystem;
+  const cs = { getChargePoint: () => cp, on: () => {}, removeListener: () => {} } as unknown as CentralSystem;
   const c = new ChargeController(host, cs);
   c.init();
   return {

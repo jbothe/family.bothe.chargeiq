@@ -1,5 +1,6 @@
 'use strict';
 
+import { EventEmitter } from 'events';
 import { CentralSystem } from '../ocpp/CentralSystem';
 import { ChargePoint } from '../ocpp/ChargePoint';
 import {
@@ -346,6 +347,19 @@ export class ChargeController {
   /** Last value handed to host.setWarning(), so it is only called on a change. */
   private lastWarning: string | null | undefined;
 
+  /**
+   * How to unregister the listeners this controller put on the CentralSystem,
+   * which outlives it (it lives on the App). Torn down in destroy().
+   */
+  private csTeardowns: Array<() => void> = [];
+
+  /**
+   * Same, for the currently bound ChargePoint - also app-lifetime, and also
+   * re-bindable, so this list is emptied on every fresh bind() as well as in
+   * destroy().
+   */
+  private cpTeardowns: Array<() => void> = [];
+
   constructor(host: ControllerHost, cs: CentralSystem) {
     this.host = host;
     this.cs = cs;
@@ -369,10 +383,10 @@ export class ChargeController {
     const existing = this.cs.getChargePoint(this.host.identity);
     if (existing) this.bind(existing);
 
-    this.cs.on('connect', (cp: ChargePoint) => {
+    this.listenTo(this.cs, this.csTeardowns, 'connect', (cp: ChargePoint) => {
       if (cp.identity === this.host.identity) this.bind(cp);
     });
-    this.cs.on('disconnect', (cp: ChargePoint) => {
+    this.listenTo(this.cs, this.csTeardowns, 'disconnect', (cp: ChargePoint) => {
       if (cp.identity !== this.host.identity) return;
       this.cp = null;
       this.noteLastSeen(cp.getConnectionInfo().lastSeenAt, true);
@@ -386,6 +400,40 @@ export class ChargeController {
     this.tick(new Date(), 'init'); // establish initial mode capability; also arms the backstop timer
   }
 
+  /**
+   * Register an event listener and remember how to remove it again. Every
+   * emitter this controller listens to (CentralSystem, ChargePoint) lives on
+   * the App and therefore outlives the controller, so a listener left behind is
+   * not merely a leak: see destroy() for what it actually causes.
+   */
+  private listenTo(
+    emitter: EventEmitter,
+    into: Array<() => void>,
+    event: string,
+    listener: (...args: never[]) => void,
+  ): void {
+    const fn = listener as (...args: unknown[]) => void;
+    emitter.on(event, fn);
+    into.push(() => emitter.removeListener(event, fn));
+  }
+
+  /** Unregister everything in a teardown list and empty it. */
+  private static runTeardowns(list: Array<() => void>): void {
+    while (list.length > 0) list.pop()!();
+  }
+
+  /**
+   * Release every timer *and* every listener. Unregistering matters as much as
+   * the timers do: the CentralSystem and ChargePoint both live on the App, so a
+   * controller that goes away still subscribed stays reachable through them.
+   * The next charger reconnect would then call the dead controller's bind(),
+   * which re-arms its own backstop tick and leaves it writing
+   * SetChargingProfile - at the same stable profile id/stack level as the live
+   * controller, so the two silently overwrite each other's target - and calling
+   * setCapability() on a device that no longer exists. Reachable today by
+   * deleting and re-pairing the charger, which is the only re-pair path there
+   * is (pairing is capped at one device).
+   */
   destroy(): void {
     if (this.tickTimer) clearTimeout(this.tickTimer);
     if (this.pendingWrite) clearTimeout(this.pendingWrite);
@@ -395,6 +443,9 @@ export class ChargeController {
     this.pendingWrite = null;
     this.pendingIdleReconcile = null;
     this.startupGrace = null;
+    ChargeController.runTeardowns(this.cpTeardowns);
+    ChargeController.runTeardowns(this.csTeardowns);
+    this.cp = null;
   }
 
   refreshConfig(): void {
@@ -604,29 +655,35 @@ export class ChargeController {
       this.requestFreshState();
       return;
     }
+    // A different ChargePoint instance taking over: drop the previous one's
+    // handlers before adding this one's, so they don't both stay live.
+    ChargeController.runTeardowns(this.cpTeardowns);
     this.cp = cp;
+    const onCp = (event: string, listener: (...args: never[]) => void) => (
+      this.listenTo(cp, this.cpTeardowns, event, listener)
+    );
 
-    cp.on('boot', (info: BootNotificationReq) => {
+    onCp('boot', (info: BootNotificationReq) => {
       this.host.log(`[charger] boot ${info.chargePointVendor} ${info.chargePointModel}${
         info.firmwareVersion ? ` fw=${info.firmwareVersion}` : ''
       }${info.chargePointSerialNumber ? ` sn=${info.chargePointSerialNumber}` : ''}`);
       this.configureCharger().catch((e) => this.host.error('configureCharger', e));
     });
-    cp.on('status', (i: StatusNotificationReq) => this.onStatus(i));
-    cp.on('meterValues', (r: Readings, _raw: MeterValuesReq) => this.onMeterValues(r));
-    cp.on('startTransaction', (id: number, req: StartTransactionReq) => this.onStartTransaction(id, req));
-    cp.on('stopTransaction', (req: StopTransactionReq) => this.onStopTransaction(req));
-    cp.on('heartbeat', () => this.host.log('[charger] heartbeat'));
-    cp.on('authorize', (idTag: string, accepted: boolean) => {
+    onCp('status', (i: StatusNotificationReq) => this.onStatus(i));
+    onCp('meterValues', (r: Readings, _raw: MeterValuesReq) => this.onMeterValues(r));
+    onCp('startTransaction', (id: number, req: StartTransactionReq) => this.onStartTransaction(id, req));
+    onCp('stopTransaction', (req: StopTransactionReq) => this.onStopTransaction(req));
+    onCp('heartbeat', () => this.host.log('[charger] heartbeat'));
+    onCp('authorize', (idTag: string, accepted: boolean) => {
       this.host.log(`[charger] authorize ${idTag} -> ${accepted ? 'accepted' : 'invalid'}`);
     });
-    cp.on('dataTransfer', (payload: { vendorId?: string; messageId?: string; data?: string }) => {
+    onCp('dataTransfer', (payload: { vendorId?: string; messageId?: string; data?: string }) => {
       this.host.log(`[charger] dataTransfer vendor=${payload.vendorId ?? '?'}${
         payload.messageId ? ` msg=${payload.messageId}` : ''
       }${payload.data ? ` data=${payload.data}` : ''}`);
     });
-    cp.on('firmwareStatus', (status: string) => this.host.log(`[charger] firmware status ${status}`));
-    cp.on('diagnosticsStatus', (status: string) => this.host.log(`[charger] diagnostics status ${status}`));
+    onCp('firmwareStatus', (status: string) => this.host.log(`[charger] firmware status ${status}`));
+    onCp('diagnosticsStatus', (status: string) => this.host.log(`[charger] diagnostics status ${status}`));
 
     const cachedStatus = cp.getLastStatus();
     if (cachedStatus) this.onStatus(cachedStatus);
