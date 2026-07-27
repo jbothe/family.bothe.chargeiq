@@ -222,10 +222,34 @@ export class Scheduler {
     return Number.isFinite(best) ? this.dateFromDelta(now, best) : undefined;
   }
 
+  /**
+   * The instant `deltaMinutes` of *wall clock* from now. Those two are not the
+   * same span: across a DST transition the wall clock skips or repeats an hour,
+   * so simply adding the delta as elapsed time puts the result an hour out (a
+   * 09:00 window reported as starting at 10:00 across the EU spring-forward).
+   * Only the reported times were affected - isActive() is re-evaluated against
+   * the wall clock on every tick and never went through here - but those times
+   * are what the widget shows the user.
+   *
+   * So: take the naive instant, read the wall clock actually landed on, and
+   * shift by however far off that was. UTC offsets move in whole minutes, so
+   * one correction settles it; the second pass covers a correction that itself
+   * steps over the transition.
+   */
   private dateFromDelta(now: Date, deltaMinutes: number): Date {
     const secondsIntoMinute = now.getSeconds() + now.getMilliseconds() / 1000;
-    const ms = (deltaMinutes * 60 - secondsIntoMinute) * 1000;
-    return new Date(now.getTime() + ms);
+    const target = (minuteOfWeek(now, this.timezone) + deltaMinutes) % MIN_PER_WEEK;
+    let ms = now.getTime() + (deltaMinutes * 60 - secondsIntoMinute) * 1000;
+    for (let pass = 0; pass < 2; pass++) {
+      let off = target - minuteOfWeek(new Date(ms), this.timezone);
+      // Shortest signed correction, so a week-boundary wrap doesn't read as a
+      // week-sized error.
+      if (off > MIN_PER_WEEK / 2) off -= MIN_PER_WEEK;
+      if (off < -MIN_PER_WEEK / 2) off += MIN_PER_WEEK;
+      if (off === 0) break;
+      ms += off * 60000;
+    }
+    return new Date(ms);
   }
 
 }
