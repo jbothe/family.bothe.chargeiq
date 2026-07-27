@@ -187,9 +187,19 @@ module.exports = class ChargeIQApp extends Homey.App {
     return dev?.getSchedule?.() ?? [];
   }
 
+  /**
+   * The schedule lives in the charger device's own store, so there is nowhere
+   * to put it until one is paired. Throw rather than no-op: the settings page
+   * treats a resolved call as saved and shows the windows as persisted, so
+   * silently dropping them looked exactly like success right up until the page
+   * was reloaded and they were gone.
+   */
   async setSchedule(windows: unknown[]): Promise<void> {
     const dev = this.getChargerDevice();
-    if (dev?.setSchedule) await dev.setSchedule(windows);
+    if (!dev?.setSchedule) {
+      throw new Error('No charger is paired yet - add your charger first, then set a schedule.');
+    }
+    await dev.setSchedule(windows);
   }
 
   /** Authorize policy: accept-all, or an idTag whitelist from settings. */
