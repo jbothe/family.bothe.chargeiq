@@ -89,12 +89,21 @@
     }
     /* Harness chrome only - a plausible surface color behind the iframe's own transparent
        background (widgets/power-flow/public/index.html sets html/body background: transparent
-       by design, see its own comment). Real Homey widgets have no OS-driven "Auto" - the app
-       resolves a theme (its own Settings > Appearance, not the OS) and applies it via the real
-       .homey-dark-mode class (see test/homey-css/widgets/README.md's "Dark mode" section and
-       setDarkClass() below) - so unlike the pair/settings previews this one has no @media
-       (prefers-color-scheme) fallback; [data-theme] set by the Light/Dark buttons below only
-       drives this cosmetic wrapper, not the widget's own real theming. */
+       by design, see its own comment). Homey's own Settings > Appearance offers Light / Dark /
+       System, and the app applies the *resolved* theme to a widget via `.homey-dark-mode` (see
+       test/homey-css/widgets/README.md's "Dark mode" section and setDarkClass() below) plus
+       pre-resolved --homey-* custom properties - that part is documented Homey behavior. The
+       Light/Dark buttons below drive that same real mechanism (via setDarkClass()); [data-theme]
+       here only additionally recolors this cosmetic wrapper, not the widget's own theming.
+       The third "OS only" button is different: it clears `.homey-dark-mode` and leaves the
+       widget's real OS/browser prefers-color-scheme alone, so only the widget's own @media-only
+       fallback (--icon-blue, see widgets/power-flow/public/index.html's top-of-file comment)
+       reacts. That's simulating a real scenario - Homey resolved to one theme while the device's
+       OS is genuinely in the other - *if* this codebase's unconfirmed assumption holds that a
+       widget's WKWebView doesn't itself propagate Homey's resolved theme as prefers-color-scheme
+       (see that same top-of-file comment, and CLAUDE.md's "Not yet verified on hardware"). This
+       wrapper's own cosmetic background does not follow the OS for the 'os' state - it falls
+       through to the default (light) styling below since it's decorative only. */
     .frame-wrap { display: inline-block; border: 1px solid #ccc; background: #ffffff; border-radius: 10px; overflow: hidden; }
     html[data-theme='dark'] .frame-wrap { background: #0b0d12; border-color: #333; }
     iframe { display: block; width: 380px; height: 218px; border: 0; }
@@ -122,6 +131,7 @@
       <div class="row">
         <button class="theme-btn" data-theme="light">Light</button>
         <button class="theme-btn" data-theme="dark">Dark</button>
+        <button class="theme-btn" data-theme="os" title="Clears the forced .homey-dark-mode override so only the real OS/browser prefers-color-scheme drives the widget's own @media-only --icon-blue fallback - simulating Homey's resolved theme and the OS genuinely disagreeing (e.g. Homey set to Dark via Settings &gt; Appearance while iOS itself is in Light), not a synthetic/impossible state, assuming the WKWebView pass-through behavior described in this widget's top-of-file comment holds.">OS only</button>
       </div>
       <div class="divider"></div>
       <button id="toggleStale">Toggle stale</button>
@@ -315,7 +325,10 @@
     }
 
     // [data-theme] on this page's <html> only drives .frame-wrap's cosmetic background above -
-    // the real theming happens via setDarkClass() on the iframe's own document.
+    // the real theming happens via setDarkClass() on the iframe's own document. theme is one of
+    // 'light' | 'dark' | 'os'; only 'dark' turns .homey-dark-mode on, so 'os' (like 'light')
+    // leaves it off and the widget's own @media (prefers-color-scheme) fallback is whatever the
+    // real OS/browser reports - see the "OS only" button's title and the .frame-wrap comment above.
     function applyTheme(theme) {
       currentTheme = theme;
       document.documentElement.setAttribute('data-theme', theme);

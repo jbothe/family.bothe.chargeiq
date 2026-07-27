@@ -417,6 +417,17 @@ current before the transaction existed, but it means this charger may just never
 app's `RemoteStartTransaction` call in practice - the schedule-starts-a-charge-from-cold path above
 may be unverifiable on this hardware in its current local-auth config, not merely untested.
 
+**Whether a widget's WKWebView propagates Homey's resolved app theme (Settings > Appearance:
+Light / Dark / System) as `prefers-color-scheme`, or instead leaves it tracking the raw OS/browser
+state regardless of what Homey resolved to, is unconfirmed.** `widgets/power-flow/public/index.html`
+asserts the latter (its top-of-file comment and the `--icon-blue` `@media` fallback comment near the
+top of its `<style>` block) as the reason `--icon-blue` needs an `@media (prefers-color-scheme: dark)`
+fallback rather than trusting the media query alone - but that assertion is this codebase's own,
+not independently verified on a real device. `test/widget-preview.html`'s "OS only" theme button
+exists to make this case previewable (clears the forced `.homey-dark-mode` override so only the
+real OS/browser `prefers-color-scheme` drives that fallback), but it can only simulate the
+disagreement, not confirm which way a real widget WKWebView actually behaves.
+
 ## Conventions
 - Match the surrounding style. `'use strict'` + `import` + `module.exports = class …` for
   App/Driver/Device (Homey template); plain `export`/classes in `lib/`.

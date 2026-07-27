@@ -4,13 +4,18 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
   <style>
-    /* Homey's own app-level theme setting (Settings > Appearance) is authoritative and can
-       differ from the OS's prefers-color-scheme (e.g. app forced to dark while iOS itself is
-       in light mode) - the mobile app doesn't propagate that override into the widget's
-       WKWebView as prefers-color-scheme, so relying on that media query alone silently
-       follows iOS instead of the configured Homey theme. What Homey *does* do is inject its
-       own semantic CSS custom properties into the widget document, pre-resolved to the real
-       active theme regardless of the OS (--homey-text-color et al; see
+    /* Homey's own app-level theme setting (Settings > Appearance: Light / Dark / System) is
+       authoritative and can differ from the OS's prefers-color-scheme (e.g. Homey forced to
+       dark while iOS itself is in light mode, or Homey on System while iOS is light but the
+       widget's own browser context reports dark for some other reason). This file *assumes* -
+       asserted here, not independently confirmed on real hardware; see CLAUDE.md's "Not yet
+       verified on hardware" section and test/widget-preview.html's "OS only" preview button,
+       which exists specifically to exercise this case - that the mobile app's widget WKWebView
+       does not propagate Homey's resolved theme into prefers-color-scheme, so relying on that
+       media query alone would silently follow the OS instead of Homey's configured theme. What
+       Homey *does* do, per its own docs, is inject its own semantic CSS custom properties into
+       the widget document, pre-resolved to the real active theme regardless of the OS
+       (--homey-text-color et al; see
        https://apps.developer.homey.app/the-basics/widgets/styling) - `.homey-dark-mode` from
        that same doc is a separate, opt-in class for forcing dark mode, not something Homey
        sets automatically, so it's not usable for detection. Text/background/de-emphasized-text
@@ -52,8 +57,11 @@
          can derive from to get a brighter dark-mode shade for free, so this is the one color
          in the file that falls back to @media (prefers-color-scheme: dark) below - with the
          same caveat the top-of-file comment already gives for that media query: it tracks
-         the OS theme, not necessarily Homey's own configured theme, so it can show the
-         wrong shade in the edge case where the two are forced apart. */
+         the OS theme, not necessarily Homey's own configured theme (Settings > Appearance:
+         Light / Dark / System), so it can show the wrong shade in the edge case where the two
+         are forced apart - assuming the top-of-file comment's unconfirmed WKWebView assumption
+         holds; see test/widget-preview.html's "OS only" button, which previews exactly this
+         edge case in isolation. */
       --icon-blue: var(--homey-color-blue-500);
     }
     @media (prefers-color-scheme: dark) {
