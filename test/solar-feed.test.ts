@@ -339,3 +339,145 @@ test('stop() destroys every subscribed instance and is safe to call twice', asyn
 
   await feed.stop(); // must not throw or re-destroy on a second call
 });
+
+// ---------------------------------------------------------------------------
+// Recovery: discover() used to run exactly once, from start()
+// ---------------------------------------------------------------------------
+
+/** Like fakeApi, but the device set can change between calls - as it does when the SolarEdge app starts late. */
+function mutableApi(devices: Record<string, HomeyApiDevice>): { api: HomeyApiClient; devices: Record<string, HomeyApiDevice>; calls: () => number } {
+  let calls = 0;
+  const set = devices;
+  return {
+    api: {
+      devices: {
+        getDevices: async () => {
+          calls += 1;
+          return set;
+        },
+      },
+    },
+    devices: set,
+    calls: () => calls,
+  };
+}
+
+test('a rescan picks up SolarEdge devices that were not there at boot', async () => {
+  const { api, devices } = mutableApi({});
+  const feed = new SolarFeed(undefined, undefined, api);
+
+  await feed.start();
+  assert.equal(feed.hasGrid(), false, 'nothing to find yet');
+
+  // The SolarEdge app finishes starting after ChargeIQ did.
+  devices.meter = new FakeDevice(METER_ID, ['measure_power'], { power: -450 });
+  assert.equal(await feed.checkAndRecover(), true, 'nothing discovered yet, so it retries');
+  assert.equal(feed.hasGrid(), true);
+  assert.equal(feed.getSample().gridSignedW, -450);
+});
+
+test('a rescan retries after a discovery that failed outright, rather than giving up for the app lifetime', async () => {
+  let fail = true;
+  const meter = new FakeDevice(METER_ID, ['measure_power'], { power: 120 });
+  const api: HomeyApiClient = {
+    devices: {
+      getDevices: async () => {
+        if (fail) throw new Error('HomeyAPI unavailable');
+        return { meter };
+      },
+    },
+  };
+  const feed = new SolarFeed(undefined, undefined, api);
+
+  await assert.rejects(() => feed.start(), /HomeyAPI unavailable/, 'the first failure still surfaces to the caller');
+  await assert.rejects(() => feed.checkAndRecover(), /HomeyAPI unavailable/, 'still down');
+  assert.equal(feed.hasGrid(), false);
+
+  fail = false;
+  assert.equal(await feed.checkAndRecover(), true);
+  assert.equal(feed.getSample().gridSignedW, 120, 'recovered without restarting the app');
+});
+
+test('a healthy feed is left alone; one gone quiet is resubscribed', async () => {
+  const meter = new FakeDevice(METER_ID, ['measure_power'], { power: 100 });
+  const { api, calls } = mutableApi({ meter });
+  const feed = new SolarFeed(undefined, undefined, api);
+
+  await feed.start();
+  const afterStart = calls();
+
+  assert.equal(await feed.checkAndRecover(), false, 'just discovered - nothing to recover');
+  assert.equal(calls(), afterStart, 'and it did not re-fetch the device list');
+
+  // 31 minutes of total silence: past FEED_SILENT_MS (30m).
+  const first = meter.instances[0];
+  assert.equal(await feed.checkAndRecover(Date.now() + 31 * 60000), true);
+  assert.ok(first.destroyed, 'the presumed-dead subscription was released, not left dangling');
+  assert.equal(meter.instances.length, 2, 'and a fresh one was made');
+});
+
+test('a capability update counts as a sign of life and defers the next rescan', async () => {
+  const meter = new FakeDevice(METER_ID, ['measure_power'], { power: 100 });
+  const timer = stubDebounceTimer();
+  const realNow = Date.now;
+  // The listener stamps lastUpdateAt from Date.now(), so the clock has to be
+  // driven to place the update somewhere between discovery and the check -
+  // otherwise all three land on the same instant and the test proves nothing.
+  const base = realNow();
+  let clock = base;
+  Date.now = () => clock;
+  try {
+    const feed = new SolarFeed(undefined, undefined, fakeApi({ meter }));
+    await feed.start(); // discovery stamps lastUpdateAt = base
+
+    clock = base + 25 * 60000;
+    meter.trigger('measure_power', 250); // ...and this re-stamps it 25m later
+    timer.flush();
+
+    // 31m after discovery, but only 6m after the update.
+    assert.equal(await feed.checkAndRecover(base + 31 * 60000), false,
+      'silence is measured from the last update, not from discovery');
+    assert.equal(meter.instances.length, 1, 'subscription left in place');
+
+    // 31m after the update itself, though, is genuinely quiet.
+    assert.equal(await feed.checkAndRecover(base + 56 * 60000), true);
+  } finally {
+    Date.now = realNow;
+    timer.restore();
+  }
+});
+
+test('rediscovery rebuilds what is present rather than accumulating it', async () => {
+  const battery = new FakeDevice(BATTERY_ID, ['measure_power', 'measure_battery'], { power: 700, battery: 55 });
+  const meter = new FakeDevice(METER_ID, ['measure_power'], { power: 100 });
+  const { api, devices } = mutableApi({ battery, meter });
+  const feed = new SolarFeed(undefined, undefined, api);
+
+  await feed.start();
+  assert.equal(feed.getSample().batterySoc, 55, 'battery present');
+
+  // The battery device is removed from Homey; a rescan must stop claiming it.
+  delete devices.battery;
+  await feed.checkAndRecover(Date.now() + 31 * 60000);
+  assert.equal(feed.getSample().batterySoc, null, 'SoC is only reported while a battery is actually present');
+});
+
+test('a failed rediscovery leaves the last known presence intact rather than blanking it', async () => {
+  const meter = new FakeDevice(METER_ID, ['measure_power'], { power: 100 });
+  let fail = false;
+  const api: HomeyApiClient = {
+    devices: {
+      getDevices: async () => {
+        if (fail) throw new Error('HomeyAPI went away');
+        return { meter };
+      },
+    },
+  };
+  const feed = new SolarFeed(undefined, undefined, api);
+  await feed.start();
+  assert.equal(feed.hasGrid(), true);
+
+  fail = true;
+  await assert.rejects(() => feed.checkAndRecover(Date.now() + 31 * 60000), /went away/);
+  assert.equal(feed.hasGrid(), true, 'the fetch failed before presence was rebuilt, so nothing was lost');
+});

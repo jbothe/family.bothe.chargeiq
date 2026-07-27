@@ -35,6 +35,28 @@ const SOLAREDGE_APP = 'bothe.family.solaredge';
  */
 const SAMPLE_DEBOUNCE_MS = 1000;
 
+/**
+ * How often the feed checks whether it is still actually receiving anything.
+ * discover() used to run exactly once, from start(), which left two ways for
+ * the feed to be dead for the app's whole lifetime: the SolarEdge app's devices
+ * not being there yet at boot (nothing ever re-looked), and a failed first
+ * discovery (start() rejected, the app logged it, and that was that). The
+ * charger keeps working either way - the controller fails safe and pauses solar
+ * - but solar mode stays silently broken until ChargeIQ itself is restarted.
+ */
+const RESCAN_INTERVAL_MS = 5 * 60000;
+
+/**
+ * Silence tolerated before the subscriptions are presumed dead and rebuilt.
+ * Deliberately generous: Homey only fires a capability listener on an actual
+ * change, so a genuinely healthy feed can be quiet for a while (overnight, with
+ * PV at a flat zero). The grid meter moves with household load and so is the
+ * one that realistically keeps this fresh. A false positive only costs a
+ * getDevices() call and a resubscribe to the same devices, so erring long is
+ * cheap in the direction that matters.
+ */
+const FEED_SILENT_MS = 30 * 60000;
+
 /** Roles we read from the SolarEdge app, keyed by its driver id. */
 type Role = 'inverter' | 'meter' | 'battery';
 
@@ -99,7 +121,11 @@ export function mergeSample(
  * emits a merged {@link SolarSample} whenever any input changes. House load is
  * derived because the SolarEdge app does not expose it directly.
  *
- * Emits: 'sample' (SolarSample), 'error' (Error).
+ * Emits: 'sample' (SolarSample). Failures are logged rather than emitted - an
+ * 'error' event with no listener would take the app down, and this feed is
+ * best-effort by design (the charger still runs manual/scheduled without it).
+ *
+ * Discovery is not one-shot: see RESCAN_INTERVAL_MS / checkAndRecover().
  */
 export class SolarFeed extends EventEmitter {
 
@@ -120,6 +146,18 @@ export class SolarFeed extends EventEmitter {
   /** Debounces emitSample() - see SAMPLE_DEBOUNCE_MS. */
   private pendingEmit: ReturnType<typeof setTimeout> | null = null;
 
+  /** Periodic health check - see RESCAN_INTERVAL_MS. */
+  private rescanTimer: ReturnType<typeof setInterval> | null = null;
+
+  /**
+   * Epoch ms of the last sign of life: a capability update, or a successful
+   * discovery (which reads current values, so it counts as one). 0 = never.
+   */
+  private lastUpdateAt = 0;
+
+  /** Guards against a rescan starting while one is already in flight. */
+  private rediscovering = false;
+
   private log: (...a: unknown[]) => void;
 
   /**
@@ -134,14 +172,64 @@ export class SolarFeed extends EventEmitter {
     this.api = apiOverride ?? null;
   }
 
+  /**
+   * The rescan is armed *before* the first discovery, so a discovery that fails
+   * outright (no HomeyAPI yet, SolarEdge app still starting) is retried rather
+   * than being the one and only attempt. start() still rejects on that first
+   * failure - the caller logs it - it just is no longer terminal.
+   */
   async start(): Promise<void> {
+    this.armRescan();
+    await this.connect();
+  }
+
+  private async connect(): Promise<void> {
     if (!this.api) this.api = await HomeyAPI.createAppAPI({ homey: this.homey });
     await this.discover();
   }
 
-  /** Find SolarEdge devices and subscribe to their measure_power capability. */
+  private armRescan(): void {
+    if (this.rescanTimer) return;
+    // eslint-disable-next-line homey-app/global-timers -- unref()'d below, cleared in stop()
+    this.rescanTimer = setInterval(() => {
+      this.checkAndRecover().catch((err) => this.log('SolarFeed: rescan failed:', (err as Error).message));
+    }, RESCAN_INTERVAL_MS);
+    this.rescanTimer.unref?.();
+  }
+
+  /**
+   * Rebuild the subscriptions if the feed looks dead - nothing useful was ever
+   * discovered, or nothing has come in for FEED_SILENT_MS. Run by the internal
+   * rescan timer; public and taking an explicit `now` so tests can drive it
+   * without waiting on real time. Returns whether it actually rediscovered.
+   */
+  async checkAndRecover(now: number = Date.now()): Promise<boolean> {
+    if (this.rediscovering) return false;
+    const silentFor = this.lastUpdateAt === 0 ? Infinity : now - this.lastUpdateAt;
+    if (this.present.meter && silentFor <= FEED_SILENT_MS) return false;
+    this.rediscovering = true;
+    try {
+      this.log(`SolarFeed: ${this.present.meter
+        ? `no updates for ${Math.round(silentFor / 60000)}m`
+        : 'nothing discovered yet'} - rediscovering`);
+      await this.releaseInstances();
+      await this.connect();
+      return true;
+    } finally {
+      this.rediscovering = false;
+    }
+  }
+
+  /**
+   * Find SolarEdge devices and subscribe to their measure_power capability.
+   * Safe to run again: `present` is rebuilt from what is actually found this
+   * time (so a device that has gone away stops being claimed as present), but
+   * only after getDevices() has succeeded, so a failed fetch leaves the last
+   * known state alone rather than blanking it.
+   */
   private async discover(): Promise<void> {
     const devices = await this.api!.devices.getDevices();
+    this.present = { inverter: false, meter: false, battery: false };
     for (const device of Object.values(devices)) {
       const role = this.roleOf(device);
       if (!role) continue;
@@ -154,6 +242,7 @@ export class SolarFeed extends EventEmitter {
       try {
         const inst = device.makeCapabilityInstance('measure_power', (value: number) => {
           if (typeof value === 'number') {
+            this.lastUpdateAt = Date.now();
             this.values[role] = value;
             this.emitSample();
           }
@@ -170,6 +259,7 @@ export class SolarFeed extends EventEmitter {
         try {
           const inst = device.makeCapabilityInstance('measure_battery', (value: number) => {
             if (typeof value === 'number') {
+              this.lastUpdateAt = Date.now();
               this.batterySoc = value;
               this.emitSample();
             }
@@ -181,7 +271,13 @@ export class SolarFeed extends EventEmitter {
       }
     }
     this.log(`SolarFeed discovered: ${Object.entries(this.present).filter(([, v]) => v).map(([k]) => k).join(', ') || 'none'}`);
-    if (this.present.meter) this.emitSample();
+    // A successful discovery read each device's current value, so it counts as a
+    // sign of life in its own right - otherwise the silence check would fire on
+    // the very next rescan, before any capability listener has had cause to run.
+    if (this.present.meter) {
+      this.lastUpdateAt = Date.now();
+      this.emitSample();
+    }
   }
 
   private roleOf(device: HomeyApiDevice): Role | null {
@@ -216,17 +312,26 @@ export class SolarFeed extends EventEmitter {
     return this.present.meter;
   }
 
-  async stop(): Promise<void> {
-    if (this.pendingEmit) {
-      clearTimeout(this.pendingEmit);
-      this.pendingEmit = null;
-    }
+  /** Drop every capability subscription, leaving the feed ready to resubscribe. */
+  private async releaseInstances(): Promise<void> {
     for (const inst of this.instances) {
       try {
         await inst.destroy?.();
       } catch { /* ignore */ }
     }
     this.instances = [];
+  }
+
+  async stop(): Promise<void> {
+    if (this.pendingEmit) {
+      clearTimeout(this.pendingEmit);
+      this.pendingEmit = null;
+    }
+    if (this.rescanTimer) {
+      clearInterval(this.rescanTimer);
+      this.rescanTimer = null;
+    }
+    await this.releaseInstances();
   }
 
 }

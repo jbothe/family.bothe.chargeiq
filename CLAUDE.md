@@ -37,6 +37,16 @@ The **App** (`app.ts`) owns the long-lived services and exposes them to the devi
   HomeyAPI: `measure_power` on inverter/meter/battery + `measure_battery` SoC. Emits a merged
   `SolarSample`; **house load is derived** (`pv + gridSigned − batterySigned`). Best-effort —
   the charger still works without it. See `memory/solaredge-feed-contract.md`.
+  **Discovery is not one-shot.** A `RESCAN_INTERVAL_MS` (5 min) timer calls `checkAndRecover()`,
+  which rebuilds the subscriptions when the feed looks dead — nothing useful discovered, or nothing
+  received for `FEED_SILENT_MS` (30 min, deliberately generous since Homey only fires a capability
+  listener on an actual *change*, so a healthy feed can legitimately be quiet). It's armed
+  *before* the first discovery, so a discovery that fails outright (HomeyAPI not up, SolarEdge app
+  still starting) is retried instead of being the only attempt — previously either of those left
+  solar mode silently dead for the app's whole lifetime, since `discover()` ran once from `start()`
+  and nothing ever re-looked. `discover()` rebuilds `present` from what it actually finds, but only
+  *after* `getDevices()` succeeds, so a failed rescan doesn't blank known-good state.
+  `checkAndRecover(now?)` is public purely so tests can drive it without waiting on real time.
 - Widget state is **pushed** to the widget via `this.homey.api.realtime('powerflow', …)` every
   10 s (`startWidgetBroadcast`). This is the widget's ongoing data channel. Immediate first paint
   on load goes through a **widget-scoped** pull endpoint (`widgets/power-flow/api.js`'s
