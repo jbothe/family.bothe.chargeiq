@@ -295,6 +295,12 @@ export class ChargeController {
   /** Raw last-seen OCPP status, used to gate a new RemoteStartTransaction. */
   private lastStatusValue: OcppStatus | null = null;
 
+  /** Last power figure written to the log, so [charger] power= only reports real movement. */
+  private loggedPowerW = 0;
+
+  /** Fingerprint of the last [solar] line logged - see onSolarSample(). */
+  private loggedSolar = '';
+
   private transactionId: number | null = null;
 
   private desiredAmps: number | null = null;
@@ -924,10 +930,14 @@ export class ChargeController {
     }
     this.updateSessionCapabilities();
 
-    // TEMP debugging: log every MeterValues report, unthrottled (normally
-    // gated to a >=100W change - see git history to restore that).
-    this.host.log(`[charger] power=${r.power !== undefined ? `${Math.round(r.power)}W` : '?'} `
-      + `current=${r.current ?? '?'}A voltage=${r.voltage ?? '?'}V`);
+    // Gated on real movement: MeterValues arrives every meterSampleIntervalSec
+    // (10s by default) for as long as the app runs, so logging every report
+    // buries everything else in the log for no added information.
+    if (r.power !== undefined && Math.abs(r.power - this.loggedPowerW) >= 100) {
+      this.loggedPowerW = r.power;
+      this.host.log(`[charger] power=${Math.round(r.power)}W `
+        + `current=${r.current ?? '?'}A voltage=${r.voltage ?? '?'}V`);
+    }
   }
 
   private onStartTransaction(id: number, req: StartTransactionReq): void {
@@ -1141,16 +1151,23 @@ export class ChargeController {
     this.solarTargetAmps = res.target;
     this.host.setCapability('measure_solar_surplus', Math.round(this.lastAvailableW));
 
-    // TEMP debugging: log every sample, unthrottled (normally deduped on a
-    // rounded-to-50W fingerprint change - see git history to restore that).
-    // The resolved target itself is left to the [decision] line that follows
-    // (via tick() below) - state is SolarLoop's own hysteresis state, which
-    // isn't shown anywhere else and keeps running in the background even when
-    // solar isn't the active mode.
-    const f = (w?: number) => (w == null ? '?' : `${Math.round(w)}W`);
-    this.host.log(`[solar] solar=${f(sample.pvW)} battery=${f(sample.batteryW)} house=${f(sample.houseW)} `
-      + `grid=${f(gridSignedW)} charger=${f(chargerPowerW)} excess=${Math.round(this.lastAvailableW)}W`
-      + ` (state=${res.state})`);
+    // Deduped on a rounded-to-50W fingerprint: the feed reports roughly every
+    // 10s indefinitely, and PV/house figures jitter by a few watts constantly,
+    // so an unthrottled line here is almost all noise. The resolved target
+    // itself is left to the [decision] line that follows (via tick() below) -
+    // state is SolarLoop's own hysteresis state, which isn't shown anywhere
+    // else and keeps running in the background even when solar isn't the
+    // active mode, so it belongs in the fingerprint.
+    const r50 = (w?: number) => (w == null ? 'na' : String(Math.round(w / 50) * 50));
+    const key = [r50(sample.pvW), r50(sample.batteryW), r50(sample.houseW),
+      r50(gridSignedW), r50(chargerPowerW), res.state].join('|');
+    if (key !== this.loggedSolar) {
+      this.loggedSolar = key;
+      const f = (w?: number) => (w == null ? '?' : `${Math.round(w)}W`);
+      this.host.log(`[solar] solar=${f(sample.pvW)} battery=${f(sample.batteryW)} house=${f(sample.houseW)} `
+        + `grid=${f(gridSignedW)} charger=${f(chargerPowerW)} excess=${Math.round(this.lastAvailableW)}W`
+        + ` (state=${res.state})`);
+    }
 
     this.tick(new Date(now), 'solar');
   }

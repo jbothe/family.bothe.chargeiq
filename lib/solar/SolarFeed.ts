@@ -154,13 +154,6 @@ export class SolarFeed extends EventEmitter {
       try {
         const inst = device.makeCapabilityInstance('measure_power', (value: number) => {
           if (typeof value === 'number') {
-            // TEMP debugging: raw per-role update, logged before the emit
-            // debounce - lets a quiet stretch in the merged [solar] log be
-            // told apart from Homey simply not rebroadcasting an unchanged
-            // capability value at all (setCapabilityValue only fires
-            // listeners on an actual change) vs. a genuine gap in this feed.
-            // See git history to remove once confirmed on real hardware.
-            this.log(`[solar] raw ${role} update: ${value}W`);
             this.values[role] = value;
             this.emitSample();
           }
@@ -177,7 +170,6 @@ export class SolarFeed extends EventEmitter {
         try {
           const inst = device.makeCapabilityInstance('measure_battery', (value: number) => {
             if (typeof value === 'number') {
-              this.log(`[solar] raw battery SoC update: ${value}%`); // TEMP debugging - see above
               this.batterySoc = value;
               this.emitSample();
             }

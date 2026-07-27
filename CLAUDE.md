@@ -311,9 +311,13 @@ next move.
   `StatusNotification` that actually **changes** status (a repeat of the same status - e.g. the real
   charger echoing back what `bind()`'s cache replay + `requestFreshState()` already produced - is
   deliberately not treated as new information and does not re-tick).
-  `[charger] power=…` is also currently unthrottled (every `MeterValues`, not just >=100W changes) -
-  both this and the solar log's verbosity are marked `TEMP debugging` in the source pending real
-  hardware verification; see git history to restore the throttled versions once that's done.
+  The two recurring-report logs are the deliberate exception to that verbosity, because they repeat
+  for the lifetime of the app rather than per decision: `[charger] power=…` only logs on a >=100W
+  move (`loggedPowerW`), and `[solar] …` is deduped on a rounded-to-50W fingerprint of its own
+  fields plus `SolarLoop`'s state (`loggedSolar`). Both were briefly unthrottled under a `TEMP
+  debugging` marker while the OCPP/solar paths were being confirmed on hardware; that's done, and
+  the throttles are back. `SolarFeed`'s per-role `[solar] raw … update` lines existed only for that
+  same exercise and are gone entirely - the merged `[solar]` line covers it.
 - Settings pages must include `<script src="/homey.js" data-origin="settings">`; widgets get their
   runtime injected automatically (no include, and keep widget JS **inline/single-file**).
 
