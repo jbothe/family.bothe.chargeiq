@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>ChargeIQ pair start preview</title>
+  <style>
+    /* Dev-only preview of drivers/charger/pair/start.html, styled with Athom's own CSS from
+       test/homey-css/. Never shipped. Must be served over http(s), not file://.
+       Background on the wizard structure, the CSS, and dark mode: test/homey-css/README.md.
+       Modeled on family.bothe.dexcom's test/pair-login-preview.html - same harness shape, but
+       start.html has no form/translations of its own (a static instructions screen, plain
+       English baked in - locales/en.json is empty) and declares navigation.next in
+       driver.compose.json instead of supplying its own Continue button, so this preview
+       fakes Homey's native #hy-nav chrome instead of a submit form. See test/homey-css/README.md's
+       "Not covered" section for exactly what's approximated there. */
+    :root {
+      --bg: #f2f3f7;
+      --surface: #ffffff;
+      --border: #e2e4ea;
+      --text: #1a1d29;
+      --text-muted: #676c7e;
+      --accent: #4f46e5;
+      --radius: 12px;
+      --radius-sm: 8px;
+      --shadow: 0 1px 2px rgba(16, 18, 27, 0.04), 0 8px 24px rgba(16, 18, 27, 0.06);
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
+    body {
+      font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      margin: 0;
+      padding: 18px 20px 60px;
+      background: var(--bg);
+      color: var(--text);
+    }
+    .page { max-width: 760px; margin: 0 auto; }
+
+    header { margin-bottom: 20px; }
+    h1 { font-size: 18px; font-weight: 700; margin: 0 0 6px; letter-spacing: -0.01em; }
+    header p { font-size: 13px; line-height: 1.5; color: var(--text-muted); margin: 0; }
+    code { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 0.92em; }
+
+    section { margin-bottom: 28px; }
+    section > h2 {
+      font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em;
+      color: var(--text-muted); margin: 0 0 10px;
+    }
+
+    .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    .row > .label { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); }
+
+    button {
+      font: inherit; font-size: 13px; font-weight: 600; color: var(--text);
+      padding: 8px 14px; cursor: pointer;
+      background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm);
+      box-shadow: 0 1px 2px rgba(16, 18, 27, 0.03);
+      transition: background 0.15s ease, border-color 0.15s ease, transform 0.05s ease;
+    }
+    button:hover { border-color: #c8cbd6; background: #fafafe; }
+    button:active { transform: translateY(1px); }
+    button[aria-pressed='true'] { border-color: var(--accent); color: var(--accent); background: #eeecfd; }
+
+    .controls-card {
+      display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+      background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+      box-shadow: var(--shadow); padding: 14px 16px; margin-bottom: 20px;
+    }
+    .controls-card .divider { width: 1px; align-self: stretch; background: var(--border); }
+
+    .banner {
+      border-radius: var(--radius-sm); padding: 12px 14px; margin-bottom: 20px;
+      font-size: 13px; line-height: 1.55; display: none;
+    }
+    .banner.visible { display: block; }
+    .banner.warn { background: #fff6e5; border: 1px solid #f5d69a; color: #6b4a06; }
+    .banner.ok { background: #eaf7ee; border: 1px solid #b6e2c3; color: #1e5c33; }
+    .banner strong { display: block; margin-bottom: 4px; }
+    .banner ul { margin: 6px 0 0; padding-left: 20px; }
+    .banner li { margin-bottom: 2px; }
+
+    .preview-card {
+      display: flex; justify-content: center;
+      background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+      box-shadow: var(--shadow); padding: 24px;
+    }
+    .frame-wrap { display: inline-block; border: 1px solid #ccc; background: #ffffff; border-radius: 10px; overflow: hidden; }
+    @media (prefers-color-scheme: dark) {
+      .frame-wrap { background: #0b0d12; border-color: #333; }
+    }
+    html[data-theme='light'] .frame-wrap { background: #ffffff; border-color: #ccc; }
+    html[data-theme='dark'] .frame-wrap { background: #0b0d12; border-color: #333; }
+    iframe { display: block; width: 380px; height: 620px; border: 0; }
+
+    .log {
+      font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 12px; line-height: 1.6;
+      background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm);
+      box-shadow: var(--shadow); padding: 12px; max-height: 180px; overflow-y: auto;
+      white-space: pre-wrap; color: var(--text-muted);
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <header>
+      <h1>ChargeIQ pair start preview</h1>
+    </header>
+
+    <div class="banner" id="banner"></div>
+
+    <div class="controls-card">
+      <div class="row">
+        <span class="label">Theme</span>
+        <button class="theme-btn" data-theme="light">Light</button>
+        <button class="theme-btn" data-theme="dark">Dark</button>
+        <button class="theme-btn" data-theme="">Auto (OS)</button>
+      </div>
+      <div class="divider"></div>
+      <div class="row">
+        <span class="label">getConnectionInfo</span>
+        <button class="outcome-btn" data-outcome="ok">Resolves (ip+port)</button>
+        <button class="outcome-btn" data-outcome="empty">Resolves (empty)</button>
+        <button class="outcome-btn" data-outcome="fail">Rejects</button>
+      </div>
+      <div class="divider"></div>
+      <button id="reload">Reload view</button>
+    </div>
+
+    <section>
+      <div class="preview-card">
+        <div class="frame-wrap">
+          <iframe id="preview" title="start pair view"></iframe>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Console / bridge log</h2>
+      <div class="log" id="log"></div>
+    </section>
+  </div>
+
+  <script>
+    var iframe = document.getElementById('preview');
+    var logEl = document.getElementById('log');
+    var bannerEl = document.getElementById('banner');
+    var currentTheme = '';
+    var currentOutcome = 'ok';
+    var cssReady = false;
+
+    // Homey darkens a pair view by inverting it, not by theming the --homey-* tokens (they have no
+    // dark values at all). Same filter its web app defines as --theme-filter-dark-mode; the
+    // hue-rotate keeps blues blue.
+    var DARK_FILTER = 'invert(1) hue-rotate(180deg)';
+
+    // homey.css is the Style Library manifest (@imports only); homey.drivers.css is the wizard
+    // chrome - similar names, unrelated files. `required` = carries rules start.html actually
+    // needs to render (it uses no form/select, so those partials are optional here, unlike
+    // dexcom's login.html).
+    var CSS_FILES = [
+      { path: 'homey-css/css/homey.drivers.css',      required: true,  note: 'pairing wizard chrome incl. #hy-nav' },
+      { path: 'homey-css/css/homey.css',              required: true,  note: 'Style Library import manifest' },
+      { path: 'homey-css/css/_homey-variables.css',   required: true,  note: '--homey-* colors + spacing' },
+      { path: 'homey-css/css/_base.css',              required: true,  note: 'reset / base elements' },
+      { path: 'homey-css/css/_homey-typography.css',  required: true,  note: '.homey-title / .homey-subtitle / .homey-text-regular' },
+      { path: 'homey-css/css/_homey-button.css',      required: false, note: 'approximated native Continue button only' },
+      { path: 'homey-css/css/_homey-form.css',        required: false, note: 'unused by start.html (no form)' },
+      { path: 'homey-css/css/_homey-icon.css',        required: false, note: 'unused by start.html (no icon classes)' },
+      { path: 'homey-css/font/roboto/roboto.css',     required: false, note: 'Roboto @font-face declarations' },
+      // Only these three weights are reachable here; a missing one is synthesised from Regular,
+      // with the wrong metrics.
+      { path: 'homey-css/font/roboto/Roboto-Regular.ttf', required: false, note: 'Roboto 400 - subtitle, numbered steps' },
+      { path: 'homey-css/font/roboto/Roboto-Medium.ttf',  required: false, note: 'Roboto 500 - Continue button label' },
+      { path: 'homey-css/font/roboto/Roboto-Bold.ttf',    required: false, note: 'Roboto 700 - .homey-title' },
+      { path: 'homey-css/font/notosansarabic/notosansarabic.css', required: false, note: 'RTL locales only' },
+      { path: 'homey-css/font/fontawesome/fontawesome.css',       required: false, note: 'icon glyphs only' }
+    ];
+
+    function log(line) {
+      logEl.textContent += line + '\n';
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    function abs(path) { return new URL(path, location.href).href; }
+
+    // Banner uses innerHTML and one note names a <select>, which would otherwise open a real tag.
+    function esc(s) {
+      return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+
+    // 'ok' | 'missing' | 'errorpage'. A file saved from a wrong URL is an HTML 404 body under the
+    // right filename, and passes any presence-only check - it happened to both SVGs once in dexcom.
+    function exists(path) {
+      return fetch(abs(path), { method: 'GET', cache: 'no-store' })
+        .then(function (res) {
+          if (!res.ok) return 'missing';
+          if (/\.ttf$/i.test(path)) return 'ok';
+          return res.text().then(function (body) {
+            return /^\s*<(!doctype\s+html|html[\s>])/i.test(body) ? 'errorpage' : 'ok';
+          });
+        })
+        .catch(function () { return 'missing'; });
+    }
+
+    function probeCss() {
+      return Promise.all(CSS_FILES.map(function (f) {
+        return exists(f.path).then(function (status) {
+          return { file: f, ok: status === 'ok', status: status };
+        });
+      })).then(function (results) {
+        var missingRequired = results.filter(function (r) { return !r.ok && r.file.required; });
+        var missingOptional = results.filter(function (r) { return !r.ok && !r.file.required; });
+        var errorPages = results.filter(function (r) { return r.status === 'errorpage'; });
+        cssReady = missingRequired.length === 0;
+
+        function list(rows, withNote) {
+          return '<ul>' + rows.map(function (r) {
+            return '<li><code>test/' + esc(r.file.path) + '</code>'
+              + (withNote ? ' — ' + esc(r.file.note) : '') + '</li>';
+          }).join('') + '</ul>';
+        }
+
+        // The banner only appears when something is wrong; a complete set says nothing. Error
+        // pages are reported ahead of plain absences - present-but-broken is the confusing case,
+        // since the symptom is an invisible asset rather than an obviously missing one.
+        if (errorPages.length) {
+          bannerEl.className = 'banner warn visible';
+          bannerEl.innerHTML = '<strong>Saved HTML error page, not a real asset.</strong>'
+            + 'Re-fetch with <code>test/homey-css/fetch.sh</code>.' + list(errorPages, false);
+        } else if (missingRequired.length) {
+          bannerEl.className = 'banner warn visible';
+          bannerEl.innerHTML = '<strong>Incomplete — the preview will not be accurate.</strong>'
+            + 'Run <code>test/homey-css/fetch.sh</code>.'
+            + list(missingRequired.concat(missingOptional), true);
+        } else if (missingOptional.length) {
+          bannerEl.className = 'banner warn visible';
+          bannerEl.innerHTML = '<strong>Optional files missing.</strong>'
+            + list(missingOptional, true);
+        }
+
+        log('CSS probe: ' + missingRequired.length + ' required, '
+          + missingOptional.length + ' optional missing');
+      });
+    }
+
+    function applyTheme(theme) {
+      currentTheme = theme;
+      if (theme) document.documentElement.setAttribute('data-theme', theme);
+      else document.documentElement.removeAttribute('data-theme');
+      document.querySelectorAll('.theme-btn').forEach(function (btn) {
+        btn.setAttribute('aria-pressed', String(btn.getAttribute('data-theme') === theme));
+      });
+      reload();
+    }
+
+    function applyOutcome(outcome) {
+      currentOutcome = outcome;
+      document.querySelectorAll('.outcome-btn').forEach(function (btn) {
+        btn.setAttribute('aria-pressed', String(btn.getAttribute('data-outcome') === outcome));
+      });
+      reload();
+    }
+
+    function stubScript() {
+      // Mirrors driver.ts's real session.setHandler('getConnectionInfo', ...): it always
+      // resolves in practice (ip falls back to '<homey-ip>' internally, never throws), but
+      // start.html defends against a transport-level emit() rejection too, via .catch() - the
+      // 'fail' outcome below exercises that defensive branch, and 'empty' exercises the
+      // (info && info.ip) fallback inside .then() for a response missing fields.
+      return '<script>\n'
+        + 'window.Homey = {\n'
+        + '  emit: function (event, data) {\n'
+        + '    window.parent.__previewLog("Homey.emit(" + JSON.stringify(event) + ", " + JSON.stringify(data) + ")");\n'
+        + '    return new Promise(function (resolve, reject) {\n'
+        + '      setTimeout(function () {\n'
+        + '        var outcome = window.parent.__previewOutcome();\n'
+        + '        if (outcome === "ok") resolve({ ip: "192.168.1.87", port: 9000 });\n'
+        + '        else if (outcome === "empty") resolve({});\n'
+        + '        else reject({ message: "getConnectionInfo transport failed (simulated)" });\n'
+        + '      }, 150);\n'
+        + '    });\n'
+        + '  }\n'
+        + '};\n'
+        + '<\/script>\n';
+    }
+
+    function cssLinks() {
+      var links = '<link rel="stylesheet" href="' + abs('homey-css/css/homey.css') + '" />\n'
+                + '<link rel="stylesheet" href="' + abs('homey-css/css/homey.drivers.css') + '" />\n';
+      // Filtering the root inverts its own background too, so _base.css's #fff becomes #000.
+      if (currentTheme === 'dark') {
+        links += '<style>html { filter: ' + DARK_FILTER + '; }</style>\n';
+      }
+      return links;
+    }
+
+    // The wizard is its own document; each pair view is a fragment inside a .hy-view. The view's
+    // own <style> goes after the Homey sheets so its overrides cascade as they do on-device.
+    // #hy-nav is rendered visible with an approximated Continue button - start.html declares
+    // "navigation": { "next": "list_devices" } in driver.compose.json and supplies no button of
+    // its own, so on a real device this chrome is Homey's, not this file's. See
+    // test/homey-css/README.md's "Not covered" section for exactly what's unconfirmed here.
+    function buildDocument(startHtml) {
+      var parsed = new DOMParser().parseFromString(startHtml, 'text/html');
+      var viewStyle = Array.prototype.map.call(parsed.head.querySelectorAll('style'), function (s) {
+        return s.outerHTML;
+      }).join('\n');
+
+      return '<!DOCTYPE html>\n<html>\n<head>\n<meta charset="utf-8" />\n'
+        + '<meta name="viewport" content="width=device-width, initial-scale=1" />\n'
+        + cssLinks()
+        + stubScript()
+        + viewStyle + '\n'
+        + '</head>\n'
+        + '<body id="hy-wrap">\n'
+        + '  <div id="hy-header"></div>\n'
+        + '  <div id="hy-views">\n'
+        + '    <div class="hy-view visible">\n' + parsed.body.innerHTML + '\n    </div>\n'
+        + '  </div>\n'
+        + '  <div id="hy-nav" class="visible">\n'
+        + '    <button id="hy-nav-continue" class="visible homey-button-primary-full">Continue</button>\n'
+        + '  </div>\n'
+        + '</body>\n</html>';
+    }
+
+    function reload() {
+      fetch('../drivers/charger/pair/start.html', { cache: 'no-store' })
+        .then(function (res) { return res.text(); })
+        .then(function (html) {
+          iframe.srcdoc = buildDocument(html);
+          iframe.onload = function () {
+            var doc = iframe.contentDocument;
+            if (!doc) return;
+            if (currentTheme) doc.documentElement.setAttribute('data-theme', currentTheme);
+            else doc.documentElement.removeAttribute('data-theme');
+          };
+          log('reloaded start.html (getConnectionInfo=' + currentOutcome
+            + ', theme=' + (currentTheme || 'auto') + ')');
+        });
+    }
+
+    window.__previewLog = log;
+    window.__previewOutcome = function () { return currentOutcome; };
+
+    document.querySelectorAll('.theme-btn').forEach(function (btn) {
+      btn.addEventListener('click', function () { applyTheme(btn.getAttribute('data-theme')); });
+    });
+    document.querySelectorAll('.outcome-btn').forEach(function (btn) {
+      btn.addEventListener('click', function () { applyOutcome(btn.getAttribute('data-outcome')); });
+    });
+    document.getElementById('reload').addEventListener('click', reload);
+
+    probeCss().then(function () {
+      applyOutcome('ok');
+      applyTheme('');
+    });
+  </script>
+</body>
+</html>

@@ -347,20 +347,22 @@ not aliases of a single Homey var), and the battery gauge's 50%-tier color (`col
 red/green - Homey has no yellow token) and its null/no-data gray.
 
 For visual iteration without a real Homey device, `test/widget-preview.html` +
-`test/homey-mock.css` are dev-only tooling (not part of `npm test`, never shipped - nothing in
+`test/homey-css/widgets/` (Homey's own real widget Style Library - see that folder's `README.md`)
+are dev-only tooling (not part of `npm test`, never shipped - nothing in
 `widget.compose.json`/`app.json` references `test/`). The preview page loads the real,
-**unmodified** widget file in an iframe and injects `homey-mock.css` into it after load, so the
-shipped file is never touched or duplicated. Must be served over http(s) (e.g. `python3 -m
-http.server` from the repo root) rather than opened via `file://`, since same-origin iframe access
-is required to inject the stylesheet and call the widget's own `render()` directly. It has a
-Light/Dark/Auto theme toggle - an explicit `data-theme` attribute override on both documents, not
-just `prefers-color-scheme`, since Homey's own theme setting is independent of the OS (same
-reasoning as the widget's own top-of-file comment) - and preset buttons that fill a JSON textarea
-rather than rendering immediately, so a preset is a starting point to tweak before hitting "Apply
-state", not a one-shot action. `homey-mock.css`'s values are reasonable approximations, not
-authoritative: spacing/icon-size/color-palette names are documented by Homey, but the two
-border-radius values are pure guesses since Homey doesn't publish them - real on-device
-verification (exact fonts, real color/radius values) still needs `homey app run`.
+**unmodified** widget file in an iframe and links `homey.widgets.css` (the real manifest) into it
+after load, so the shipped file is never touched or duplicated. Must be served over http(s) (e.g.
+`python3 -m http.server` from the repo root) rather than opened via `file://`, since same-origin
+iframe access is required to link the stylesheet and call the widget's own `render()` directly. It
+has a Light/Dark toggle (no OS "Auto" - a real widget gets one pre-resolved theme's `--homey-*`
+values injected server-side, same reasoning as the widget's own top-of-file comment, so there's no
+media query to follow) and preset buttons that fill a JSON textarea rather than rendering
+immediately, so a preset is a starting point to tweak before hitting "Apply state", not a one-shot
+action. `_homey-variables.css` carries a `.homey-dark-mode` override block, and the toggle sets
+that class on the iframe's `<html>` - a different mechanism from the pair/settings invert-filter
+(same README, "Dark mode"). The harness's own CSS-completeness probe banner reports any missing
+file live. Real on-device verification (exact fonts/colors, anything the fetched CSS doesn't
+cover) still needs `homey app run`.
 
 ## Testing
 Pure logic is unit-tested (`SolarLoop`, `Scheduler`, controller mode/latch/cap resolution, solar

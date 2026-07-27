@@ -211,9 +211,11 @@
        and read as baseline-aligned across the row. position:relative + top:1px nudges its own
        paint position only - unlike .mode-row's shift (which moves the icon/time group as one
        unit, see there), this doesn't consume layout space, so .mode-icon's align-items:center
-       position in the row is untouched. Real Homey fonts aren't available outside `homey app
-       run` (see homey-mock.css's own caveat), so all of the above may need re-tuning once
-       verified on-device. */
+       position in the row is untouched. test/widget-preview.html renders with Homey's real
+       Style Library (test/homey-css/widgets/, see that folder's README.md) - real Roboto metrics
+       and real --homey-* color/spacing values alike - so this can be checked without `homey app
+       run`; on-device verification is still the only way to catch anything that tree doesn't
+       cover. */
     .mode-time { white-space: nowrap; color: var(--homey-text-color-light); position: relative; top: 1px; } /* size/weight via .homey-text-small-light */
 
     /* EV state chip - READY / UNPLUGGED render as a plain text label; CHARGING instead
