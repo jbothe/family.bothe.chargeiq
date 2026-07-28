@@ -189,11 +189,6 @@ export class ChargePoint extends EventEmitter {
     return this.lastTransactionId;
   }
 
-  /** Update the authorize policy at runtime (e.g. settings change). */
-  setAuthorizePolicy(policy: AuthorizePolicy): void {
-    this.authorize = policy;
-  }
-
   // ---------------------------------------------------------------------------
   // Inbound: attach handlers to a (re)connected client
   // ---------------------------------------------------------------------------

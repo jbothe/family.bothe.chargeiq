@@ -172,28 +172,6 @@ export class Scheduler {
     return hit?.boostToCap === true;
   }
 
-  /**
-   * The next Date at which the active/inactive state flips. Returns undefined
-   * when there are no windows (nothing will ever change). Used to expire a
-   * manual override "until the next schedule boundary".
-   */
-  nextBoundary(now: Date): Date | undefined {
-    if (!this.hasWindows()) return undefined;
-    const mow = minuteOfWeek(now, this.timezone);
-    const boundaries = new Set<number>();
-    for (const iv of this.intervals()) {
-      boundaries.add(((iv.start % MIN_PER_WEEK) + MIN_PER_WEEK) % MIN_PER_WEEK);
-      boundaries.add(((iv.end % MIN_PER_WEEK) + MIN_PER_WEEK) % MIN_PER_WEEK);
-    }
-    let best = Infinity;
-    for (const b of boundaries) {
-      const delta = b > mow ? b - mow : b + MIN_PER_WEEK - mow;
-      if (delta > 0 && delta < best) best = delta;
-    }
-    if (!Number.isFinite(best)) return undefined;
-    return this.dateFromDelta(now, best);
-  }
-
   /** The next Date a window starts (strictly after now), or undefined if none. */
   nextStart(now: Date): Date | undefined {
     if (!this.hasWindows()) return undefined;

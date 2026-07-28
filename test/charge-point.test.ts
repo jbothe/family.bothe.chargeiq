@@ -272,17 +272,6 @@ test('a close or detach stops the watchdog, so a dead ChargePoint cannot re-repo
   assert.deepEqual(client.closeOpts, [], 'and nothing to close');
 });
 
-test('setAuthorizePolicy() replaces the policy used by subsequent Authorize calls', () => {
-  const cp = makeCp(() => false);
-  const client = new FakeRpcClient();
-  cp.attach(client);
-
-  assert.deepEqual(client.dispatch('Authorize', { idTag: 'X' }), { idTagInfo: { status: 'Invalid' } });
-
-  cp.setAuthorizePolicy(() => true);
-  assert.deepEqual(client.dispatch('Authorize', { idTag: 'X' }), { idTagInfo: { status: 'Accepted' } });
-});
-
 test('outbound commands throw before a client is ever attached', async () => {
   const cp = makeCp();
   await assert.rejects(() => cp.remoteStartTransaction('X'), /not connected/);

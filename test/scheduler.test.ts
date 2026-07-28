@@ -39,14 +39,6 @@ test('activeBoostToCap reflects the active window, defaulting to false', () => {
   assert.equal(s.activeBoostToCap(at(1, 20, 0)), false, 'no active window at all');
 });
 
-test('nextBoundary returns the next state flip', () => {
-  const s = new Scheduler([{ days: [1, 2, 3, 4, 5], start: '09:00', end: '17:00' }]);
-  const nb = s.nextBoundary(at(1, 10, 0));
-  assert.ok(nb && nb.getDay() === 1 && nb.getHours() === 17);
-  const nb2 = s.nextBoundary(at(1, 8, 0));
-  assert.ok(nb2 && nb2.getHours() === 9);
-});
-
 test('overnight window 22:00-06:00 wraps midnight', () => {
   const s = new Scheduler([{ days: [0, 1, 2, 3, 4, 5, 6], start: '22:00', end: '06:00' }]);
   assert.equal(s.isActive(at(2, 23, 0)), true);
@@ -112,7 +104,7 @@ test('reported schedule times land on the right wall clock across a DST transiti
 test('no windows', () => {
   const s = new Scheduler([]);
   assert.equal(s.isActive(at(1, 10, 0)), false);
-  assert.equal(s.nextBoundary(at(1, 10, 0)), undefined);
+  assert.equal(s.nextStart(at(1, 10, 0)), undefined);
 });
 
 test('disabled window is never active', () => {
@@ -120,7 +112,7 @@ test('disabled window is never active', () => {
     days: [1, 2, 3, 4, 5], start: '09:00', end: '17:00', enabled: false,
   }]);
   assert.equal(s.isActive(at(1, 10, 0)), false);
-  assert.equal(s.nextBoundary(at(1, 10, 0)), undefined);
+  assert.equal(s.nextStart(at(1, 10, 0)), undefined);
 });
 
 test('re-enabling a window makes it active again', () => {

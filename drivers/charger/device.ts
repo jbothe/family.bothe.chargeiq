@@ -46,8 +46,6 @@ module.exports = class ChargerDevice extends Homey.Device {
 
   private onSolarSample?: (s: SolarSample) => void;
 
-  private lastSolarSample: SolarSample | null = null;
-
   /**
    * Homey's onSettings hook fires *before* the new values are actually
    * persisted - this.getSetting() during that call still returns the OLD
@@ -75,14 +73,11 @@ module.exports = class ChargerDevice extends Homey.Device {
     this.controller = new ChargeController(this.buildHost(), app.getCentralSystem());
     this.controller.init();
 
-    // Feed grid power into the solar loop; keep the latest sample for the widget.
+    // Feed grid power into the solar loop. The widget reads solar straight off
+    // the app's SolarFeed, so nothing is cached here.
     const feed = app.getSolarFeed();
-    this.onSolarSample = (s: SolarSample) => {
-      this.lastSolarSample = s;
-      this.controller.onSolarSample(s);
-    };
+    this.onSolarSample = (s: SolarSample) => this.controller.onSolarSample(s);
     feed?.on('sample', this.onSolarSample);
-    this.lastSolarSample = feed?.getSample() ?? null;
 
     this.registerCapabilityListener('evcharger_charging', async (value: boolean) => {
       if (value) {
@@ -135,11 +130,6 @@ module.exports = class ChargerDevice extends Homey.Device {
       (this.homey.app as ChargeIQApp).getSolarFeed()?.removeListener('sample', this.onSolarSample);
       this.onSolarSample = undefined;
     }
-  }
-
-  /** Latest merged solar sample (for the widget). */
-  getSolarSample(): SolarSample | null {
-    return this.lastSolarSample;
   }
 
   /** Excess-solar / loop diagnostics (for the widget + metrics). */
