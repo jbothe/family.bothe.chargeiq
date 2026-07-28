@@ -113,11 +113,31 @@ working on the controller logic.
 
 ## Status
 
-Core flows (OCPP connect/bind, capability mirroring, scheduling, solar
-following, the widget) are built and tested. Some behaviors — exact
-`SetChargingProfile` handling at 6 A/0 A, `TxProfile` vs `TxDefaultProfile`,
-and RemoteStart idTag auth — are still being verified against real Wallbox
-hardware; see [CLAUDE.md](CLAUDE.md) for the current list.
+Core flows — OCPP connect/bind, capability mirroring, scheduling, solar
+following, offline detection, and the widget — are built, unit-tested, and
+running against a real Wallbox Pulsar Max.
+
+Settled since the first draft of this section: `TxDefaultProfile` writes (sent
+when no transaction id is known) are genuinely obeyed by this charger, so the
+`TxProfile`-vs-`TxDefaultProfile` question is no longer open, and a `limit: 0`
+pause is confirmed to take effect.
+
+Still unverified on hardware:
+
+- The liveness watchdog firing against a genuinely half-open link — the exact
+  failure it exists for. The timer and teardown logic are unit-tested; what
+  isn't proven is that a real wedged link reaches it before `ocpp-rpc`'s own
+  ping timeout does.
+- `SetChargingProfile` at exactly 6 A (0 A is confirmed).
+- A schedule window starting a charge from cold. This charger self-authorizes
+  and opens its own transaction on plug-in without ever reporting `Preparing`,
+  which is what gates the app's `RemoteStartTransaction` — so that path may
+  never be reached in this configuration at all, making it possibly
+  unverifiable rather than merely untested.
+- Whether a widget's WKWebView reports Homey's resolved app theme through
+  `prefers-color-scheme` or tracks the raw OS setting regardless.
+
+See [CLAUDE.md](CLAUDE.md) for the full list and the reasoning behind each.
 
 ## License
 

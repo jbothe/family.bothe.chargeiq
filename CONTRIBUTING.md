@@ -1,50 +1,64 @@
-# Contributing to Athom and Homey
+# Contributing to ChargeIQ
 
-First off all, thank you for taking the time to contribute!
+ChargeIQ is a personal Homey Pro app: an OCPP 1.6J Central System for a single
+Wallbox Pulsar Max, wired into a SolarEdge feed. It is shared in case it is
+useful, and issues and pull requests are welcome — but it is shaped around one
+household's hardware, so please read the scope note below before filing.
 
-The following is a set of guidelines for contributing to Athom and its packages, which are hosted in the [Athom Organization](https://github.com/athombv) on GitHub. These are just guidelines, not rules. Use your best judgment, and feel free to contact us if you have any questions.
+## Before you file an issue
 
-Please join our [community slack](https://slack.athom.com), if you have not done so already.
-We also have a [community forum](https://community.homey.app) for general discussions.
+Most of this app's behaviour is a response to something a real charger actually
+did, and those reasons are written down. [CLAUDE.md](CLAUDE.md) documents the
+design invariants and the hardware quirks behind them — why the controller never
+issues `RemoteStopTransaction`, why a lone `Available` report is debounced, why
+amps are always floored, and so on. If something looks wrong, check there first:
+it may be deliberate, with the incident that caused it recorded next to it.
 
+A useful bug report includes:
 
-## Before submitting a bug or feature request
+- What you expected, and what happened instead.
+- Your charger make/model and firmware, since almost all of the hard-won
+  behaviour here is charge-point-specific.
+- The relevant `homey app run` log lines. `[decision:<trigger>]` is logged on
+  every controller tick and spells out the resolved mode, both hard caps, and
+  the final current — usually the fastest way to see what the app thought it was
+  doing.
 
-* **Have you actually read the error message**?
-* Have you searched for similar issues?
-* Have you updated homey, all apps, and the development tools (if applicable)?
-* Have you checked that it's not a problem with one of the apps you're using, rather than Homey itself?
-* Have you looked at what's involved in fixing/implementing this?
- 
-Capable programmers should always attempt to investigate and fix problems themselves before asking for others to help. Submit a pull request instead of an issue!
+## Hardware scope
 
-## A great bug report contains
+The app is deliberately single-charger. The OCPP and control layers are
+per-identity and would run several, but the shared electrical limits (household
+grid cap, charger-circuit cap, solar surplus) are enforced per-controller with no
+cross-charger coordination, so pairing is capped at one device. Read
+[docs/MULTI_DEVICE.md](docs/MULTI_DEVICE.md) before proposing multi-charger
+support — the gaps there are safety-relevant, not cosmetic.
 
-* Context – what were you trying to achieve?
-* Detailed steps to reproduce the error from scratch. Try isolating the minimal amount of code needed to reproduce the error.
-* Any applicable log files or ID's.
-* Evidence you've looked into solving the problem and ideally, a theory on the cause and a possible solution.
+Support for other chargers, or a different solar source, is not something this
+repo can test. A PR adding either is likelier to land if it leaves the existing
+path untouched and is explicit about what was and wasn't verified on real
+hardware.
 
-## A great feature request contains
+## Pull requests
 
-* The current situation.
-* How and why the current situation is problematic.
-* A detailed proposal or pull request that demonstrates how the problem could be solved.
-* A use case – who needs this feature and why?
-* Any caveats.
+Before any commit, all four of these must be clean — a green `npm test` does not
+imply the others:
 
-## A great pull request contains
+```bash
+npm run build && npm test && npm run lint && homey app validate --level publish
+```
 
-* Minimal changes. Only submit code relevant to the current issue. Other changes should go in new pull requests.
-* Minimal commits. Please squash to a single commit before sending your pull request.
-* No conflicts. Please rebase off the latest master before submitting.
-* Code conforming to the existing conventions and formats. i.e. Please don't reformat whitespace.
-* Passing tests in the test folder (if applicable). Use existing tests as a reference.
-* Relevant documentation.
+`npm run lint` must report zero *problems*, not just zero errors; fix warnings
+rather than suppressing them. `homey app validate` should show only the expected
+`homey:manager:api` review notice.
 
-## Speeding up your pull request
-Merging pull requests takes time. While we always try to merge your pull request as soon as possible, there are certain things you can do to speed up this process.
+Beyond that:
 
-* Ask developers to review your code changes and post their feedback.
-* Ask users to test your changes and post their feedback.
-* Keep your changes to the minimal required amount, and dedicated to one issue/feature only.
+- Don't hand-edit `app.json` — it is generated from `.homeycompose/`.
+- New behaviour in `lib/**` should land with a test in the same commit. Prefer a
+  pure function plus a `node:test` over anything needing the Homey runtime; the
+  controller and Central System take injected hosts and fakes precisely so they
+  run in plain Node. `app.ts`, `api.ts` and the driver/device adapters are the
+  deliberate exception — they have no seam to fake the SDK.
+- Match the surrounding style, and keep each commit to one logical change.
+- If you hit a real hardware quirk, write it into CLAUDE.md next to the code that
+  works around it. That file is the reason this app behaves sanely.
