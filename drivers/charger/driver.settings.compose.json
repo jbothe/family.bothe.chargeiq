@@ -31,7 +31,7 @@
     "type": "group",
     "label": { "en": "OCPP" },
     "children": [
-      { "id": "idTag", "type": "text", "label": { "en": "Default idTag (RemoteStart)" }, "hint": { "en": "Authorization tag sent when the app starts a charging session itself (manual/schedule/solar). By default any idTag is accepted, so this only needs to match something if you've enabled an idTag whitelist in the app's own settings." }, "value": "CHARGEIQ" },
+      { "id": "idTag", "type": "text", "label": { "en": "Default idTag (RemoteStart)" }, "hint": { "en": "Authorization tag sent when the app starts a charging session itself (manual/schedule/solar). ChargeIQ accepts any idTag, so this normally needs no changing - set it only if your charger is configured to require a particular tag." }, "value": "CHARGEIQ" },
       { "id": "meterSampleIntervalSec", "type": "number", "label": { "en": "MeterValues interval (s)" }, "hint": { "en": "How often the charger itself is configured to report power/current/voltage/energy (OCPP MeterValues), in seconds. Lower values give more responsive solar tracking and a livelier dashboard, at the cost of more OCPP traffic." }, "value": 10, "min": 2, "max": 300 },
       { "id": "writeThrottleMs", "type": "number", "label": { "en": "Min delay between profile writes (ms)" }, "hint": { "en": "Minimum spacing between charging-profile (current limit) writes sent to the charger. Prevents a fast-moving solar target from flooding the charger with SetChargingProfile calls; it also delays how quickly a new target actually reaches the charger." }, "value": 15000, "min": 1000, "max": 120000 }
     ]

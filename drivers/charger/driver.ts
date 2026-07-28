@@ -2,7 +2,7 @@
 
 import os from 'os';
 import Homey from 'homey';
-import { CentralSystem } from '../../lib/ocpp/CentralSystem';
+import { CentralSystem, DEFAULT_OCPP_PORT } from '../../lib/ocpp/CentralSystem';
 import { resolvePairList } from '../../lib/pairing';
 
 /** Homey's own LAN IPv4 address (first non-internal interface), or null if none found. */
@@ -72,7 +72,7 @@ module.exports = class ChargerDriver extends Homey.Driver {
           this.error('Could not resolve Homey LAN address:', err);
         }
       }
-      const port = (this.homey.settings.get('ocppPort') as number) || 9000;
+      const port = DEFAULT_OCPP_PORT;
       this.log(`[pair] connection info: ip=${ip ?? '<unresolved>'} port=${port}`);
       return { ip: ip ?? '<homey-ip>', port };
     });

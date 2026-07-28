@@ -1,11 +1,9 @@
 'use strict';
 
 import Homey from 'homey';
-import { CentralSystem } from './lib/ocpp/CentralSystem';
+import { CentralSystem, DEFAULT_OCPP_PORT } from './lib/ocpp/CentralSystem';
 import { ChargePoint } from './lib/ocpp/ChargePoint';
 import { SolarFeed } from './lib/solar/SolarFeed';
-
-const DEFAULT_PORT = 9000;
 
 /** Minimal surface this file needs from the paired charger device, if any. */
 interface ChargerDeviceLike {
@@ -48,11 +46,19 @@ module.exports = class ChargeIQApp extends Homey.App {
   private widgetBroadcast?: ReturnType<typeof setInterval>;
 
   async onInit() {
-    const port = (this.homey.settings.get('ocppPort') as number) || DEFAULT_PORT;
+    const port = DEFAULT_OCPP_PORT;
 
     this.centralSystem = new CentralSystem({
       port,
-      authorize: (idTag) => this.authorize(idTag),
+      // Accept every idTag. There used to be an `authorizeMode: 'whitelist'`
+      // branch reading an `idTagWhitelist` out of app settings, but the app has
+      // no settings page to set either one, so the whitelist could never be
+      // turned on and the code was unreachable. Removed rather than left as a
+      // control that looks configurable and isn't. This is a single-charger LAN
+      // Central System reachable only from the local network, so accept-all is
+      // the honest policy; the seam (CentralSystemOptions.authorize) is still
+      // here if a real one is ever wanted.
+      authorize: () => true,
       allocateTransactionId: () => this.allocateTransactionId(),
       logger: (msg, ...args) => this.log(msg, ...args),
     });
@@ -200,16 +206,6 @@ module.exports = class ChargeIQApp extends Homey.App {
       throw new Error('No charger is paired yet - add your charger first, then set a schedule.');
     }
     await dev.setSchedule(windows);
-  }
-
-  /** Authorize policy: accept-all, or an idTag whitelist from settings. */
-  private authorize(idTag: string): boolean {
-    const mode = this.homey.settings.get('authorizeMode') as string | undefined;
-    if (mode === 'whitelist') {
-      const list = (this.homey.settings.get('idTagWhitelist') as string[]) || [];
-      return list.includes(idTag);
-    }
-    return true; // accept-all (default)
   }
 
   /** Monotonic, persisted transaction id source. */

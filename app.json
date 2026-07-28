@@ -726,7 +726,7 @@
                 "en": "Default idTag (RemoteStart)"
               },
               "hint": {
-                "en": "Authorization tag sent when the app starts a charging session itself (manual/schedule/solar). By default any idTag is accepted, so this only needs to match something if you've enabled an idTag whitelist in the app's own settings."
+                "en": "Authorization tag sent when the app starts a charging session itself (manual/schedule/solar). ChargeIQ accepts any idTag, so this normally needs no changing - set it only if your charger is configured to require a particular tag."
               },
               "value": "CHARGEIQ"
             },

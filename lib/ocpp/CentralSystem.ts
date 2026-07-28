@@ -6,6 +6,14 @@ import { AuthorizePolicy, ChargePoint, RpcClient } from './ChargePoint';
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { RPCServer } = require('ocpp-rpc');
 
+/**
+ * Port the Central System listens on, and the one the pairing instructions tell
+ * the user to point the charger at. Fixed rather than a setting: it was read
+ * from `ocppPort` in app settings, but the app has no settings page to write it,
+ * so the value was only ever this default. Change it here if 9000 ever clashes.
+ */
+export const DEFAULT_OCPP_PORT = 9000;
+
 export interface CentralSystemOptions {
   port: number;
   host?: string;
