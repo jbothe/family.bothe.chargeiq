@@ -89,3 +89,43 @@ test('OCPP 1.6J: connect, boot, transaction, MeterValues, commands', async () =>
     await cs.stop();
   }
 });
+
+test('stop() releases the charge points, not just the listening socket', async () => {
+  const PORT = 9932;
+  const IDENTITY = 'WBIT02';
+  const cs = new CentralSystem({
+    port: PORT,
+    authorize: () => true,
+    allocateTransactionId: () => 1,
+    logger: () => {},
+  });
+  await cs.start();
+
+  const sim = new SimCharger({ url: `ws://localhost:${PORT}/${IDENTITY}`, identity: IDENTITY });
+  let disconnects = 0;
+  cs.on('disconnect', () => {
+    disconnects += 1;
+  });
+
+  try {
+    await sim.connect();
+    await sleep(80);
+    const cp = cs.getChargePoint(IDENTITY);
+    assert.ok(cp, 'charge point registered');
+    assert.equal(cp!.connected, true);
+
+    // Stop while the charger is still attached - the case where the ChargePoint
+    // is holding a live socket and an armed liveness timer.
+    await cs.stop();
+
+    assert.equal(cp!.connected, false, 'the charge point was detached, not left holding a dead socket');
+    assert.deepEqual(cs.listIdentities(), [], 'and the registry was emptied rather than handing back stale instances');
+    assert.equal(disconnects, 0,
+      'a deliberate shutdown must not report an outage - that would mark the device unavailable '
+      + 'and fire charger_offline on every app stop');
+  } finally {
+    await sim.close();
+    await sleep(30);
+    await cs.stop(); // already stopped - must be a no-op
+  }
+});

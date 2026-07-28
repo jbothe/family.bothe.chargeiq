@@ -116,8 +116,21 @@ export class CentralSystem extends EventEmitter {
     return [...this.points.keys()];
   }
 
+  /**
+   * Closing the server was not enough on its own: each ChargePoint holds a
+   * liveness timer and a reference to its socket, and neither is reached by
+   * closing the listener. They were left armed against a server that no longer
+   * exists, and the registry kept handing the same stale instances back.
+   *
+   * detach() rather than a disconnect: this is a deliberate shutdown, and the
+   * controller is being torn down alongside it, so emitting 'disconnect' here
+   * would report an outage - marking the device unavailable and firing the
+   * charger_offline Flow trigger - every time the app stops.
+   */
   async stop(): Promise<void> {
     if (!this.server) return;
+    for (const cp of this.points.values()) cp.detach();
+    this.points.clear();
     try {
       await this.server.close({ code: 1001 });
     } catch (err) {

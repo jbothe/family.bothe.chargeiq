@@ -128,6 +128,37 @@ test('FirmwareStatusNotification / DiagnosticsStatusNotification emit the report
   assert.deepEqual(diagnostics, ['Unknown']);
 });
 
+test('attaching a new client terminates the one it supersedes, without reporting a disconnect', () => {
+  const cp = makeCp();
+  const first = new FakeRpcClient();
+  cp.attach(first);
+
+  let disconnected = 0;
+  cp.on('disconnect', () => {
+    disconnected += 1;
+  });
+
+  const second = new FakeRpcClient();
+  cp.attach(second);
+
+  assert.deepEqual(first.closeOpts, [{ code: 1001, reason: 'Superseded by a new connection', force: true }],
+    'the old socket is terminated rather than left open');
+  assert.deepEqual(second.closeOpts, [], 'the new one is untouched');
+  assert.equal(cp.connected, true);
+  assert.equal(disconnected, 0, 'swapping the underlying client is not an outage');
+
+  // The superseded client's own close eventually arrives (or never does); either
+  // way it must not tear down the link that replaced it.
+  first.closeListeners.forEach((fn) => fn());
+  assert.equal(cp.connected, true, 'a late close from the old socket is ignored');
+  assert.equal(disconnected, 0);
+
+  // ...whereas the live client's close still reports normally.
+  second.closeListeners.forEach((fn) => fn());
+  assert.equal(cp.connected, false);
+  assert.equal(disconnected, 1);
+});
+
 test('detach() drops the client silently, without emitting disconnect', () => {
   const cp = makeCp();
   const client = new FakeRpcClient();

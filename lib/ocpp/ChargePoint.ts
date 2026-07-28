@@ -194,9 +194,17 @@ export class ChargePoint extends EventEmitter {
   // ---------------------------------------------------------------------------
 
   attach(client: RpcClient): void {
+    // A reconnect can arrive while the old socket is still open on our side -
+    // exactly the half-open case the watchdog exists for, just noticed by the
+    // charger first. Swapping without closing it leaks the socket, so terminate
+    // it. Safe to do after the reassignment below: its close listener guards on
+    // `this.client === client`, which no longer holds, so it can neither fire a
+    // spurious 'disconnect' nor clear the new link's liveness timer.
+    const superseded = this.client;
     this.client = client;
     this.connectedAt = Date.now();
     this.disconnectedAt = null;
+    if (superseded && superseded !== client) ChargePoint.terminate(superseded, 'Superseded by a new connection');
     // A brand-new connection counts as contact in its own right: the watchdog
     // must start ticking from now, not from whenever the previous link last
     // spoke (which for a reconnect after a long outage is hours ago).
@@ -346,10 +354,18 @@ export class ChargePoint extends EventEmitter {
     this.clearLiveness();
     this.emit('stale', idleMs);
     this.emit('disconnect');
+    ChargePoint.terminate(client, 'No OCPP traffic');
+  }
+
+  /**
+   * Drop a socket outright, swallowing whatever it does about it. `force` skips
+   * the close handshake and stops it awaiting pending calls first - on a link
+   * that is already dead those never settle, so a polite close can hang forever.
+   * Never throws or rejects: every caller has already moved on from this client.
+   */
+  private static terminate(client: RpcClient, reason: string): void {
     try {
-      // force: terminate rather than negotiate - a polite close would first
-      // await pending calls settling, which on a dead link never happens.
-      const closing = client.close({ code: 1001, reason: 'No OCPP traffic', force: true });
+      const closing = client.close({ code: 1001, reason, force: true });
       if (closing && typeof (closing as Promise<void>).catch === 'function') {
         (closing as Promise<void>).catch(() => { /* already gone */ });
       }
