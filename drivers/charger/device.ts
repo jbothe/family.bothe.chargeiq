@@ -22,6 +22,14 @@ const CAPABILITIES = [
 // Capabilities from earlier versions to strip from already-paired devices.
 const REMOVED_CAPABILITIES = ['charger_status'];
 
+/**
+ * Lower bound declared by the charge_current_limit capability itself
+ * (.homeycompose/capabilities/charge_current_limit.json). The minAmps *setting*
+ * allows values below this, so a seed value taken from it has to be floored
+ * here or Homey rejects the write outright.
+ */
+const CHARGE_CURRENT_LIMIT_MIN_A = 6;
+
 module.exports = class ChargerDevice extends Homey.Device {
 
   private controller!: ChargeController;
@@ -197,8 +205,14 @@ module.exports = class ChargerDevice extends Homey.Device {
     for (const cap of CAPABILITIES) {
       if (!this.hasCapability(cap)) await this.addCapability(cap).catch(this.error);
     }
+    // Seed the slider from the configured minimum rather than a hardcoded 6, so
+    // a freshly paired device doesn't briefly advertise a limit its own settings
+    // rule out. Only ever the initial value - every later write comes from the
+    // controller.
     if (this.getCapabilityValue('charge_current_limit') === null) {
-      await this.setCapabilityValue('charge_current_limit', 6).catch(this.error);
+      const minAmps = this.getSetting('minAmps') as number | undefined;
+      const seed = Math.max(CHARGE_CURRENT_LIMIT_MIN_A, minAmps ?? CHARGE_CURRENT_LIMIT_MIN_A);
+      await this.setCapabilityValue('charge_current_limit', seed).catch(this.error);
     }
   }
 
