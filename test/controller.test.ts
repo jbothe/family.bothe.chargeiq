@@ -4,10 +4,11 @@ import test from 'node:test';
 import assert from 'node:assert';
 import { EventEmitter } from 'events';
 import {
-  ChargeController, ControllerHost, ChargingTokens, fmtDuration,
+  ChargeController, ControllerHost, ChargingTokens, fmtDuration, toChargingState,
 } from '../lib/control/ChargeController';
 import { CentralSystem } from '../lib/ocpp/CentralSystem';
 import { ChargePoint, RpcClient } from '../lib/ocpp/ChargePoint';
+import { OcppStatus } from '../lib/ocpp/types';
 import { ScheduleWindow } from '../lib/control/Scheduler';
 
 function at(day: number, hh: number, mm: number): Date {
@@ -2705,6 +2706,24 @@ function makeConnController(extraStore: Record<string, unknown> = {}): ConnHarne
     },
   };
 }
+
+test('toChargingState maps every OCPP status onto Homey\'s evcharger_charging_state enum', () => {
+  // Only Charging counts as actively charging.
+  assert.equal(toChargingState('Charging'), 'plugged_in_charging');
+  // Everything that means "a cable is in, but no current is flowing" collapses
+  // to plugged_in - including Faulted and Reserved, which are not idle states.
+  for (const s of ['Preparing', 'SuspendedEV', 'SuspendedEVSE', 'Finishing', 'Reserved', 'Faulted'] as const) {
+    assert.equal(toChargingState(s), 'plugged_in', s);
+  }
+  // Available is genuinely nothing plugged in; Unavailable is the charger taken
+  // out of service, which is reported through the offline/warning path instead,
+  // so as a *charging* state it is likewise "no cable".
+  assert.equal(toChargingState('Available'), 'plugged_out');
+  assert.equal(toChargingState('Unavailable'), 'plugged_out');
+  // An unrecognised status must fall through to plugged_out rather than
+  // producing a value Homey's enum does not accept.
+  assert.equal(toChargingState('SomethingNew' as OcppStatus), 'plugged_out');
+});
 
 test('fmtDuration renders a compact age across every unit boundary', () => {
   assert.equal(fmtDuration(0), '0s');
