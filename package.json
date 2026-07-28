@@ -20,5 +20,8 @@
   "dependencies": {
     "homey-api": "^3.17.3",
     "ocpp-rpc": "^2.2.1"
+  },
+  "overrides": {
+    "fast-uri": "^3.1.4"
   }
 }
