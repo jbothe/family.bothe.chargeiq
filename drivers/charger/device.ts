@@ -6,6 +6,7 @@ import { ChargePoint } from '../../lib/ocpp/ChargePoint';
 import { ChargeController, ChargeMode, ControllerHost } from '../../lib/control/ChargeController';
 import { ScheduleWindow } from '../../lib/control/Scheduler';
 import { SolarFeed, SolarSample } from '../../lib/solar/SolarFeed';
+import { currentLimitRangeUpdate } from '../../lib/capabilities';
 
 interface ChargeIQApp extends Homey.App {
   getCentralSystem(): CentralSystem;
@@ -22,13 +23,10 @@ const CAPABILITIES = [
 // Capabilities from earlier versions to strip from already-paired devices.
 const REMOVED_CAPABILITIES = ['charger_status'];
 
-/**
- * Lower bound declared by the charge_current_limit capability itself
- * (.homeycompose/capabilities/charge_current_limit.json). The minAmps *setting*
- * allows values below this, so a seed value taken from it has to be floored
- * here or Homey rejects the write outright.
- */
-const CHARGE_CURRENT_LIMIT_MIN_A = 6;
+// Fallbacks matching the minAmps/maxAmps defaults in driver.settings.compose.json,
+// for the window before a device has settings of its own.
+const DEFAULT_MIN_AMPS = 6;
+const DEFAULT_MAX_AMPS = 32;
 
 module.exports = class ChargerDevice extends Homey.Device {
 
@@ -66,6 +64,8 @@ module.exports = class ChargerDevice extends Homey.Device {
 
   async onInit() {
     await this.ensureCapabilities();
+    await this.syncCurrentLimitRange();
+    await this.seedCurrentLimit();
 
     this.startedTrigger = this.homey.flow.getDeviceTriggerCard('charging_started');
     this.pausedTrigger = this.homey.flow.getDeviceTriggerCard('charging_paused');
@@ -112,6 +112,10 @@ module.exports = class ChargerDevice extends Homey.Device {
     this.pendingSettings = newSettings;
     try {
       this.controller?.refreshConfig();
+      // Inside the pendingSettings window on purpose: this reads minAmps/maxAmps
+      // and would otherwise see the previous generation, exactly as
+      // refreshConfig() would.
+      await this.syncCurrentLimitRange();
     } finally {
       this.pendingSettings = null;
     }
@@ -205,15 +209,53 @@ module.exports = class ChargerDevice extends Homey.Device {
     for (const cap of CAPABILITIES) {
       if (!this.hasCapability(cap)) await this.addCapability(cap).catch(this.error);
     }
-    // Seed the slider from the configured minimum rather than a hardcoded 6, so
-    // a freshly paired device doesn't briefly advertise a limit its own settings
-    // rule out. Only ever the initial value - every later write comes from the
-    // controller.
-    if (this.getCapabilityValue('charge_current_limit') === null) {
-      const minAmps = this.getSetting('minAmps') as number | undefined;
-      const seed = Math.max(CHARGE_CURRENT_LIMIT_MIN_A, minAmps ?? CHARGE_CURRENT_LIMIT_MIN_A);
-      await this.setCapabilityValue('charge_current_limit', seed).catch(this.error);
+  }
+
+  /**
+   * Reads a setting, preferring the not-yet-persisted values from onSettings.
+   * Homey's onSettings hook fires *before* the new values are stored, so a plain
+   * getSetting() during that call returns the generation about to be replaced -
+   * see pendingSettings.
+   */
+  private setting<T>(key: string): T | undefined {
+    if (this.pendingSettings && key in this.pendingSettings) {
+      return this.pendingSettings[key] as T;
     }
+    return this.getSetting(key) as T;
+  }
+
+  /**
+   * Point the slider's bounds at this device's own configured amp limits. The
+   * capability manifest can only declare one range for every install, but the
+   * limits that actually govern charging are per-device settings - see
+   * currentLimitRange(). Only written when it actually changes, since Homey
+   * documents setCapabilityOptions as expensive and this runs on every save.
+   */
+  private async syncCurrentLimitRange() {
+    if (!this.hasCapability('charge_current_limit')) return;
+    const minAmps = this.setting<number>('minAmps') ?? DEFAULT_MIN_AMPS;
+    const maxAmps = this.setting<number>('maxAmps') ?? DEFAULT_MAX_AMPS;
+    const current = this.getCapabilityOptions('charge_current_limit') as
+      { min?: number; max?: number } | null | undefined;
+    const update = currentLimitRangeUpdate(current, minAmps, maxAmps);
+    if (!update) return;
+    this.log(`[capability] charge_current_limit range -> ${update.min}-${update.max}A`);
+    await this.setCapabilityOptions('charge_current_limit', {
+      ...(current ?? {}), min: update.min, max: update.max,
+    }).catch(this.error);
+  }
+
+  /**
+   * Initial slider value for a freshly paired device, from the configured
+   * minimum. Runs after syncCurrentLimitRange() so the bounds already admit it.
+   * Only ever the initial value - every later write comes from the controller.
+   */
+  private async seedCurrentLimit() {
+    if (!this.hasCapability('charge_current_limit')) return;
+    if (this.getCapabilityValue('charge_current_limit') !== null) return;
+    await this.setCapabilityValue(
+      'charge_current_limit', this.setting<number>('minAmps') ?? DEFAULT_MIN_AMPS,
+    ).catch(this.error);
   }
 
   /** Adapter implementing the controller's minimal host surface. */
@@ -223,9 +265,7 @@ module.exports = class ChargerDevice extends Homey.Device {
       setCapability: (cap, value) => {
         if (this.hasCapability(cap)) this.setCapabilityValue(cap, value).catch(this.error);
       },
-      getSetting: <T>(key: string) => (
-        this.pendingSettings && key in this.pendingSettings ? this.pendingSettings[key] : this.getSetting(key)
-      ) as T,
+      getSetting: <T>(key: string) => this.setting<T>(key) as T,
       getStore: <T>(key: string) => this.getStoreValue(key) as T,
       setStore: (key, value) => this.setStoreValue(key, value),
       setAvailable: () => {

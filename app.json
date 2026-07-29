@@ -419,7 +419,7 @@
               "en": "Current (A)"
             },
             "min": 6,
-            "max": 32,
+            "max": 80,
             "step": 1,
             "value": 16,
             "label": " A",
