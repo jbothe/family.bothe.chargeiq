@@ -106,6 +106,14 @@ export interface Readings {
   energyKwh?: number;
   /** Timestamp of the batch. */
   timestamp?: string;
+  /**
+   * Measurands present in the batch that this app maps onto no reading, as
+   * `measurand` -> the last raw `value unit @phase` seen for it. Diagnostic
+   * only - nothing acts on it; ChargeController logs each name once so what a
+   * charge point actually sends (SoC? Current.Offered? a vendor measurand?) is
+   * discoverable from the log instead of being silently dropped here.
+   */
+  unhandled?: Record<string, string>;
 }
 
 /** Options for building a SetChargingProfile payload. */
@@ -126,6 +134,14 @@ export interface ChargingProfileOptions {
 
 const NUMERIC = /^-?\d+(\.\d+)?$/;
 
+/** The measurands parseMeterValues maps onto Readings; anything else is recorded as unhandled. */
+const HANDLED_MEASURANDS = new Set([
+  'Power.Active.Import',
+  'Current.Import',
+  'Voltage',
+  'Energy.Active.Import.Register',
+]);
+
 function toNumber(v: string): number | undefined {
   return NUMERIC.test(v) ? Number(v) : undefined;
 }
@@ -143,6 +159,14 @@ export function parseMeterValues(meterValue: MeterValue[]): Readings {
     out.timestamp = mv.timestamp ?? out.timestamp;
     for (const sv of mv.sampledValue ?? []) {
       const measurand = sv.measurand ?? 'Energy.Active.Import.Register';
+      if (!HANDLED_MEASURANDS.has(measurand)) {
+        // Recorded before the numeric check on purpose: a non-numeric unknown
+        // (a status string, an enum) is exactly as interesting to discover.
+        out.unhandled ??= {};
+        out.unhandled[measurand] = [sv.value, sv.unit, sv.phase && `@${sv.phase}`]
+          .filter(Boolean).join(' ');
+        continue;
+      }
       const num = toNumber(sv.value);
       if (num === undefined) continue;
       const { unit } = sv;
@@ -164,8 +188,9 @@ export function parseMeterValues(meterValue: MeterValue[]): Readings {
           out.energyKwh = unit === 'Wh' || unit === undefined ? num / 1000 : num;
           break;
         }
-        default:
-          break;
+        // HANDLED_MEASURANDS above is the gate, so anything reaching here is
+        // one of the four cases.
+        // no default
       }
     }
   }

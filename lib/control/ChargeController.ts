@@ -298,6 +298,14 @@ export class ChargeController {
   /** Last power figure written to the log, so [charger] power= only reports real movement. */
   private loggedPowerW = 0;
 
+  /**
+   * Measurand names already reported by onMeterValues, so each unhandled one is
+   * logged once rather than every sample interval. Deliberately not cleared on
+   * rebind/reconnect - which measurands a charge point sends doesn't change
+   * across a reconnect, and re-reporting them on every OCPP blip is noise.
+   */
+  private loggedMeasurands = new Set<string>();
+
   /** Fingerprint of the last [solar] line logged - see onSolarSample(). */
   private loggedSolar = '';
 
@@ -938,6 +946,21 @@ export class ChargeController {
       this.host.log(`[charger] power=${Math.round(r.power)}W `
         + `current=${r.current ?? '?'}A voltage=${r.voltage ?? '?'}V`);
     }
+
+    // Discovery aid: OCPP 1.6 defines measurands this app maps onto nothing
+    // (SoC, Current.Offered, Temperature, vendor extensions), and parseMeterValues
+    // drops them silently. Report each name the first time it shows up - once
+    // per app run, since it would otherwise repeat for the charger's lifetime.
+    this.logUnhandledMeasurands(r.unhandled);
+  }
+
+  private logUnhandledMeasurands(unhandled: Readings['unhandled']): void {
+    if (!unhandled) return;
+    const fresh = Object.entries(unhandled).filter(([name]) => !this.loggedMeasurands.has(name));
+    if (fresh.length === 0) return;
+    for (const [name] of fresh) this.loggedMeasurands.add(name);
+    const listed = fresh.map(([name, value]) => `${name}=${value}`).join(', ');
+    this.host.log(`[charger] measurand${fresh.length > 1 ? 's' : ''} not used by this app: ${listed}`);
   }
 
   private onStartTransaction(id: number, req: StartTransactionReq): void {

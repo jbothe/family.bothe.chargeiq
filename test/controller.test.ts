@@ -2511,6 +2511,34 @@ test('session energy and duration capabilities update from a live transaction', 
   assert.equal(caps.session_duration, 5);
 });
 
+test('an unhandled measurand is logged once, and only the newly-seen ones on a later report', () => {
+  const { cp, logs } = makeBoundController();
+  cp.emit('meterValues', { power: 7200, unhandled: { SoC: '42 Percent' } });
+  const first = logs.filter((l) => l.includes('not used by this app'));
+  assert.equal(first.length, 1);
+  assert.match(first[0], /measurand not used by this app: SoC=42 Percent/);
+
+  // Same measurand again (every 10s in reality) must not repeat.
+  cp.emit('meterValues', { power: 7200, unhandled: { SoC: '43 Percent' } });
+  assert.equal(logs.filter((l) => l.includes('not used by this app')).length, 1);
+
+  // A name not seen before still gets reported, on its own.
+  cp.emit('meterValues', {
+    power: 7200,
+    unhandled: { SoC: '44 Percent', 'Current.Offered': '16 A', Temperature: '21 Celsius' },
+  });
+  const lines = logs.filter((l) => l.includes('not used by this app'));
+  assert.equal(lines.length, 2);
+  assert.match(lines[1], /measurands not used by this app: Current\.Offered=16 A, Temperature=21 Celsius/);
+  assert.equal(lines[1].includes('SoC'), false, 'already-reported name is not repeated');
+});
+
+test('meter values with no unhandled measurands log nothing extra', () => {
+  const { cp, logs } = makeBoundController();
+  cp.emit('meterValues', { power: 7200 });
+  assert.equal(logs.some((l) => l.includes('not used by this app')), false);
+});
+
 test('session meters are not written without a live transaction', () => {
   const { cp, caps } = makeBoundController(); // no transactionId in store
   cp.emit('status', { connectorId: 1, errorCode: 'NoError', status: 'Charging' });

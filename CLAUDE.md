@@ -344,6 +344,16 @@ next move.
   debugging` marker while the OCPP/solar paths were being confirmed on hardware; that's done, and
   the throttles are back. `SolarFeed`'s per-role `[solar] raw … update` lines existed only for that
   same exercise and are gone entirely - the merged `[solar]` line covers it.
+- **`parseMeterValues()` reports what it drops.** Anything outside the four measurands it maps
+  (`Power.Active.Import`/`Current.Import`/`Voltage`/`Energy.Active.Import.Register`) lands in
+  `Readings.unhandled` as `measurand -> "value unit @phase"` - captured *before* the numeric check,
+  so a non-numeric unknown counts too - and `ChargeController.logUnhandledMeasurands()` logs each
+  name **once per app run** (`loggedMeasurands`, not cleared on rebind - a reconnect doesn't change
+  what the charger sends). Purely diagnostic; nothing reads it. It exists because OCPP 1.6 carries
+  almost nothing about the *vehicle* - `SoC` (the one real EV datum, and only over ISO 15118, not
+  plain PWM), `Current.Offered`, `Temperature`, or a vendor measurand would otherwise be discarded
+  in silence, so this makes what a real Wallbox actually sends discoverable from `homey app run`
+  rather than assumed.
 - Settings pages must include `<script src="/homey.js" data-origin="settings">`; widgets get their
   runtime injected automatically (no include, and keep widget JS **inline/single-file**).
 
