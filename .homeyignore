@@ -1,2 +1,9 @@
 .claude/
 CLAUDE.md
+# Dev-only: unit tests, the ocpp-rpc simulator, and the widget/settings preview
+# harnesses (test/homey-css alone is ~1.7MB of Homey's own Style Library). None
+# of it is referenced by app.json or widget.compose.json, but without this it was
+# still being copied into .homeybuild and shipped. npm test is unaffected - it
+# runs tsc directly against the source tree, not the Homey CLI's build.
+test/
+docs/

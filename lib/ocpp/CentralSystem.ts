@@ -2,6 +2,11 @@
 
 import { EventEmitter } from 'events';
 import { AuthorizePolicy, ChargePoint, RpcClient } from './ChargePoint';
+import { OCPP_SUBPROTOCOL, installLeanValidators } from './leanValidators';
+
+// Must precede the ocpp-rpc require below - it drops ~20MB of RSS spent on
+// OCPP 2.0.1/2.1 schemas this app never speaks. See leanValidators.ts.
+installLeanValidators();
 // ocpp-rpc is a CommonJS module.
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { RPCServer } = require('ocpp-rpc');
@@ -66,7 +71,9 @@ export class CentralSystem extends EventEmitter {
     if (this.server) return;
 
     const server = new RPCServer({
-      protocols: ['ocpp1.6'],
+      // Must be the same subprotocol installLeanValidators() kept a validator
+      // for - strictMode throws at construction on any protocol without one.
+      protocols: [OCPP_SUBPROTOCOL],
       strictMode: true,
     });
 

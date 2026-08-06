@@ -33,6 +33,22 @@ The **App** (`app.ts`) owns the long-lived services and exposes them to the devi
   survives reconnects (swap the underlying client via `attach`). `types.ts` has message shapes
   and the `parseMeterValues` → W/A/V/kWh helper. `ChargePoint` also owns the **liveness
   watchdog** — see the OCPP connectivity section below.
+  `leanValidators.ts` **must be called before the `ocpp-rpc` require** in `CentralSystem.ts`
+  (it is, on the line above it) and owns `OCPP_SUBPROTOCOL`, the one protocol the `RPCServer`
+  advertises. `ocpp-rpc`'s `lib/standard-validators` eagerly builds Ajv validators for
+  ocpp1.6 **and 2.0.1 and 2.1** at require time, from the top of its own `server.js`, with no
+  option to narrow it (`strictModeValidators` only *adds*) — ~1.5MB of schema JSON parsed into
+  retained object graphs for protocols this app can never negotiate. Seeding `require.cache`
+  with a 1.6-only list is the only lever, since the offending require runs before any option
+  could be passed. Measured on the compiled app (3 runs, ±0.5MB): **89.6 → 74.5MB RSS,
+  13.93 → 11.87MB heap** — the largest single line item in this app's footprint, and Homey
+  reports RSS. Full ocpp1.6 schema validation is untouched. Going further is not possible:
+  with an empty list `RPCServer` throws `Missing strictMode validator for subprotocol
+  'ocpp1.6'` at construction, so dropping Ajv would mean hand-rolling OCPP validation. It
+  reaches into `ocpp-rpc`'s internal file layout, so it fails soft (ocpp-rpc just loads
+  normally) and `test/lean-validators.test.ts` asserts it actually took effect — that test
+  is what turns an ocpp-rpc upgrade moving those paths into a visible failure rather than a
+  silently surrendered 15MB. **Don't "simplify" the ordering, the constant, or that test.**
 - `lib/solar/SolarFeed.ts` — reads the user's SolarEdge app (`bothe.family.solaredge`) over the
   HomeyAPI: `measure_power` on inverter/meter/battery + `measure_battery` SoC. Emits a merged
   `SolarSample`; **house load is derived** (`pv + gridSigned − batterySigned`). Best-effort —
@@ -401,6 +417,35 @@ handlers with no branching) and one third-party-library catch branch (`CentralSy
 `server.close()`) are knowingly left uncovered - not worth a dedicated test or a DI seam added solely
 to reach one log line.
 
+### Memory: audited, and the result is "load-time, not leaks"
+Done 2026-08-06 against the compiled output, so it doesn't need redoing from scratch. Three soak
+runs, all flat:
+- **60 OCPP connect/disconnect cycles** (real `CentralSystem` + `SimCharger` over a live socket):
+  heap 10.40 → 11.22MB, `ChargePoint` listeners pinned at `stale:1 disconnect:1`, one retained
+  `ChargePoint`. `attach()`'s client swap and `CentralSystem`'s `isNew` guard both hold.
+- **200 `ChargeController` `init()`/`destroy()` cycles** against a live `ChargePoint`: listener
+  counts never moved off baseline — `csTeardowns`/`cpTeardowns` do their job.
+- **200,000 solar samples → ticks** (~23 simulated days): heapUsed **10.01 → 10.30MB**. The hot
+  path retains nothing.
+
+So the footprint is essentially all `require`-time: `socket.io-client` ~18MB RSS (the price of
+`HomeyAPI.createAppAPI()`, which `SolarFeed` needs — there is no other cross-app device access in
+SDK v3), `ws` ~10MB, Ajv + the ocpp1.6 schema ~11MB. **Bundling/tree-shaking is the wrong lever
+and was rejected on measurement, not taste**: Homey ships `node_modules` and runs plain CommonJS,
+and the cost is *data* allocated at load (parsed schemas, Ajv structures, socket.io's prototype
+graph), not dead code a bundler could drop — tree-shaking a 1MB JSON schema that is `require`d,
+not imported, does nothing. The one genuinely removable item was the unused OCPP 2.x validators;
+see `leanValidators.ts` in Architecture.
+
+`SolarFeed.discover()` passes `$cache: false, $updateCache: false` to `getDevices()`. homey-api's
+`ManagerDevices` otherwise caches a `getAll` by pinning a full `Device` for **every** device on the
+Homey and marking the cache complete, retained for the app's lifetime, for the sake of the three
+SolarEdge devices actually wanted. It happens not to fire today — caching is gated on the *manager*
+namespace being connected to socket.io, and `makeCapabilityInstance` only ever connects each
+`Device`'s own namespace — so that flag pins current behaviour rather than fixing a live leak.
+`$cache: false` is load-bearing in its own right though: a rescan served the cached map wouldn't
+re-look at all, which is the entire point of `checkAndRecover()`.
+
 ## Not yet verified on hardware
 The **liveness watchdog** firing against a genuinely half-open link (the failure it exists for) —
 `ChargePoint`'s unit tests drive it with a short `livenessTimeoutMs` and a fake client, which proves
@@ -446,4 +491,10 @@ disagreement, not confirm which way a real widget WKWebView actually behaves.
 - Match the surrounding style. `'use strict'` + `import` + `module.exports = class …` for
   App/Driver/Device (Homey template); plain `export`/classes in `lib/`.
 - Commit per logical change; see Commands above for the pre-commit checklist (build/test/lint/validate).
+- `.homeyignore` excludes `test/` and `docs/`. The dev-only preview harnesses were being shipped
+  despite nothing in `app.json`/`widget.compose.json` referencing them (`test/homey-css` alone is
+  ~1.7MB of Homey's own Style Library). `npm test` is unaffected — it runs `tsc` against the source
+  tree, not the Homey CLI's build, so `.homeybuild/test/*.test.js` is still produced. That is also
+  why ~260KB of *compiled* test JS still lands in `.homeybuild`: `tsconfig.json` has no `exclude`,
+  and adding one would break `npm test`. Not worth a second tsconfig for 260KB of disk.
 - User's global tooling prefs apply (`rg`/`fd`/`jq` etc.).

@@ -76,9 +76,17 @@ export interface HomeyApiDevice {
   makeCapabilityInstance(capabilityId: string, listener: (value: number) => void): CapabilityInstance;
 }
 
+/** Options homey-api's generated manager methods accept alongside their own args. */
+export interface GetDevicesOptions {
+  /** false = always fetch, never answer from ManagerDevices' cache. */
+  $cache?: boolean;
+  /** false = don't populate that cache with the result either. */
+  $updateCache?: boolean;
+}
+
 /** Minimal shape of the homey-api client (HomeyAPI.createAppAPI()'s return value) we rely on. */
 export interface HomeyApiClient {
-  devices: { getDevices(): Promise<Record<string, HomeyApiDevice>> };
+  devices: { getDevices(opts?: GetDevicesOptions): Promise<Record<string, HomeyApiDevice>> };
 }
 
 export interface SolarSample {
@@ -228,7 +236,17 @@ export class SolarFeed extends EventEmitter {
    * known state alone rather than blanking it.
    */
   private async discover(): Promise<void> {
-    const devices = await this.api!.devices.getDevices();
+    // Uncached on purpose, on both counts. $updateCache: homey-api's
+    // ManagerDevices caches a getAll by pinning a full Device object for every
+    // device on the Homey and marking the cache complete, retained for the
+    // app's lifetime - for the sake of the three SolarEdge devices actually
+    // wanted here. (It happens not to fire today: caching is gated on the
+    // *manager* namespace being connected to socket.io, and makeCapabilityInstance
+    // only ever connects each Device's own namespace - so this pins the current
+    // behaviour rather than fixing a live leak.) $cache: a rescan that got
+    // served that cached map wouldn't re-look at all, which is the entire point
+    // of checkAndRecover().
+    const devices = await this.api!.devices.getDevices({ $cache: false, $updateCache: false });
     this.present = { inverter: false, meter: false, battery: false };
     for (const device of Object.values(devices)) {
       const role = this.roleOf(device);
