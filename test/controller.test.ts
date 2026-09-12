@@ -3245,3 +3245,243 @@ test('the decision line says why a boost-enabled window fell back to its floor',
     'a feed that has gone quiet is named as the reason, not left as a bare "unavailable"');
   c.destroy();
 });
+
+// ---------------------------------------------------------------------------
+// A target resolved before the charger connects still has to reach it
+// ---------------------------------------------------------------------------
+
+test('a target resolved while the charger is disconnected is written once it connects', async () => {
+  const calls: Array<{ method: string; params: unknown }> = [];
+  const fakeClient: RpcClient = {
+    identity: 'X',
+    handle: () => {},
+    call: async (method: string, params: unknown) => {
+      calls.push({ method, params });
+      return { status: 'Accepted' };
+    },
+    close: async () => {},
+    on: () => {},
+  };
+  const cp = new ChargePoint({ identity: 'X', authorize: () => true, nextTransactionId: () => 1 });
+  cp.attach(fakeClient);
+
+  // Always-on window (end <= start wraps a full 24h) with boost enabled, and a
+  // transaction id restored from a previous process - the app-restart case.
+  const store: Record<string, unknown> = {
+    transactionId: 93,
+    schedule: [{
+      days: [0, 1, 2, 3, 4, 5, 6], start: '00:00', end: '00:00', currentA: 12, boostToCap: true,
+    }],
+  };
+  const settings: Record<string, unknown> = {
+    minAmps: 6,
+    maxAmps: 32,
+    phases: 1,
+    voltage: 230,
+    maxHouseholdA: 63,
+    householdPhases: 1,
+    sharedCircuitA: 32,
+    sharedCircuitBufferA: 2,
+    sharedCircuitIncludeSolar: true,
+    sharedCircuitIncludeBattery: true,
+  };
+  const logs: string[] = [];
+  const host: ControllerHost = {
+    identity: 'X',
+    setCapability: () => {},
+    getSetting: <T>(k: string) => settings[k] as T,
+    getStore: <T>(k: string) => store[k] as T,
+    setStore: async (k, v) => {
+      store[k] = v;
+    },
+    setAvailable: () => {},
+    setUnavailable: () => {},
+    setWarning: () => {},
+    log: (...a) => {
+      logs.push(a.join(' '));
+    },
+    error: () => {},
+  };
+  const cs = new FakeCentralSystem() as unknown as CentralSystem;
+  const c = new ChargeController(host, cs);
+  c.init(); // nothing connected yet; no solar sample yet -> the 12A floor
+
+  // The first solar sample beats the charger's reconnect (by ~11s on hardware),
+  // so the boosted target is resolved while nothing is connected.
+  c.onSolarSample({ gridSignedW: -4000, pvW: 4440, batteryW: 0 });
+  assert.equal(calls.length, 0, 'nothing is written while disconnected');
+  assert.ok(logs.some((l) => l.includes('-> 32A')), 'the boosted target was resolved before the charger connected');
+
+  cs.emit('connect', cp);
+  await new Promise((r) => setTimeout(r, 0));
+
+  const profiles = calls.filter((k) => k.method === 'SetChargingProfile');
+  assert.equal(profiles.length, 1, 'connecting is a write-eligibility edge, even with an unchanged target');
+  assert.ok(logs.some((l) => l.includes('[charger] setting profile: 32A')),
+    'the target the charger missed is the one it gets');
+  c.destroy();
+});
+
+// ---------------------------------------------------------------------------
+// Writes reconcile against what the charger accepted, not the last decision
+// ---------------------------------------------------------------------------
+
+/**
+ * A controller bound to a real ChargePoint through a CentralSystem the test
+ * drives, with every SetChargingProfile limit captured and a switch to make
+ * the charger reject them.
+ */
+function makeWriteRig(writeThrottleMs: number): {
+  c: ChargeController; cp: ChargePoint; cs: CentralSystem; writes: number[];
+  caps: Record<string, unknown>; setReject(v: boolean): void;
+} {
+  const writes: number[] = [];
+  let reject = false;
+  const fakeClient: RpcClient = {
+    identity: 'X',
+    handle: () => {},
+    call: async (method: string, params?: unknown) => {
+      if (method !== 'SetChargingProfile') return { status: 'Accepted' };
+      writes.push((params as { csChargingProfiles: { chargingSchedule: { chargingSchedulePeriod: [{ limit: number }] } } })
+        .csChargingProfiles.chargingSchedule.chargingSchedulePeriod[0].limit);
+      return { status: reject ? 'Rejected' : 'Accepted' };
+    },
+    close: async () => {},
+    on: () => {},
+  };
+  const cp = new ChargePoint({
+    identity: 'X', authorize: () => true, nextTransactionId: () => 1, livenessTimeoutMs: 0,
+  });
+  cp.attach(fakeClient);
+  const store: Record<string, unknown> = { schedule: [] };
+  const settings: Record<string, unknown> = {
+    minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdA: 63, householdPhases: 1, writeThrottleMs,
+  };
+  const caps: Record<string, unknown> = {};
+  const host: ControllerHost = {
+    identity: 'X',
+    setCapability: (k, v) => {
+      caps[k] = v;
+    },
+    getSetting: <T>(k: string) => settings[k] as T,
+    getStore: <T>(k: string) => store[k] as T,
+    setStore: async (k, v) => {
+      store[k] = v;
+    },
+    setAvailable: () => {},
+    setUnavailable: () => {},
+    setWarning: () => {},
+    log: () => {},
+    error: () => {},
+  };
+  const cs = new FakeCentralSystem() as unknown as CentralSystem;
+  const c = new ChargeController(host, cs);
+  c.init();
+  cs.emit('connect', cp);
+  cp.emit('status', { connectorId: 1, errorCode: 'NoError', status: 'Charging' });
+  return {
+    c,
+    cp,
+    cs,
+    writes,
+    caps,
+    setReject: (v) => {
+      reject = v;
+    },
+  };
+}
+
+const waitMs = (ms = 0) => new Promise((r) => setTimeout(r, ms));
+
+test('a write lost in a reconnect gap between ticks is re-sent when the charger comes back', async () => {
+  // A disconnect/reconnect between two ticks: the throttled write fires into
+  // the gap and is dropped, and the target never changes again to resend it.
+  const {
+    c, cs, cp, writes,
+  } = makeWriteRig(200);
+  await waitMs();
+  writes.length = 0;
+
+  await c.startManual(16); // throttled behind the status-driven write just made
+  assert.deepEqual(writes, [], 'deferred by the write throttle');
+
+  cs.emit('disconnect', cp); // no tick
+  await waitMs(250); // the deferred write fires into the gap, and is dropped
+  assert.deepEqual(writes, [], 'nothing can reach a disconnected charger');
+
+  cs.emit('connect', cp);
+  await waitMs();
+  assert.deepEqual(writes, [16], 'the reconnect re-establishes the limit the gap swallowed');
+  c.destroy();
+});
+
+test('a same-ChargePoint reconnect re-establishes the limit, even with an unchanged target', async () => {
+  const {
+    c, cs, cp, writes,
+  } = makeWriteRig(0);
+  await c.startManual(16);
+  await waitMs();
+  assert.equal(writes[writes.length - 1], 16);
+  writes.length = 0;
+
+  cs.emit('connect', cp); // client swapped under the same ChargePoint - the charger may have rebooted
+  await waitMs();
+  assert.deepEqual(writes, [16], 'what the charger was last told is not assumed to have survived');
+  c.destroy();
+});
+
+test('a rejected write is retried on the next tick instead of being abandoned', async () => {
+  const {
+    c, writes, caps, setReject,
+  } = makeWriteRig(0);
+  await waitMs();
+  setReject(true);
+  writes.length = 0;
+  await c.startManual(16);
+  await waitMs();
+  assert.deepEqual(writes, [16], 'attempted once, and rejected');
+  assert.equal(caps.charge_current_applied, 0, 'the applied limit stays at the last one the charger took');
+
+  setReject(false);
+  c.tick(new Date(), 'timer'); // previously: target unchanged, so nothing was ever sent again
+  await waitMs();
+  assert.deepEqual(writes, [16, 16]);
+  assert.equal(caps.charge_current_applied, 16, 'and once accepted, it is recorded as applied');
+  c.destroy();
+});
+
+test('a charger rejecting every limit is retried once per tick, not in a loop', { timeout: 3000 }, async () => {
+  // Retrying from the write's own completion at writeThrottleMs 0 was an endless
+  // loop. The timeout makes a recurrence fail rather than hang.
+  const {
+    c, writes, setReject,
+  } = makeWriteRig(0);
+  setReject(true);
+  await c.startManual(16);
+  await waitMs(20);
+  const before = writes.length;
+  assert.ok(before <= 3, `a handful of attempts, not a loop (saw ${before})`);
+
+  // Real ticks are seconds apart; yield between them so each finds the last
+  // attempt settled (back-to-back ticks correctly find it still in flight).
+  for (let i = 0; i < 3; i += 1) {
+    c.tick(new Date(), 'timer');
+    await waitMs(5); // eslint-disable-line no-await-in-loop
+  }
+  assert.equal(writes.length - before, 3, 'exactly one retry per tick');
+  c.destroy();
+});
+
+test('the applied limit is published on acceptance and cleared when the link drops', async () => {
+  const {
+    c, cs, cp, caps,
+  } = makeWriteRig(0);
+  await c.startManual(20);
+  await waitMs();
+  assert.equal(caps.charge_current_limit, 20, 'what the controller decided');
+  assert.equal(caps.charge_current_applied, 20, 'and what the charger accepted');
+
+  cs.emit('disconnect', cp);
+  assert.equal(caps.charge_current_applied, null, 'unknown once the link is gone - never the last figure as if current');
+  c.destroy();
+});

@@ -192,11 +192,41 @@ charger, and both now say so on the same line rather than reading like a success
 - `refreshWarning()` is the single owner of `setWarning`: a fault outranks the replug prompt, and
   neither can clobber the other. `onStatus()` previously wrote the banner directly on every status,
   which cleared anything set between reports.
-- Becoming write-eligible again (`regained`) is **urgent** — it bypasses `writeThrottleMs` like a
-  tightening cap does. The charger is running whatever profile predates the gap, and the target
-  usually hasn't changed across the transition (it kept moving while blocked), so the write is
-  triggered only by the eligibility edge; making it wait out the throttle would leave the charger
-  wrong for up to 15s right after the user physically intervened.
+- **Writes reconcile against what the charger *accepted*, not against the last decision.**
+  `appliedAmps` is the limit the charger last accepted on this link and session; `ensureCharging()`
+  writes whenever `writeEligible() && appliedAmps !== target`, every tick, until they match. This
+  replaced an edge-triggered design (write when `desiredAmps` *changed* or eligibility was
+  *regained*, sampled once per tick) that lost writes three ways, each leaving the charger on an old
+  limit while every decision line and the widget chip read the new one: a write fired into a
+  reconnect gap was silently dropped by `writeProfile()` and never re-issued; a charger that rejected
+  twice was abandoned; and a disconnect/reconnect that fit **between two ticks** (the Wallbox's
+  does - seconds, against ticks up to 15s apart, and the disconnect handler doesn't tick) never let
+  the controller see eligibility drop at all. Confirmed twice on real hardware: first as a boost
+  window resolving 32A across an app restart without one `SetChargingProfile`, then as the widget
+  reading a confident `32A` while the car drew ~22A.
+  - `forgetApplied()` resets it to unknown on anything that may have invalidated the charger's
+    state: **every** `bind()` (fresh or same-ChargePoint - the charger may have rebooted), the
+    disconnect edge, and every session change (start/stop, `Finishing`, idle reconciliation - a
+    `TxProfile` belongs to the transaction it was sent for). `init()` restores `transactionId` from
+    the store, which is why `writeEligible()` also requires a live link.
+  - The first write after a reset is **urgent** (`resyncPending`), like a tightening cap: the
+    charger is on whatever predates the gap. It's cleared on the *attempt*, not on acceptance, so a
+    charger that keeps rejecting falls back to the throttled cadence instead of being hammered.
+  - One write at a time, keyed by epoch (`inFlightEpoch` vs `appliedEpoch`): a newer request while
+    one is outstanding is queued (`rewriteUrgent` carries urgency across), **but a call from a
+    superseded epoch never blocks** - a call hanging on a dead socket may not settle until the RPC
+    times out, and the resync on the new link is exactly the write that matters. An acceptance from
+    a superseded epoch is also never recorded as applied.
+  - A **failed** write is never re-issued from its own completion. That was a promise loop with
+    nothing to pace it (at `writeThrottleMs` 0 it pegged the CPU and starved every timer - caught by
+    the test suite hanging). The next tick picks it up instead, so rejection is retried at most once
+    per tick/throttle window. `test/controller.test.ts` pins it with a `{ timeout }` so a recurrence
+    fails rather than hangs.
+  - `charge_current_applied` ("Applied Limit", Insights on) publishes `appliedAmps` (null when
+    unknown), next to `charge_current_limit` (decided) and `measure_current` (drawn) - graphing the
+    three is the no-laptop post-mortem for any "stuck below target" report. The `[decision:…]` line
+    ends `| charger still at 22A` / `| charger limit unknown` while they differ, and the widget chip
+    shows `22A→32A` (see Widget).
 
 ### `transactionId` has two sources, and the charge point's wins
 `ChargePoint`'s `StartTransaction` handler allocates the id and answers the charger **whether or not
@@ -278,11 +308,9 @@ next move.
   `transactionId` null forever. `ensureCharging()` therefore writes via `TxDefaultProfile` (no
   `transactionId`) whenever the charger's own reported status is plugged-in (not just `TxProfile` when
   a transaction id happens to be known), and only attempts `RemoteStartTransaction` while `Preparing`
-  (genuinely awaiting one) - not once already `Charging`/`SuspendedEV`/`SuspendedEVSE`. It also writes
-  on newly *becoming* eligible (transaction id gained, or charger newly reporting plugged) even if the
-  target amps value itself didn't change across that transition - a write is otherwise only triggered
-  by `desiredAmps` changing, which would silently skip the charger if the decision happened not to
-  move at that exact moment. `isCharging()` (`transactionId != null`) is **not** a reliable "is power
+  (genuinely awaiting one) - not once already `Charging`/`SuspendedEV`/`SuspendedEVSE`. Whether a
+  write goes out at all is reconciled against the limit the charger last accepted - see "Writes
+  reconcile" above. `isCharging()` (`transactionId != null`) is **not** a reliable "is power
   actually flowing" signal for this reason - `ChargeController.isDeliveringPower()` (`lastStatusValue
   === 'Charging'`) is used instead everywhere `chargerPowerW`/`lastPowerW` needs netting out (solar
   surplus calc, household cap) - otherwise the charger's own draw reads as 0 forever in exactly the
@@ -431,6 +459,13 @@ painting a three-day-old reading as the live state of the house. Gated strictly 
 older state payload without the field never reads as stale. **EV power and its own capacity strip are
 deliberately untouched** - they come from the charger's `MeterValues`, not the feed. `test/widget-preview.html`
 has a `Solar feed stale 3d` preset next to `Charger offline 12h` for previewing it.
+
+**The charging chip's amps are what the charger accepted, not what was decided** (`PF.chipAmps()`).
+`limitA` (`charge_current_limit`) is only the controller's decision; `appliedA`
+(`charge_current_applied`) is what the charger took. When they differ the chip reads `22A→32A`, and an
+unknown `appliedA` marks the target pending - both in the light text colour, while the pill stays green
+because it *is* charging. A few seconds of this after any change is the write throttle; anything
+lasting is the fault. A payload with no `appliedA` field at all renders as before.
 
 **Immediate first paint on load pulls once via `widgets/power-flow/api.js`'s `getState`
 endpoint** (declared in `widget.compose.json`'s own `api` block, not the app-level `api.ts`),

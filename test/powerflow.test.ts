@@ -511,3 +511,26 @@ test('a healthy feed is rendered exactly as before the staleness gate existed', 
   assert.equal(PF.batterySoc(live), 64);
   assert.notEqual(PF.meter('solar', live), null);
 });
+
+// ---------------------------------------------------------------------------
+// The charging chip shows what the charger accepted, not just the decision
+// ---------------------------------------------------------------------------
+
+test('chipAmps: a limit the charger has not accepted reads as pending, never as the charging figure', () => {
+  const charging = (extra: Record<string, unknown>) => ({
+    charger: {
+      available: true, online: true, chargingState: 'plugged_in_charging', limitA: 32, ...extra,
+    },
+  });
+  // The field report: chip read a confident "32A" while the car drew ~22A.
+  assert.deepEqual(PF.chipAmps(charging({ appliedA: 22 })), { text: '22A→32A', pending: true });
+  assert.deepEqual(PF.chipAmps(charging({ appliedA: null })), { text: '32A', pending: true },
+    'not yet known (reconnect, new session) is pending too');
+  assert.deepEqual(PF.chipAmps(charging({ appliedA: 32 })), { text: '32A', pending: false });
+  assert.deepEqual(PF.chipAmps(charging({})), { text: '32A', pending: false },
+    'an older payload with no appliedA field renders exactly as before');
+  assert.deepEqual(PF.chipAmps(charging({ appliedA: 22, chargingState: 'plugged_in' })), { text: '', pending: false },
+    'nothing to say when not charging');
+  assert.deepEqual(PF.chipAmps(charging({ appliedA: 22, online: false })), { text: '', pending: false },
+    'or when the charger is offline');
+});

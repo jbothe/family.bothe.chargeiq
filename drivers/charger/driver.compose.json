@@ -4,6 +4,7 @@
   "capabilities": [
     "evcharger_charging",
     "charge_current_limit",
+    "charge_current_applied",
     "charge_mode",
     "evcharger_charging_state",
     "session_duration",

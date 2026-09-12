@@ -256,6 +256,8 @@
     .chip-icon { width: var(--homey-icon-size-small); height: var(--homey-icon-size-small); display: inline-flex; flex: 0 0 auto; position: relative; top: -1px; }
     .chip-icon svg { display: block; width: 100%; height: 100%; }
     .chip-boost { color: var(--homey-color-orange); }
+    /* Target not yet accepted by the charger (PF.chipAmps): grey text, the pill stays green. */
+    .chip-amps.pending { color: var(--homey-text-color-light); }
     /* text-transform:uppercase text has no descenders, but align-items:center still centers the
        *font's* full ascent/descent line box, not the glyph ink - the unused descender reserve is
        bigger than the unused ascent-to-cap-height reserve for most fonts, so the ink sits high
@@ -566,6 +568,20 @@
         if (!c.available || PF.isOffline(s) || c.chargingState !== 'plugged_in_charging') return 0;
         return c.limitA != null ? c.limitA : 0;
       },
+      // Amps text for the charging chip. chargeAmps() is the controller's decision, appliedA
+      // what the charger accepted: show both while they differ, and mark an unknown appliedA
+      // pending. A payload without appliedA renders as before.
+      chipAmps: function (s) {
+        s = s || {};
+        var c = s.charger || {};
+        var target = Math.round(PF.chargeAmps(s));
+        if (!target) return { text: '', pending: false };
+        if (!('appliedA' in c)) return { text: target + 'A', pending: false };
+        if (c.appliedA == null) return { text: target + 'A', pending: true };
+        var applied = Math.round(c.appliedA);
+        if (applied !== target) return { text: applied + 'A→' + target + 'A', pending: true };
+        return { text: target + 'A', pending: false };
+      },
       // Which icon represents the current mode - solar splits into two glyphs depending on
       // whether there's currently enough excess to actually charge on it.
       modeIconKey: function (s) {
@@ -766,8 +782,9 @@
       var chip = PF.evChip(s, Date.now());
       var chipEl = document.getElementById('ev-chip');
       if (chip && chip.cls === 'charging') {
+        var amps = PF.chipAmps(s);
         chipEl.innerHTML = '<span class="chip-icon">' + ICONS.bolt + '</span>'
-          + Math.round(PF.chargeAmps(s)) + 'A'
+          + '<span class="chip-amps' + (amps.pending ? ' pending' : '') + '">' + amps.text + '</span>'
           + (PF.showBoost(s) ? '<span class="chip-icon chip-boost">' + ICONS.boost + '</span>' : '');
       } else {
         chipEl.innerHTML = chip ? chip.label : '';

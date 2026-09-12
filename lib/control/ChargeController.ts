@@ -326,8 +326,30 @@ export class ChargeController {
 
   private awaitingStart = false;
 
-  /** Whether the last ensureCharging() call was eligible to write a profile - see there. */
-  private wasWriteEligible = false;
+  /**
+   * The limit the charger last accepted on this link and session, or null if
+   * unknown. ensureCharging() keeps writing until the target matches it.
+   */
+  private appliedAmps: number | null = null;
+
+  /**
+   * The next write re-establishes an unknown limit, so it skips the throttle.
+   * Cleared when that write is attempted, not accepted, so a charger that keeps
+   * rejecting is retried on the normal cadence.
+   */
+  private resyncPending = true;
+
+  /** Bumped by forgetApplied(), so a write that straddles it can't mark itself applied. */
+  private appliedEpoch = 0;
+
+  /**
+   * Epoch of the SetChargingProfile call in flight, or null. A call from an
+   * older epoch (say, hanging on a dead socket) doesn't block the new link's write.
+   */
+  private inFlightEpoch: number | null = null;
+
+  /** An urgent write was requested while one was in flight. */
+  private rewriteUrgent = false;
 
   private lastWriteAt = 0;
 
@@ -414,6 +436,7 @@ export class ChargeController {
     this.listenTo(this.cs, this.csTeardowns, 'disconnect', (cp: ChargePoint) => {
       if (cp.identity !== this.host.identity) return;
       this.cp = null;
+      this.forgetApplied();
       this.noteLastSeen(cp.getConnectionInfo().lastSeenAt, true);
       this.setOnline(false);
     });
@@ -681,11 +704,14 @@ export class ChargeController {
     this.setOnline(true);
     this.noteLastSeen(cp.getConnectionInfo().lastSeenAt);
     this.adoptTransactionId(cp);
+    // The charger may have rebooted, or a write may have been lost while the link was down.
+    this.forgetApplied();
     if (this.cp === cp) {
       // Same ChargePoint reconnected (its client was swapped) - not a fresh
-      // bind, but still worth a fresh status to reconcile any staleness.
+      // bind, but still worth a fresh status, and a tick to resync the limit.
       this.host.log(`[charger] reconnected (${cp.identity})`);
       this.requestFreshState();
+      this.tick(new Date(), 'reconnect');
       return;
     }
     // A different ChargePoint instance taking over: drop the previous one's
@@ -887,6 +913,7 @@ export class ChargeController {
     // controller doesn't believe a dead transaction is still live.
     if (info.status === 'Finishing' && this.transactionId != null) {
       this.transactionId = null;
+      this.forgetApplied();
       this.desiredAmps = null;
       this.awaitingStart = false;
       this.host.setStore('transactionId', null).catch(this.host.error);
@@ -934,6 +961,7 @@ export class ChargeController {
   private applyIdleReconciliation(): void {
     if (this.transactionId != null) {
       this.transactionId = null;
+      this.forgetApplied();
       this.awaitingStart = false;
       this.host.setStore('transactionId', null).catch(this.host.error);
       this.host.log('[charger] reconciled a stale transaction id (idle confirmed)');
@@ -994,7 +1022,9 @@ export class ChargeController {
     // next MeterValues/tick to recompute them off the new meterStart.
     this.host.setCapability('meter_power.session', 0);
     this.host.setCapability('session_duration', 0);
-    if (this.desiredAmps != null) this.scheduleWrite();
+    // A TxProfile belongs to its transaction, so the new one's limit is unknown.
+    this.forgetApplied();
+    if (this.desiredAmps != null && this.writeEligible()) this.scheduleWrite(true);
   }
 
   private onStopTransaction(req: StopTransactionReq): void {
@@ -1008,6 +1038,7 @@ export class ChargeController {
         + `we were tracking ${this.transactionId} - profile writes were going to a dead session`);
     }
     this.transactionId = null;
+    this.forgetApplied();
     this.host.setStore('transactionId', null).catch(this.host.error);
     this.host.setCapability('evcharger_charging', false);
   }
@@ -1576,9 +1607,14 @@ export class ChargeController {
     // given (see writeBlockedBecause) - a decision that never reaches the
     // charger must never read like one that did.
     const blocked = this.writeBlockedBecause(amps);
+    // And one the charger hasn't accepted yet (normal for up to writeThrottleMs).
+    const target = amps <= 0 ? 0 : this.clampAmps(amps);
+    const appliedNote = !blocked && this.writeEligible() && this.appliedAmps !== target
+      ? ` | charger ${this.appliedAmps == null ? 'limit unknown' : `still at ${this.appliedAmps}A`}`
+      : '';
     this.host.log(`[decision:${trigger}] ${decision.reason}${
       capNotes.length ? ` | ${capNotes.join('; ')}` : ''} -> ${finalDesc}${linkNote}${
-      blocked ? ` | NOT SENT (${blocked})` : ''}`);
+      blocked ? ` | NOT SENT (${blocked})` : ''}${appliedNote}`);
 
     // Only the Finishing case asks something of the user; "nothing plugged in"
     // is an ordinary idle state and must not raise a banner.
@@ -1624,6 +1660,27 @@ export class ChargeController {
   }
 
   /**
+   * Whether a SetChargingProfile can go out: TxProfile with a transaction id, or
+   * TxDefaultProfile while plugged in without one (some charge points never send
+   * StartTransaction for a session they're already running). Needs a live link,
+   * since init() restores transactionId from the store.
+   */
+  private writeEligible(): boolean {
+    const plugged = this.lastStatusValue != null && PLUGGED.includes(this.lastStatusValue)
+      && this.lastStatusValue !== 'Finishing';
+    return this.cp?.connected === true && (this.transactionId != null || plugged);
+  }
+
+  /** The charger's limit is unknown again (link or session changed): resync it, urgently. */
+  private forgetApplied(): void {
+    this.appliedAmps = null;
+    this.appliedEpoch += 1;
+    this.resyncPending = true;
+    this.rewriteUrgent = false; // was queued behind the old epoch's call
+    this.host.setCapability('charge_current_applied', null);
+  }
+
+  /**
    * amps: 0 = pause (hold 0A, keep the transaction), >0 = charge at that
    * current. capTightened: a hard cap's ceiling dropped further this tick
    * (see tick()) - if that also means less current than we last asked for,
@@ -1632,37 +1689,19 @@ export class ChargeController {
    */
   private ensureCharging(amps: number, capTightened = false): void {
     const target = amps <= 0 ? 0 : this.clampAmps(amps);
-    // Genuinely plugged in and mid-session from the charger's own point of
-    // view, whether or not *we* hold a transaction id for it.
-    const plugged = this.lastStatusValue != null && PLUGGED.includes(this.lastStatusValue)
-      && this.lastStatusValue !== 'Finishing';
-    // TxProfile once a transaction id is known, or TxDefaultProfile whenever
-    // the charger is visibly plugged in even without one - some charge points
-    // never hand back a StartTransaction for a session they're already
-    // running (observed on real hardware: a redundant RemoteStartTransaction
-    // while already Charging gets rejected outright), which would otherwise
-    // leave the app permanently unable to adjust the current for that entire
-    // session.
-    const eligible = this.transactionId != null || plugged;
-    const ampsChanged = this.desiredAmps !== target;
-    // Newly write-eligible after a spell of not being (a replug out of
-    // Finishing, a session finally granting a transaction id): the charger is
-    // running on whatever profile predates the gap, and the throttle exists to
-    // space out routine adjustments, not to hold back the write that first
-    // reconciles it. Treated as urgent for the same reason a tightening cap is.
-    const regained = eligible && !this.wasWriteEligible;
-    const urgent = regained
-      || (capTightened && this.desiredAmps != null && target < this.desiredAmps);
-    if (ampsChanged) {
+    const prevDesired = this.desiredAmps;
+    if (prevDesired !== target) {
       this.desiredAmps = target;
       if (target > 0) this.host.setCapability('charge_current_limit', target);
     }
-    // Also write on becoming newly eligible even if the target didn't change
-    // across that transition (e.g. the charger only just reported a plugged
-    // status) - otherwise a target that happens not to move at that exact
-    // moment would never actually reach the charger.
-    if (eligible && (ampsChanged || regained)) this.scheduleWrite(urgent);
-    this.wasWriteEligible = eligible;
+    // Write until the charger has accepted the target, not just when the target
+    // changes - otherwise a dropped or rejected write is never retried.
+    if (this.writeEligible() && this.appliedAmps !== target) {
+      // Urgent when re-establishing an unknown limit, or when a hard cap tightened.
+      const urgent = this.resyncPending
+        || (capTightened && prevDesired != null && target < prevDesired);
+      this.scheduleWrite(urgent);
+    }
     // Only attempt a fresh start while the charger is genuinely waiting for
     // one (Preparing: cable connected, no session yet) - not once a session
     // already appears underway (Charging/SuspendedEV/SuspendedEVSE), which
@@ -1693,6 +1732,11 @@ export class ChargeController {
   }
 
   private scheduleWrite(urgent = false): void {
+    // One call at a time; writeProfile() re-reconciles when it finishes.
+    if (this.inFlightEpoch !== null && this.inFlightEpoch === this.appliedEpoch) {
+      this.rewriteUrgent = this.rewriteUrgent || urgent;
+      return;
+    }
     // Urgent (a hard cap tightened below what we last asked for): jump the
     // queue rather than waiting out - or continuing to wait out - the usual
     // throttle. Cancels any deferred write already pending so this one, with
@@ -1723,13 +1767,19 @@ export class ChargeController {
   // the .catch(host.error) above is a defensive backstop only.
   private async writeProfile(): Promise<void> {
     if (!this.cp?.connected || this.desiredAmps == null) return;
+    if (this.desiredAmps === this.appliedAmps) return; // already there (a pending write overtaken)
+    const epoch = this.appliedEpoch;
+    this.inFlightEpoch = epoch;
+    this.resyncPending = false;
     this.lastWriteAt = Date.now();
+    const amps = this.desiredAmps;
     const txId = this.transactionId;
     const kind = txId != null ? `TxProfile tx=${txId}` : 'TxDefaultProfile';
-    this.host.log(`[charger] setting profile: ${this.desiredAmps}A (${kind})`);
+    this.host.log(`[charger] setting profile: ${amps}A (${kind})`);
+    let landed = false;
     try {
-      const accepted = await this.cp.setChargingProfile({
-        limitAmps: this.desiredAmps,
+      let accepted = await this.cp.setChargingProfile({
+        limitAmps: amps,
         connectorId: CONNECTOR_ID,
         transactionId: txId ?? undefined,
         numberPhases: this.cfg.phases,
@@ -1738,25 +1788,41 @@ export class ChargeController {
       });
       this.host.log(`[charger] profile ${accepted ? 'accepted' : 'rejected'}`);
       // A rejected TxProfile is most often a transaction id the charger does
-      // not recognise, and the next write is only triggered by the target
-      // changing - which may not happen for minutes. TxDefaultProfile needs no
-      // transaction id and is already known to be obeyed on this hardware, so
-      // retry once immediately rather than leaving the charger on its previous
-      // limit indefinitely. Guarded on the id being unchanged so this can't
-      // fight a transaction that started while the call was in flight.
+      // not recognise. TxDefaultProfile needs no transaction id and is already
+      // known to be obeyed on this hardware, so retry once immediately.
+      // Guarded on the id being unchanged so this can't fight a transaction
+      // that started while the call was in flight.
       if (!accepted && txId != null && this.transactionId === txId && this.cp?.connected) {
         this.host.log('[charger] retrying as TxDefaultProfile (no transaction id)');
-        const retried = await this.cp.setChargingProfile({
-          limitAmps: this.desiredAmps,
+        accepted = await this.cp.setChargingProfile({
+          limitAmps: amps,
           connectorId: CONNECTOR_ID,
           numberPhases: this.cfg.phases,
           chargingProfileId: PROFILE_ID,
           stackLevel: STACK_LEVEL,
         });
-        this.host.log(`[charger] profile retry ${retried ? 'accepted' : 'rejected'}`);
+        this.host.log(`[charger] profile retry ${accepted ? 'accepted' : 'rejected'}`);
+      }
+      // Unless a reconnect or new session has made this acceptance meaningless.
+      if (accepted && epoch === this.appliedEpoch) {
+        this.appliedAmps = amps;
+        this.host.setCapability('charge_current_applied', amps);
+        landed = true;
       }
     } catch (err) {
       this.host.error('SetChargingProfile failed:', (err as Error).message);
+    } finally {
+      // A call from a superseded epoch leaves the slot to the newer write.
+      if (this.inFlightEpoch === epoch) {
+        this.inFlightEpoch = null;
+        const urgent = this.rewriteUrgent;
+        this.rewriteUrgent = false;
+        // Chase a target that moved mid-call. A failed write waits for the next
+        // tick instead - retrying from its own completion is an unpaced loop.
+        if ((landed || urgent) && this.desiredAmps !== this.appliedAmps && this.writeEligible()) {
+          this.scheduleWrite(urgent);
+        }
+      }
     }
   }
 
