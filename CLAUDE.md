@@ -63,6 +63,12 @@ The **App** (`app.ts`) owns the long-lived services and exposes them to the devi
   and nothing ever re-looked. `discover()` rebuilds `present` from what it actually finds, but only
   *after* `getDevices()` succeeds, so a failed rescan doesn't blank known-good state.
   `checkAndRecover(now?)` is public purely so tests can drive it without waiting on real time.
+  **The emit debounce (`SAMPLE_DEBOUNCE_MS`, 1s) is capped by `SAMPLE_MAX_WAIT_MS` (5s)** — reset on
+  every update, but never held past the ceiling. Without it a feed updating faster than the window
+  starves the emit forever: not late samples, *none*, and none of the safety nets catch it, since
+  `lastUpdateAt` is stamped by the very updates doing the starving so `checkAndRecover()` sees a
+  healthy feed, while `ChargeController` loses both hard caps after `solarStaleMs` (60s). The delay
+  calc is the pure `debounceDelay()` so the ceiling is testable without a clock seam.
 - Widget state is **pushed** to the widget via `this.homey.api.realtime('powerflow', …)` every
   10 s (`startWidgetBroadcast`). This is the widget's ongoing data channel. Immediate first paint
   on load goes through a **widget-scoped** pull endpoint (`widgets/power-flow/api.js`'s
