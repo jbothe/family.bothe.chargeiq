@@ -209,6 +209,38 @@ next move.
 ### Key invariants / gotchas
 - **Amps are always floored** (never rounded up) when converting W→A, in `SolarLoop`, the
   household cap, and `clampAmps` — a target must never exceed available surplus/limit.
+- **`SolarLoop`'s `settleMs` is what stabilises the solar loop, not `rampA`.** `availableW` =
+  `chargerPowerW − gridSignedW − …` is only correct if both readings are simultaneous; they are not.
+  Measured on real hardware 2026-08-14 (six manual step pairs, `test/solar-lag.js`): the SolarEdge
+  grid reading lags the OCPP charger reading by **~14s** (up-steps tight at 13.4–14.6s; down-step
+  figures are noisier only because the car drops within a single `MeterValues` sample, so the
+  crossing quantises to ±10s). Against a stale grid figure the loop counts its own last increase a
+  second time as fresh headroom and staircases — a *self-sustained* limit cycle at constant surplus,
+  matching the reported 7A→20A→6A→18A with grid import on every up-swing. Simulated against a plant
+  calibrated from that measurement, the stability boundary is **~17s of lag** — i.e. ~20% margin at
+  the measured value, which is why this shows up intermittently rather than always, and why a
+  slower cloud path (or a real ±2A weather wobble, amplified ~6× at 30s of lag) tips it over.
+  `settleMs` (45s default, `solarSettleSec`) holds the target after any real move so the next
+  decision reads a grid figure that already includes the last one; that makes the effective control
+  period exceed the dead time, and holds flat across the whole 8–46s lag range tested.
+  Consequences, all load-bearing:
+  - **`rampA`'s default is 8, not 3, and lowering it is counterproductive.** Once `settleMs` holds
+    the staircase back, `rampA` only bounds how far one spurious reading can move the target. Small
+    `rampA` on top of `settleMs` just makes tracking sluggish (6A→20A sunrise: 220s at `rampA` 3 vs
+    **70s** at 8 — both perfectly stable; even `rampA` 32 is stable across the range).
+  - **Don't lower `writeThrottleMs` to "improve responsiveness".** It is acting as a stabilising
+    filter: at the measured 14s lag, setting it to 0 makes the loop swing 5A where it was flat.
+  - The lockout gates the **step, not the evaluation** — `availableW` is still computed and returned
+    every sample, so `measure_solar_surplus` and the widget stay live at the feed's cadence.
+  - It never delays **pausing** (that's `minOnMs`'s job) and never touches the hard caps, which are
+    applied downstream in `tick()` and keep their urgent-write bypass.
+  - `lastStepAt` is deliberately separate from `lastChangeAt` (which is stamped only on state
+    transitions and is load-bearing for the `minOnMs`/`minOffMs` dwell windows), and a step that
+    clamps onto the value already held does **not** re-arm it — nothing moved, so there is no effect
+    to wait and observe.
+  `test/solar-loop.test.ts` pins this with a lagged-feed harness: one test asserts the staircase
+  *does* form at `settleMs: 0` (so the regression test can't silently stop testing anything) and
+  another that it doesn't at 45s. Still unverified on hardware — see that section below.
 - Homey fires `registerCapabilityListener` only for *external* (user/Flow) sets, not for the app's
   own `setCapabilityValue`. That's how manual actions are distinguished from the solar loop's own
   slider updates — rely on it; don't add manual-vs-auto flags.
@@ -457,6 +489,18 @@ namespace being connected to socket.io, and `makeCapabilityInstance` only ever c
 re-look at all, which is the entire point of `checkAndRecover()`.
 
 ## Not yet verified on hardware
+The **solar settle lockout** (`settleMs`/`solarSettleSec`, see Key invariants) actually suppressing
+the swing on the real system. The ~14s lag it is sized against *is* a hardware measurement, and the
+loop's behaviour is pinned by unit tests, but the closed-loop result is so far simulation only —
+against a plant model whose EV response, household noise and battery behaviour are all
+approximations. Two specific gaps: the **home battery was pinned at 0W for the whole measurement
+run**, so the SolarEdge battery controller — a second closed loop on the same grid meter, chasing
+the same export, with its own lag — has never been in the picture at all (an attempt to model it was
+too crude to conclude anything); and the measured lag comes from one 15-minute window, whereas the
+cloud path plausibly varies more across a day and across seasons. Re-run `test/solar-lag.js` in
+capture mode during a real solar session to confirm, and watch `battery=` on the `[solar]` lines
+during any residual swings.
+
 The **liveness watchdog** firing against a genuinely half-open link (the failure it exists for) —
 `ChargePoint`'s unit tests drive it with a short `livenessTimeoutMs` and a fake client, which proves
 the timer/teardown logic but not that a real wedged Wallbox link reaches it before `ocpp-rpc`'s own

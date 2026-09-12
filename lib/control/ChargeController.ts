@@ -100,6 +100,7 @@ interface ControllerConfig {
   // Solar loop tunables
   deadbandA: number;
   rampA: number;
+  settleMs: number;
   minOnMs: number;
   minOffMs: number;
   marginW: number;
@@ -140,7 +141,10 @@ const DEFAULTS: ControllerConfig = {
   meterSampleIntervalSec: 10,
   writeThrottleMs: 15000,
   deadbandA: 0,
-  rampA: 3,
+  // settleMs is what keeps the solar loop stable; rampA only bounds how far one
+  // bad reading can move the target. Lower just makes tracking sluggish.
+  rampA: 8,
+  settleMs: 45000,
   minOnMs: 3 * 60000,
   minOffMs: 3 * 60000,
   marginW: 0,
@@ -477,6 +481,7 @@ export class ChargeController {
       writeThrottleMs: g('writeThrottleMs', DEFAULTS.writeThrottleMs),
       deadbandA: g('deadbandA', DEFAULTS.deadbandA),
       rampA: g('rampA', DEFAULTS.rampA),
+      settleMs: g('solarSettleSec', DEFAULTS.settleMs / 1000) * 1000,
       minOnMs: g('minOnSec', DEFAULTS.minOnMs / 1000) * 1000,
       minOffMs: g('minOffSec', DEFAULTS.minOffMs / 1000) * 1000,
       marginW: g('marginW', DEFAULTS.marginW),
@@ -512,6 +517,7 @@ export class ChargeController {
       maxAmps: c.maxAmps,
       deadbandA: c.deadbandA,
       rampA: c.rampA,
+      settleMs: c.settleMs,
       minOnMs: c.minOnMs,
       minOffMs: c.minOffMs,
       marginW: c.marginW,

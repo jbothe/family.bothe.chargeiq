@@ -19,6 +19,13 @@
         "@typescript-eslint/no-floating-promises": "off",
         "homey-app/global-timers": "off"
       }
+    },
+    {
+      "files": ["test/solar-lag.js"],
+      "rules": {
+        "no-console": "off",
+        "no-process-exit": "off"
+      }
     }
   ]
 }
