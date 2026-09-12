@@ -361,6 +361,29 @@ next move.
   on top of a discharging battery still counts), unlike the schedule-boost's binary gate - solar mode
   has no independent floor to fall back on, so zeroing out the entire target over any discharge at
   all would be needlessly conservative there.
+- **A quiet solar feed silently un-boosts a schedule window.** Both hard caps go unavailable once
+  `solarFeedStale()` (60s, `solarStaleSec`) trips, and an unavailable charger-circuit cap collapses a
+  `boostToCap` window back onto its `currentA` floor. `SolarFeed`'s own recovery only reacts after
+  `FEED_SILENT_MS` (30 min), and `tick()`'s "Solar feed stale; failing safe" log only covers solar
+  being the *active* mode - so inside a schedule window a dying feed was otherwise invisible.
+  Confirmed in the field: the user's SolarEdge app wedged holding a **three-day-old** reading. It
+  never stopped answering, so `getDevices()` kept returning plausible values, no capability listener
+  ever fired, and the only symptom was a charger refusing to boost above its 12A floor. Three things
+  now report it, all off one owner:
+  `sharedCircuitCapUnavailableReason()` puts the cause (no rating configured / no sample yet / stale
+  for how long) on the `[decision:...]` line; `refreshSolarFeedHealth()` logs the transition in both
+  directions and drives a **device warning banner** via `refreshWarning()` (ranked below a fault and
+  the replug prompt - both are about the charger itself); and `getDiagnostics().solarFeed` carries
+  `{stale, ageMs}` through to the widget.
+- **Reporting staleness and gating on it are two different thresholds.** `solarStaleMs` (60s) is a
+  *control* gate - dropping the caps for a minute is a cheap, self-correcting fail-safe.
+  `SOLAR_FEED_REPORT_MS` (5 min) is what the user is told, because a banner is a claim to a person
+  and one that flaps every few minutes over ordinary gaps is noise they learn to ignore. The banner
+  text carries **no age** on purpose (`fmtDuration`'s granularity would rewrite it every minute for
+  the first hour); the age goes in the log and the widget instead - the same split the OCPP outage
+  already uses. A feed that has **never** delivered a sample (`lastSolarSampleAt === 0`) is never
+  reported at all: on a Homey with no solar app there is nothing wrong, and nagging about a feed the
+  user never had is worse than saying nothing.
 - Controller diagnostics log via the **app** logger (`this.homey.app.log`) for a short
   `[ChargeIQApp]` prefix; tags are `[charger]`, `[solar]`, `[decision:<trigger>]`, `[mode]`,
   `[config]` (the full resolved config, logged on every `refreshConfig()` - boot and every settings
@@ -400,6 +423,14 @@ next move.
 `POWERFLOW-LOGIC-START/END` markers; `test/powerflow.test.ts` extracts and evaluates that exact
 block, so keep it dependency-free (no imports). It renders live even when the charger is unplugged;
 dims (`.stale`) after ~50 s (5 missed 10s broadcasts) without a realtime update and auto-recovers.
+
+**`PF.isSolarStale()` is the solar-side mirror of `PF.isOffline()`**, and for the same reason: solar,
+house, battery, grid and the battery SoC gauge all come from the solar feed, so once `solarStale` is
+true they render `–` (and their tile capacity strips hide, and the bus reads `neutral`) rather than
+painting a three-day-old reading as the live state of the house. Gated strictly on `=== true` so an
+older state payload without the field never reads as stale. **EV power and its own capacity strip are
+deliberately untouched** - they come from the charger's `MeterValues`, not the feed. `test/widget-preview.html`
+has a `Solar feed stale 3d` preset next to `Charger offline 12h` for previewing it.
 
 **Immediate first paint on load pulls once via `widgets/power-flow/api.js`'s `getState`
 endpoint** (declared in `widget.compose.json`'s own `api` block, not the app-level `api.ts`),

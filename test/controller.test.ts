@@ -3116,3 +3116,132 @@ test('an accepted TxProfile write is not followed by a pointless retry', async (
   await settle();
   assert.deepEqual(profileTxIds(), [48], 'the retry is specific to a rejection');
 });
+
+// ---------------------------------------------------------------------------
+// Reporting a solar feed that has stopped delivering
+// ---------------------------------------------------------------------------
+
+/** A controller whose warnings and logs are both captured. */
+function makeWarnController(extraSettings: Record<string, unknown> = {}, cs?: CentralSystem): {
+  c: ChargeController; warnings: Array<string | null>; logs: string[];
+} {
+  const store: Record<string, unknown> = { schedule: [] };
+  const settings: Record<string, unknown> = {
+    minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdA: 63, householdPhases: 1, ...extraSettings,
+  };
+  const warnings: Array<string | null> = [];
+  const logs: string[] = [];
+  const host: ControllerHost = {
+    identity: 'X',
+    setCapability: () => {},
+    getSetting: <T>(k: string) => settings[k] as T,
+    getStore: <T>(k: string) => store[k] as T,
+    setStore: async (k, v) => {
+      store[k] = v;
+    },
+    setAvailable: () => {},
+    setUnavailable: () => {},
+    setWarning: (m) => {
+      warnings.push(m);
+    },
+    log: (...a) => {
+      logs.push(a.join(' '));
+    },
+    error: () => {},
+  };
+  const c = new ChargeController(
+    host,
+    cs ?? ({ getChargePoint: () => undefined, on: () => {}, removeListener: () => {} } as unknown as CentralSystem),
+  );
+  c.init();
+  return { c, warnings, logs };
+}
+
+const HOUR_MS = 3600_000;
+
+test('a solar feed that stops delivering is reported, and cleared when it comes back', () => {
+  // A SolarEdge app wedged on a three-day-old reading.
+  const { c, warnings, logs } = makeWarnController();
+  c.onSolarSample({ gridSignedW: -3000, pvW: 4440, batteryW: 0 }, Date.now() - 3 * 24 * HOUR_MS);
+  c.tick(new Date(), 'timer');
+
+  assert.equal(warnings[warnings.length - 1], 'Solar feed stale - no update from the solar app. Solar charging is paused, '
+    + 'and the household/charger-circuit limits are not being applied.');
+  assert.ok(logs.some((l) => l.includes('[solar] feed stale - nothing received for 3d')),
+    'the log carries the age; the banner deliberately does not (it would rewrite every minute)');
+
+  warnings.length = 0;
+  logs.length = 0;
+  c.tick(new Date(), 'timer');
+  assert.equal(warnings.length, 0, 'the banner is written on the transition, not on every tick');
+  assert.equal(logs.filter((l) => l.includes('feed stale')).length, 0, 'and neither is the log line');
+
+  c.onSolarSample({ gridSignedW: -3000, pvW: 4440, batteryW: 0 });
+  assert.equal(warnings[warnings.length - 1], null, 'a fresh sample clears the banner');
+  assert.ok(logs.some((l) => l.includes('[solar] feed recovered')));
+  c.destroy();
+});
+
+test('a feed that has never delivered anything is not reported as stale', () => {
+  // e.g. a Homey with no solar app at all.
+  const { c, warnings, logs } = makeWarnController();
+  c.tick(new Date(), 'timer');
+  assert.equal(c.solarFeedAgeMs(), null);
+  assert.equal(warnings.filter((w) => w != null).length, 0, 'no banner');
+  assert.equal(logs.filter((l) => l.includes('feed stale')).length, 0, 'and nothing in the log either');
+  c.destroy();
+});
+
+test('a brief gap in the solar feed drops the caps without raising a banner', () => {
+  // 90s trips the 60s control gate but not the 5-minute reporting threshold.
+  const { c, warnings } = makeWarnController({ sharedCircuitA: 32, sharedCircuitIncludeSolar: true });
+  c.onSolarSample({ gridSignedW: -3000, pvW: 4440, batteryW: 0 }, Date.now() - 90_000);
+  c.tick(new Date(), 'timer');
+  assert.equal(c.getDiagnostics().solarFeed.stale, false, '90s is stale for the caps but not worth reporting');
+  assert.equal(warnings.filter((w) => w != null).length, 0);
+  c.destroy();
+});
+
+test('a charger fault outranks the solar-feed banner, and does not clobber it', () => {
+  const fakeClient: RpcClient = {
+    identity: 'X', handle: () => {}, call: async () => ({ status: 'Accepted' }), close: async () => {}, on: () => {},
+  };
+  const cp = new ChargePoint({
+    identity: 'X', authorize: () => true, nextTransactionId: () => 1, livenessTimeoutMs: 0,
+  });
+  cp.attach(fakeClient);
+  const cs = new FakeCentralSystem() as unknown as CentralSystem;
+  const { c, warnings } = makeWarnController({}, cs);
+  cs.emit('connect', cp);
+
+  c.onSolarSample({ gridSignedW: -3000, pvW: 4440, batteryW: 0 }, Date.now() - 3 * 24 * HOUR_MS);
+  c.tick(new Date(), 'timer');
+  assert.ok(String(warnings[warnings.length - 1]).startsWith('Solar feed stale'));
+
+  cp.emit('status', { connectorId: 1, errorCode: 'GroundFailure', status: 'Faulted' });
+  assert.equal(warnings[warnings.length - 1], 'Charger fault: GroundFailure',
+    'the charger\'s own problem is the one worth showing');
+
+  cp.emit('status', { connectorId: 1, errorCode: 'NoError', status: 'Available' });
+  assert.ok(String(warnings[warnings.length - 1]).startsWith('Solar feed stale'),
+    'and clearing the fault surfaces the stale feed again rather than leaving nothing');
+  c.destroy();
+});
+
+test('the decision line says why a boost-enabled window fell back to its floor', () => {
+  const { c, logs } = makeController([{
+    days: [0, 1, 2, 3, 4, 5, 6], start: '00:00', end: '00:00', currentA: 12, boostToCap: true,
+  }], {
+    sharedCircuitA: 32, sharedCircuitBufferA: 2, sharedCircuitIncludeSolar: true, solarStaleSec: 60,
+  });
+  assert.ok(logs.some((l) => l.includes('boost enabled, but shared-circuit cap unavailable - no solar sample received yet')),
+    'before any sample, the cap is unavailable because nothing has been received');
+
+  logs.length = 0;
+  // A sample that arrived, then went quiet for longer than solarStaleSec.
+  c.onSolarSample({ gridSignedW: -4000, pvW: 4440, batteryW: 0 }, Date.now() - 200_000);
+  c.tick(new Date(), 'timer');
+  assert.ok(logs.some((l) => l.includes('shared-circuit cap unavailable - solar feed stale, last sample')),
+    'a feed that has gone quiet is named as the reason, not left as a bare "unavailable"');
+  c.destroy();
+});

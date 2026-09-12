@@ -459,6 +459,16 @@
         var c = s.charger || {};
         return !!c.available && c.online === false;
       },
+      // Is the solar feed stale? Only an explicit true counts, like isOffline.
+      isSolarStale: function (s) {
+        return (s || {}).solarStale === true;
+      },
+      // Battery charge % for the gauge, or null (no-data grey) when the feed
+      // behind it has stopped moving.
+      batterySoc: function (s) {
+        s = s || {};
+        return PF.isSolarStale(s) ? null : s.batterySoc;
+      },
       // How long the charger has been out of contact, in ms, or null if unknown.
       offlineForMs: function (s, now) {
         if (!PF.isOffline(s)) return null;
@@ -492,6 +502,10 @@
           w = c.available ? (c.powerW || 0) : 0;
           return { mag: w, dir: w > 10 ? 'up' : null };
         }
+        // Everything but EV comes from the solar feed, so a stale feed makes it unknown.
+        if (PF.isSolarStale(s) && (kind === 'solar' || kind === 'house' || kind === 'battery' || kind === 'grid')) {
+          return { mag: null, dir: null };
+        }
         if (kind === 'solar') { w = s.solarW || 0; return { mag: w, dir: w > 10 ? 'down' : null }; }
         if (kind === 'house') { w = s.houseW || 0; return { mag: w, dir: w > 10 ? 'down' : null }; }
         if (kind === 'battery') { w = s.batteryW || 0; return { mag: Math.abs(w), dir: w > 10 ? 'down' : (w < -10 ? 'up' : null) }; }
@@ -513,7 +527,9 @@
         return { color: color, fillHeight: fillHeight, fillY: fillY };
       },
       // Which gradient the power bus should show, using the same +-10W deadband as flow().
-      busState: function (gridW) {
+      // Pass the state as well to show a stale solar feed as neutral.
+      busState: function (gridW, s) {
+        if (PF.isSolarStale(s)) return 'neutral';
         gridW = gridW || 0;
         if (gridW > 10) return 'import';
         if (gridW < -10) return 'export';
@@ -592,6 +608,8 @@
       meter: function (kind, s) {
         s = s || {};
         var lim = s.limits || {};
+        // Same rule as flow(): no strip from a stale solar reading.
+        if (kind !== 'ev' && PF.isSolarStale(s)) return null;
         if (kind === 'ev') {
           var c = s.charger || {};
           if (!c.available || !(lim.chargerMaxW > 0)) return null;
@@ -765,7 +783,7 @@
       document.getElementById('battery-val').innerHTML = PF.valHtml(battery.mag);
       document.getElementById('house-val').innerHTML = PF.valHtml(house.mag);
 
-      var bv = PF.batteryVisual(s.batterySoc);
+      var bv = PF.batteryVisual(PF.batterySoc(s));
       document.getElementById('battery-tile').innerHTML = batterySvg(bv) + PF.meterHtml(PF.meter('battery', s), 'top');
 
       // "Flowing" (drives the bus's left-to-right animated gradient, see .bus.flowing) reuses each
@@ -773,7 +791,7 @@
       // dash animation (see .conn.active) - rather than re-deriving it from raw magnitudes,
       // so the bus only animates in exact lockstep with the connectors it's summarizing.
       var flowing = !!(ev.dir || solar.dir || grid.dir || battery.dir || house.dir);
-      document.getElementById('bus').className = 'bus bus-' + PF.busState(s.gridW) + (flowing ? ' flowing' : '');
+      document.getElementById('bus').className = 'bus bus-' + PF.busState(s.gridW, s) + (flowing ? ' flowing' : '');
 
       // All connectors flow in the same blue regardless of tile - the same --icon-blue
       // token the Grid/idle House/EV/Solar tiles themselves use (see the --icon-blue CSS

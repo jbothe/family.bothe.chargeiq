@@ -176,6 +176,10 @@ const TICK_MS = 15000;
 // still-live transaction/manual-latch) is debounced by this long so that
 // blip can't be mistaken for a genuine idle charger.
 const IDLE_RECONCILE_DELAY_MS = 5000;
+// How long the solar feed can be silent before the user is told (banner, widget,
+// log). Much longer than solarStaleMs, which only gates the caps: a banner that
+// flaps over ordinary gaps in a healthy feed is noise.
+const SOLAR_FEED_REPORT_MS = 5 * 60000;
 // How long after init() to wait for the charger to (re)connect before calling
 // it offline. A charge point reconnects within seconds of the app starting, so
 // without this every app restart/update would report a spurious offline->online
@@ -269,6 +273,9 @@ export class ChargeController {
   private lastSolarSampleAt = 0;
 
   private solarStaleWarned = false;
+
+  /** Silent for longer than SOLAR_FEED_REPORT_MS - drives the banner and the widget. */
+  private solarFeedDown = false;
 
   /**
    * null until the first MeterValues since the charger was last confirmed
@@ -582,6 +589,12 @@ export class ChargeController {
     let next: string | null = null;
     if (this.lastFaultCode) next = `Charger fault: ${this.lastFaultCode}`;
     else if (this.needsReplug) next = 'Charging session ended - unplug and replug the cable to resume';
+    // Last: a fault or replug prompt is about the charger itself. No age in the
+    // text, or the banner would be rewritten every minute; the log has it.
+    else if (this.solarFeedDown) {
+      next = 'Solar feed stale - no update from the solar app. Solar charging is paused, '
+        + 'and the household/charger-circuit limits are not being applied.';
+    }
     if (next === this.lastWarning) return;
     this.lastWarning = next;
     this.host.setWarning(next);
@@ -1201,11 +1214,34 @@ export class ChargeController {
     this.tick(new Date(now), 'solar');
   }
 
+  /** Too old to base either hard cap on. */
+  private solarFeedStale(): boolean {
+    return this.lastSolarSampleAt === 0 || (Date.now() - this.lastSolarSampleAt) > this.cfg.solarStaleMs;
+  }
+
+  /** Age of the last solar sample, or null if none ever arrived (no solar app - nothing to report). */
+  solarFeedAgeMs(now: number = Date.now()): number | null {
+    return this.lastSolarSampleAt === 0 ? null : Math.max(0, now - this.lastSolarSampleAt);
+  }
+
+  /**
+   * Log the feed going down and recovering. tick()'s fail-safe log only covers
+   * solar being the active mode, but the feed also drives both caps and boost.
+   */
+  private refreshSolarFeedHealth(now: number): void {
+    const age = this.solarFeedAgeMs(now);
+    const down = age != null && age > SOLAR_FEED_REPORT_MS;
+    if (down === this.solarFeedDown) return;
+    this.solarFeedDown = down;
+    this.host.log(down
+      ? `[solar] feed stale - nothing received for ${fmtDuration(age!)}; solar charging is paused `
+        + 'and the household/charger-circuit caps are unavailable until it returns'
+      : '[solar] feed recovered');
+  }
+
   private householdCapAmps(): number | null {
     if (this.cfg.maxHouseholdW <= 0) return null;
-    const stale = this.lastSolarSampleAt === 0
-      || (Date.now() - this.lastSolarSampleAt) > this.cfg.solarStaleMs;
-    if (stale) return null;
+    if (this.solarFeedStale()) return null;
     const chargerW = this.nettedChargerW();
     // Charging but no MeterValues yet this connection: same "don't guess"
     // gap as onSolarSample - trust the configured ceiling rather than netting
@@ -1242,9 +1278,7 @@ export class ChargeController {
     if (!this.cfg.sharedCircuitIncludeSolar && !this.cfg.sharedCircuitIncludeBattery) {
       return Math.floor(this.cfg.sharedCircuitA - this.cfg.sharedCircuitBufferA);
     }
-    const stale = this.lastSolarSampleAt === 0
-      || (Date.now() - this.lastSolarSampleAt) > this.cfg.solarStaleMs;
-    if (stale) return null;
+    if (this.solarFeedStale()) return null;
     const div = this.cfg.voltage * this.cfg.phases;
     const pvA = this.cfg.sharedCircuitIncludeSolar ? this.lastPvW / div : 0;
     const batteryA = this.cfg.sharedCircuitIncludeBattery ? this.lastBatteryW / div : 0;
@@ -1300,6 +1334,7 @@ export class ChargeController {
   getDiagnostics(): {
     availableW: number; solarState: string; targetA: number | null; mode: ChargeMode;
     chargerPowerW: number | null;
+    solarFeed: { stale: boolean; ageMs: number | null };
     limits: {
       chargerMaxW: number; gridMaxW: number;
       batteryChargePeakW: number; batteryDischargePeakW: number; solarPeakW: number;
@@ -1315,6 +1350,8 @@ export class ChargeController {
       // load) can subtract the EV's own draw out of a grid-derived total instead of
       // double-counting it as household consumption.
       chargerPowerW: this.nettedChargerW(),
+      // The widget blanks everything it draws from the feed while this is stale.
+      solarFeed: { stale: this.solarFeedDown, ageMs: this.solarFeedAgeMs() },
       limits: {
         chargerMaxW: this.cfg.maxAmps * this.cfg.voltage * this.cfg.phases,
         gridMaxW: this.cfg.maxHouseholdW,
@@ -1423,7 +1460,11 @@ export class ChargeController {
     }
     const cap = this.sharedCircuitCapAmps();
     if (cap == null) {
-      return { amps: floor, reason: `scheduled: floor ${floor}A (boost enabled, but shared-circuit cap unavailable)` };
+      return {
+        amps: floor,
+        reason: `scheduled: floor ${floor}A (boost enabled, but shared-circuit cap unavailable - `
+          + `${this.sharedCircuitCapUnavailableReason()})`,
+      };
     }
     if (cap <= floor) {
       return { amps: floor, reason: `scheduled: floor ${floor}A (boost enabled, circuit cap ${cap}A doesn't exceed floor)` };
@@ -1434,6 +1475,13 @@ export class ChargeController {
       reason: `scheduled: boosted floor ${floor}A -> ${amps}A (circuit cap ${cap}A, `
         + `pv=${Math.round(this.lastPvW)}W battery=${Math.round(this.lastBatteryW)}W)`,
     };
+  }
+
+  /** Why sharedCircuitCapAmps() is null - otherwise a lost boost reads as boost being ignored. */
+  private sharedCircuitCapUnavailableReason(): string {
+    if (this.cfg.sharedCircuitA <= 0) return 'no charger-circuit rating configured';
+    if (this.lastSolarSampleAt === 0) return 'no solar sample received yet';
+    return `solar feed stale, last sample ${fmtDuration(Date.now() - this.lastSolarSampleAt)} ago`;
   }
 
   tick(now: Date = new Date(), trigger: string = 'timer'): void {
@@ -1539,6 +1587,7 @@ export class ChargeController {
       this.host.log('[charger] parked in Finishing with a live target - needs a physical unplug/replug to resume');
     }
     this.needsReplug = replug;
+    this.refreshSolarFeedHealth(now.getTime());
     this.refreshWarning();
 
     this.ensureCharging(amps, capTightened);
