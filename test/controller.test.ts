@@ -3485,3 +3485,70 @@ test('the applied limit is published on acceptance and cleared when the link dro
   assert.equal(caps.charge_current_applied, null, 'unknown once the link is gone - never the last figure as if current');
   c.destroy();
 });
+
+test('binding asks the charger to report Current.Offered, and logs it if the charger refuses', async () => {
+  const configured: Array<{ key: string; value: string }> = [];
+  const fakeClient: RpcClient = {
+    identity: 'X',
+    handle: () => {},
+    call: async (method: string, params?: unknown) => {
+      if (method !== 'ChangeConfiguration') return { status: 'Accepted' };
+      configured.push(params as { key: string; value: string });
+      return { status: 'Rejected' };
+    },
+    close: async () => {},
+    on: () => {},
+  };
+  const cp = new ChargePoint({
+    identity: 'X', authorize: () => true, nextTransactionId: () => 1, livenessTimeoutMs: 0,
+  });
+  cp.attach(fakeClient);
+  const cs = new FakeCentralSystem() as unknown as CentralSystem;
+  const { c, logs } = makeWarnController({}, cs);
+  cs.emit('connect', cp); // no BootNotification - an app restart doesn't reboot the charger
+  await waitMs(5);
+
+  const sampled = configured.find((k) => k.key === 'MeterValuesSampledData');
+  assert.ok(sampled?.value.split(',').includes('Current.Offered'), 'requested on bind, not only on boot');
+  assert.ok(logs.some((l) => l.includes('MeterValues config not accepted (interval Rejected, measurands Rejected)')),
+    'a refusal is reported, rather than the measurand just never appearing');
+  c.destroy();
+});
+
+// ---------------------------------------------------------------------------
+// A Wallbox can report SuspendedEV while delivering full power
+// ---------------------------------------------------------------------------
+
+test('a charger delivering in SuspendedEV is netted from its meter and shown as charging', async () => {
+  const { c, cp, caps } = makeBoundController({}, { maxHouseholdA: 63 });
+  cp.emit('status', status('SuspendedEV'));
+  cp.emit('meterValues', { power: 7000 });
+  assert.equal(c.getDiagnostics().chargerPowerW, 7000, 'the meter decides, not the status');
+  assert.equal(caps.evcharger_charging_state, 'plugged_in_charging', 'the widget chip reads charging, not READY');
+  assert.equal(caps.evcharger_charging, true);
+
+  // The numbers from the field log: grid 7280W with the car's own 7000W in it.
+  // Netted, the house is 280W and the household cap is nowhere near 32A;
+  // counted as house load, it trimmed the car to 31A.
+  await c.startManual(32);
+  c.onSolarSample({ gridSignedW: 7280, pvW: 3670, batteryW: 0 });
+  assert.equal(caps.charge_current_limit, 32);
+  c.destroy();
+});
+
+test('a genuine suspend still nets as zero, and standby draw does not count as charging', () => {
+  const { c, cp, caps } = makeBoundController();
+  cp.emit('status', status('Charging'));
+  cp.emit('meterValues', { power: 7000 });
+  cp.emit('status', status('SuspendedEV'));
+  assert.equal(c.getDiagnostics().chargerPowerW, 0,
+    'the last Charging reading does not count once suspended - it would overstate the car\'s draw');
+  assert.equal(caps.measure_power, 0, 'and the reading is still zeroed at the transition');
+  assert.equal(caps.evcharger_charging_state, 'plugged_in');
+
+  cp.emit('meterValues', { power: 40 });
+  assert.equal(c.getDiagnostics().chargerPowerW, 0, 'a few watts of standby is not delivery');
+  assert.equal(caps.evcharger_charging_state, 'plugged_in');
+  assert.equal(caps.evcharger_charging, false);
+  c.destroy();
+});

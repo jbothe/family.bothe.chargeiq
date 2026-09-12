@@ -206,6 +206,12 @@ export function fmtDuration(ms: number): string {
 /** OCPP statuses that mean a vehicle is connected. */
 const PLUGGED = ['Preparing', 'Charging', 'SuspendedEV', 'SuspendedEVSE', 'Finishing'];
 
+/** Statuses a Wallbox has been seen to report while still delivering - see isDeliveringPower(). */
+const SUSPENDED = ['SuspendedEV', 'SuspendedEVSE'];
+
+/** Metered draw below this in a suspended status is standby, not charging. */
+const DELIVERING_MIN_W = 100;
+
 /** amps: 0 = pause (hold 0A, keep any live session alive), >0 = charge at that current. */
 interface Decision {
   mode: ChargeMode;
@@ -284,6 +290,9 @@ export class ChargeController {
    * fresh MeterValues yet is read as unknown rather than a stale reading.
    */
   private lastPowerW: number | null = null;
+
+  /** A MeterValues reading has arrived since the status last changed - see isDeliveringPower(). */
+  private meteredSinceStatus = false;
 
   /** null until the first energy reading this connection - see chargingTokens(). */
   private lastEnergyKwh: number | null = null;
@@ -750,6 +759,7 @@ export class ChargeController {
     if (cachedReadings) this.onMeterValues(cachedReadings);
 
     this.requestFreshState();
+    this.configureCharger().catch((e) => this.host.error('configureCharger', e));
 
     this.host.log(`Controller bound to ${cp.identity}`);
     this.tick(new Date(), 'bind');
@@ -772,11 +782,17 @@ export class ChargeController {
   private async configureCharger(): Promise<void> {
     if (!this.cp) return;
     try {
-      await this.cp.changeConfiguration('MeterValueSampleInterval', String(this.cfg.meterSampleIntervalSec));
-      await this.cp.changeConfiguration(
+      const interval = await this.cp.changeConfiguration('MeterValueSampleInterval', String(this.cfg.meterSampleIntervalSec));
+      // Current.Offered is what the charger actually advertises to the car, which its
+      // own max-current setting or load management can hold below a profile it accepted.
+      // Nothing parses it; the unhandled-measurand log reports it.
+      const measurands = await this.cp.changeConfiguration(
         'MeterValuesSampledData',
-        'Power.Active.Import,Current.Import,Voltage,Energy.Active.Import.Register',
+        'Power.Active.Import,Current.Import,Voltage,Energy.Active.Import.Register,Current.Offered',
       );
+      if (interval !== 'Accepted' || measurands !== 'Accepted') {
+        this.host.log(`[charger] MeterValues config not accepted (interval ${interval}, measurands ${measurands})`);
+      }
     } catch (err) {
       this.host.log('Charger rejected MeterValues config (continuing):', (err as Error).message);
     }
@@ -920,6 +936,7 @@ export class ChargeController {
       this.host.setCapability('evcharger_charging', false);
     }
     this.lastStatusValue = info.status;
+    if (changed) this.meteredSinceStatus = false;
     // measure_power/measure_current are otherwise only ever written by
     // onMeterValues() - but a charger stops sending MeterValues once a
     // session ends (e.g. on unplug: confirmed on real hardware, Available
@@ -975,7 +992,18 @@ export class ChargeController {
 
   private onMeterValues(r: Readings): void {
     if (r.power !== undefined) {
-      this.lastPowerW = r.power; this.host.setCapability('measure_power', r.power);
+      this.lastPowerW = r.power;
+      this.meteredSinceStatus = true;
+      this.host.setCapability('measure_power', r.power);
+      // The meter corrects the charging state shown for a suspended status - see
+      // isDeliveringPower(). (onStatus() sets it from the status alone, which is
+      // right at the moment of the change: nothing has been metered since.)
+      if (this.lastStatusValue != null && SUSPENDED.includes(this.lastStatusValue)) {
+        const delivering = this.isDeliveringPower();
+        this.host.setCapability('evcharger_charging_state',
+          delivering ? 'plugged_in_charging' : toChargingState(this.lastStatusValue));
+        this.host.setCapability('evcharger_charging', delivering);
+      }
     }
     if (r.current !== undefined) this.host.setCapability('measure_current', r.current);
     if (r.voltage !== undefined) this.host.setCapability('measure_voltage', r.voltage);
@@ -1106,10 +1134,19 @@ export class ChargeController {
    * for a session it's already running (some Wallbox firmware, apparently)
    * would otherwise leave `lastPowerW` permanently un-netted-out everywhere it
    * matters (solar surplus calc, household cap), even while genuinely
-   * delivering power. Status is the more reliable ground truth here.
+   * delivering power.
+   *
+   * Status alone isn't enough either: a Wallbox can report SuspendedEV while
+   * delivering full power (7 kW for minutes after a replug, never reporting
+   * Charging). In a suspended status the meter decides - but only a reading
+   * taken since the status changed, since at a real suspend the last reading is
+   * still the full charging draw, and counting it would let the household cap
+   * allow more than the house has.
    */
   private isDeliveringPower(): boolean {
-    return this.lastStatusValue === 'Charging';
+    if (this.lastStatusValue === 'Charging') return true;
+    return this.lastStatusValue != null && SUSPENDED.includes(this.lastStatusValue)
+      && this.meteredSinceStatus && (this.lastPowerW ?? 0) >= DELIVERING_MIN_W;
   }
 
   /**

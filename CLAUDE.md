@@ -311,8 +311,9 @@ next move.
   (genuinely awaiting one) - not once already `Charging`/`SuspendedEV`/`SuspendedEVSE`. Whether a
   write goes out at all is reconciled against the limit the charger last accepted - see "Writes
   reconcile" above. `isCharging()` (`transactionId != null`) is **not** a reliable "is power
-  actually flowing" signal for this reason - `ChargeController.isDeliveringPower()` (`lastStatusValue
-  === 'Charging'`) is used instead everywhere `chargerPowerW`/`lastPowerW` needs netting out (solar
+  actually flowing" signal for this reason - `ChargeController.isDeliveringPower()` (`Charging`, or
+  a suspended status with fresh metered draw - see the `SuspendedEV` bullet below) is used instead
+  everywhere `chargerPowerW`/`lastPowerW` needs netting out (solar
   surplus calc, household cap) - otherwise the charger's own draw reads as 0 forever in exactly the
   same stuck-transactionId scenario, making household-cap headroom look far tighter than reality.
   **`lastPowerW` itself defaults to `null` ("no `MeterValues` yet this connection"), not `0`** - found
@@ -354,6 +355,17 @@ next move.
   once `applyIdleReconciliation()` actually clears it (or there was never a transaction to begin
   with), a subsequent `Available` nets as a normal confirmed `0` rather than being stuck "unavailable"
   forever.
+- **A Wallbox can report `SuspendedEV` while delivering full power** - confirmed on hardware after a
+  replug: 7 kW / 31.6A for minutes with no `Charging` report at all. Trusting the status alone netted
+  the car's own draw as 0, so the household cap counted it as house load (trimming 32A to 31A with the
+  real house at ~300W) and the widget chip read `READY`. In `SuspendedEV`/`SuspendedEVSE`,
+  `isDeliveringPower()` lets the meter decide, but only a reading taken *since the status changed*
+  (`meteredSinceStatus`) and above `DELIVERING_MIN_W` (100W). The since-the-change rule is
+  load-bearing: at a genuine `Charging → SuspendedEV` the last reading is still the full charging
+  draw, and counting it would overstate the car's draw - the unsafe direction, letting the cap allow
+  more than the house has. A flag rather than timestamps, because a status and a reading can land in
+  the same millisecond. `onMeterValues()` also corrects `evcharger_charging_state` and
+  `evcharger_charging` from it; the `started`/`paused` Flow events still follow the reported status.
 - **The controller never issues `RemoteStopTransaction`.** Every "don't charge" decision (manual
   off, no schedule/solar target, stale solar feed, disconnected latch) resolves to `amps: 0` (pause)
   in `ChargeController.resolve()`/`tick()`, never a hard stop. The Wallbox holds `Finishing` until a
@@ -442,7 +454,12 @@ next move.
   almost nothing about the *vehicle* - `SoC` (the one real EV datum, and only over ISO 15118, not
   plain PWM), `Current.Offered`, `Temperature`, or a vendor measurand would otherwise be discarded
   in silence, so this makes what a real Wallbox actually sends discoverable from `homey app run`
-  rather than assumed.
+  rather than assumed. **`Current.Offered` is requested on purpose** (`configureCharger()`, on every
+  fresh bind as well as on boot, since an app restart doesn't reboot the charger), and deliberately
+  left unparsed so this log is what reports it. It's what the charger actually advertises to the car,
+  and an accepted `SetChargingProfile` doesn't guarantee it: the Wallbox's own max-current setting or
+  load management can hold it lower. It was once dropped on the assumption that it always equals
+  what the app last wrote - that's the assumption it now exists to check.
 - Settings pages must include `<script src="/homey.js" data-origin="settings">`; widgets get their
   runtime injected automatically (no include, and keep widget JS **inline/single-file**).
 
