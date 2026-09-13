@@ -3116,3 +3116,439 @@ test('an accepted TxProfile write is not followed by a pointless retry', async (
   await settle();
   assert.deepEqual(profileTxIds(), [48], 'the retry is specific to a rejection');
 });
+
+// ---------------------------------------------------------------------------
+// Reporting a solar feed that has stopped delivering
+// ---------------------------------------------------------------------------
+
+/** A controller whose warnings and logs are both captured. */
+function makeWarnController(extraSettings: Record<string, unknown> = {}, cs?: CentralSystem): {
+  c: ChargeController; warnings: Array<string | null>; logs: string[];
+} {
+  const store: Record<string, unknown> = { schedule: [] };
+  const settings: Record<string, unknown> = {
+    minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdA: 63, householdPhases: 1, ...extraSettings,
+  };
+  const warnings: Array<string | null> = [];
+  const logs: string[] = [];
+  const host: ControllerHost = {
+    identity: 'X',
+    setCapability: () => {},
+    getSetting: <T>(k: string) => settings[k] as T,
+    getStore: <T>(k: string) => store[k] as T,
+    setStore: async (k, v) => {
+      store[k] = v;
+    },
+    setAvailable: () => {},
+    setUnavailable: () => {},
+    setWarning: (m) => {
+      warnings.push(m);
+    },
+    log: (...a) => {
+      logs.push(a.join(' '));
+    },
+    error: () => {},
+  };
+  const c = new ChargeController(
+    host,
+    cs ?? ({ getChargePoint: () => undefined, on: () => {}, removeListener: () => {} } as unknown as CentralSystem),
+  );
+  c.init();
+  return { c, warnings, logs };
+}
+
+const HOUR_MS = 3600_000;
+
+test('a solar feed that stops delivering is reported, and cleared when it comes back', () => {
+  // A SolarEdge app wedged on a three-day-old reading.
+  const { c, warnings, logs } = makeWarnController();
+  c.onSolarSample({ gridSignedW: -3000, pvW: 4440, batteryW: 0 }, Date.now() - 3 * 24 * HOUR_MS);
+  c.tick(new Date(), 'timer');
+
+  assert.equal(warnings[warnings.length - 1], 'Solar feed stale - no update from the solar app. Solar charging is paused, '
+    + 'and the household/charger-circuit limits are not being applied.');
+  assert.ok(logs.some((l) => l.includes('[solar] feed stale - nothing received for 3d')),
+    'the log carries the age; the banner deliberately does not (it would rewrite every minute)');
+
+  warnings.length = 0;
+  logs.length = 0;
+  c.tick(new Date(), 'timer');
+  assert.equal(warnings.length, 0, 'the banner is written on the transition, not on every tick');
+  assert.equal(logs.filter((l) => l.includes('feed stale')).length, 0, 'and neither is the log line');
+
+  c.onSolarSample({ gridSignedW: -3000, pvW: 4440, batteryW: 0 });
+  assert.equal(warnings[warnings.length - 1], null, 'a fresh sample clears the banner');
+  assert.ok(logs.some((l) => l.includes('[solar] feed recovered')));
+  c.destroy();
+});
+
+test('a feed that has never delivered anything is not reported as stale', () => {
+  // e.g. a Homey with no solar app at all.
+  const { c, warnings, logs } = makeWarnController();
+  c.tick(new Date(), 'timer');
+  assert.equal(c.solarFeedAgeMs(), null);
+  assert.equal(warnings.filter((w) => w != null).length, 0, 'no banner');
+  assert.equal(logs.filter((l) => l.includes('feed stale')).length, 0, 'and nothing in the log either');
+  c.destroy();
+});
+
+test('a brief gap in the solar feed drops the caps without raising a banner', () => {
+  // 90s trips the 60s control gate but not the 5-minute reporting threshold.
+  const { c, warnings } = makeWarnController({ sharedCircuitA: 32, sharedCircuitIncludeSolar: true });
+  c.onSolarSample({ gridSignedW: -3000, pvW: 4440, batteryW: 0 }, Date.now() - 90_000);
+  c.tick(new Date(), 'timer');
+  assert.equal(c.getDiagnostics().solarFeed.stale, false, '90s is stale for the caps but not worth reporting');
+  assert.equal(warnings.filter((w) => w != null).length, 0);
+  c.destroy();
+});
+
+test('a charger fault outranks the solar-feed banner, and does not clobber it', () => {
+  const fakeClient: RpcClient = {
+    identity: 'X', handle: () => {}, call: async () => ({ status: 'Accepted' }), close: async () => {}, on: () => {},
+  };
+  const cp = new ChargePoint({
+    identity: 'X', authorize: () => true, nextTransactionId: () => 1, livenessTimeoutMs: 0,
+  });
+  cp.attach(fakeClient);
+  const cs = new FakeCentralSystem() as unknown as CentralSystem;
+  const { c, warnings } = makeWarnController({}, cs);
+  cs.emit('connect', cp);
+
+  c.onSolarSample({ gridSignedW: -3000, pvW: 4440, batteryW: 0 }, Date.now() - 3 * 24 * HOUR_MS);
+  c.tick(new Date(), 'timer');
+  assert.ok(String(warnings[warnings.length - 1]).startsWith('Solar feed stale'));
+
+  cp.emit('status', { connectorId: 1, errorCode: 'GroundFailure', status: 'Faulted' });
+  assert.equal(warnings[warnings.length - 1], 'Charger fault: GroundFailure',
+    'the charger\'s own problem is the one worth showing');
+
+  cp.emit('status', { connectorId: 1, errorCode: 'NoError', status: 'Available' });
+  assert.ok(String(warnings[warnings.length - 1]).startsWith('Solar feed stale'),
+    'and clearing the fault surfaces the stale feed again rather than leaving nothing');
+  c.destroy();
+});
+
+test('the decision line says why a boost-enabled window fell back to its floor', () => {
+  const { c, logs } = makeController([{
+    days: [0, 1, 2, 3, 4, 5, 6], start: '00:00', end: '00:00', currentA: 12, boostToCap: true,
+  }], {
+    sharedCircuitA: 32, sharedCircuitBufferA: 2, sharedCircuitIncludeSolar: true, solarStaleSec: 60,
+  });
+  assert.ok(logs.some((l) => l.includes('boost enabled, but shared-circuit cap unavailable - no solar sample received yet')),
+    'before any sample, the cap is unavailable because nothing has been received');
+
+  logs.length = 0;
+  // A sample that arrived, then went quiet for longer than solarStaleSec.
+  c.onSolarSample({ gridSignedW: -4000, pvW: 4440, batteryW: 0 }, Date.now() - 200_000);
+  c.tick(new Date(), 'timer');
+  assert.ok(logs.some((l) => l.includes('shared-circuit cap unavailable - solar feed stale, last sample')),
+    'a feed that has gone quiet is named as the reason, not left as a bare "unavailable"');
+  c.destroy();
+});
+
+// ---------------------------------------------------------------------------
+// A target resolved before the charger connects still has to reach it
+// ---------------------------------------------------------------------------
+
+test('a target resolved while the charger is disconnected is written once it connects', async () => {
+  const calls: Array<{ method: string; params: unknown }> = [];
+  const fakeClient: RpcClient = {
+    identity: 'X',
+    handle: () => {},
+    call: async (method: string, params: unknown) => {
+      calls.push({ method, params });
+      return { status: 'Accepted' };
+    },
+    close: async () => {},
+    on: () => {},
+  };
+  const cp = new ChargePoint({ identity: 'X', authorize: () => true, nextTransactionId: () => 1 });
+  cp.attach(fakeClient);
+
+  // Always-on window (end <= start wraps a full 24h) with boost enabled, and a
+  // transaction id restored from a previous process - the app-restart case.
+  const store: Record<string, unknown> = {
+    transactionId: 93,
+    schedule: [{
+      days: [0, 1, 2, 3, 4, 5, 6], start: '00:00', end: '00:00', currentA: 12, boostToCap: true,
+    }],
+  };
+  const settings: Record<string, unknown> = {
+    minAmps: 6,
+    maxAmps: 32,
+    phases: 1,
+    voltage: 230,
+    maxHouseholdA: 63,
+    householdPhases: 1,
+    sharedCircuitA: 32,
+    sharedCircuitBufferA: 2,
+    sharedCircuitIncludeSolar: true,
+    sharedCircuitIncludeBattery: true,
+  };
+  const logs: string[] = [];
+  const host: ControllerHost = {
+    identity: 'X',
+    setCapability: () => {},
+    getSetting: <T>(k: string) => settings[k] as T,
+    getStore: <T>(k: string) => store[k] as T,
+    setStore: async (k, v) => {
+      store[k] = v;
+    },
+    setAvailable: () => {},
+    setUnavailable: () => {},
+    setWarning: () => {},
+    log: (...a) => {
+      logs.push(a.join(' '));
+    },
+    error: () => {},
+  };
+  const cs = new FakeCentralSystem() as unknown as CentralSystem;
+  const c = new ChargeController(host, cs);
+  c.init(); // nothing connected yet; no solar sample yet -> the 12A floor
+
+  // The first solar sample beats the charger's reconnect (by ~11s on hardware),
+  // so the boosted target is resolved while nothing is connected.
+  c.onSolarSample({ gridSignedW: -4000, pvW: 4440, batteryW: 0 });
+  assert.equal(calls.length, 0, 'nothing is written while disconnected');
+  assert.ok(logs.some((l) => l.includes('-> 32A')), 'the boosted target was resolved before the charger connected');
+
+  cs.emit('connect', cp);
+  await new Promise((r) => setTimeout(r, 0));
+
+  const profiles = calls.filter((k) => k.method === 'SetChargingProfile');
+  assert.equal(profiles.length, 1, 'connecting is a write-eligibility edge, even with an unchanged target');
+  assert.ok(logs.some((l) => l.includes('[charger] setting profile: 32A')),
+    'the target the charger missed is the one it gets');
+  c.destroy();
+});
+
+// ---------------------------------------------------------------------------
+// Writes reconcile against what the charger accepted, not the last decision
+// ---------------------------------------------------------------------------
+
+/**
+ * A controller bound to a real ChargePoint through a CentralSystem the test
+ * drives, with every SetChargingProfile limit captured and a switch to make
+ * the charger reject them.
+ */
+function makeWriteRig(writeThrottleMs: number): {
+  c: ChargeController; cp: ChargePoint; cs: CentralSystem; writes: number[];
+  caps: Record<string, unknown>; setReject(v: boolean): void;
+} {
+  const writes: number[] = [];
+  let reject = false;
+  const fakeClient: RpcClient = {
+    identity: 'X',
+    handle: () => {},
+    call: async (method: string, params?: unknown) => {
+      if (method !== 'SetChargingProfile') return { status: 'Accepted' };
+      writes.push((params as { csChargingProfiles: { chargingSchedule: { chargingSchedulePeriod: [{ limit: number }] } } })
+        .csChargingProfiles.chargingSchedule.chargingSchedulePeriod[0].limit);
+      return { status: reject ? 'Rejected' : 'Accepted' };
+    },
+    close: async () => {},
+    on: () => {},
+  };
+  const cp = new ChargePoint({
+    identity: 'X', authorize: () => true, nextTransactionId: () => 1, livenessTimeoutMs: 0,
+  });
+  cp.attach(fakeClient);
+  const store: Record<string, unknown> = { schedule: [] };
+  const settings: Record<string, unknown> = {
+    minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdA: 63, householdPhases: 1, writeThrottleMs,
+  };
+  const caps: Record<string, unknown> = {};
+  const host: ControllerHost = {
+    identity: 'X',
+    setCapability: (k, v) => {
+      caps[k] = v;
+    },
+    getSetting: <T>(k: string) => settings[k] as T,
+    getStore: <T>(k: string) => store[k] as T,
+    setStore: async (k, v) => {
+      store[k] = v;
+    },
+    setAvailable: () => {},
+    setUnavailable: () => {},
+    setWarning: () => {},
+    log: () => {},
+    error: () => {},
+  };
+  const cs = new FakeCentralSystem() as unknown as CentralSystem;
+  const c = new ChargeController(host, cs);
+  c.init();
+  cs.emit('connect', cp);
+  cp.emit('status', { connectorId: 1, errorCode: 'NoError', status: 'Charging' });
+  return {
+    c,
+    cp,
+    cs,
+    writes,
+    caps,
+    setReject: (v) => {
+      reject = v;
+    },
+  };
+}
+
+const waitMs = (ms = 0) => new Promise((r) => setTimeout(r, ms));
+
+test('a write lost in a reconnect gap between ticks is re-sent when the charger comes back', async () => {
+  // A disconnect/reconnect between two ticks: the throttled write fires into
+  // the gap and is dropped, and the target never changes again to resend it.
+  const {
+    c, cs, cp, writes,
+  } = makeWriteRig(200);
+  await waitMs();
+  writes.length = 0;
+
+  await c.startManual(16); // throttled behind the status-driven write just made
+  assert.deepEqual(writes, [], 'deferred by the write throttle');
+
+  cs.emit('disconnect', cp); // no tick
+  await waitMs(250); // the deferred write fires into the gap, and is dropped
+  assert.deepEqual(writes, [], 'nothing can reach a disconnected charger');
+
+  cs.emit('connect', cp);
+  await waitMs();
+  assert.deepEqual(writes, [16], 'the reconnect re-establishes the limit the gap swallowed');
+  c.destroy();
+});
+
+test('a same-ChargePoint reconnect re-establishes the limit, even with an unchanged target', async () => {
+  const {
+    c, cs, cp, writes,
+  } = makeWriteRig(0);
+  await c.startManual(16);
+  await waitMs();
+  assert.equal(writes[writes.length - 1], 16);
+  writes.length = 0;
+
+  cs.emit('connect', cp); // client swapped under the same ChargePoint - the charger may have rebooted
+  await waitMs();
+  assert.deepEqual(writes, [16], 'what the charger was last told is not assumed to have survived');
+  c.destroy();
+});
+
+test('a rejected write is retried on the next tick instead of being abandoned', async () => {
+  const {
+    c, writes, caps, setReject,
+  } = makeWriteRig(0);
+  await waitMs();
+  setReject(true);
+  writes.length = 0;
+  await c.startManual(16);
+  await waitMs();
+  assert.deepEqual(writes, [16], 'attempted once, and rejected');
+  assert.equal(caps.charge_current_applied, 0, 'the applied limit stays at the last one the charger took');
+
+  setReject(false);
+  c.tick(new Date(), 'timer'); // previously: target unchanged, so nothing was ever sent again
+  await waitMs();
+  assert.deepEqual(writes, [16, 16]);
+  assert.equal(caps.charge_current_applied, 16, 'and once accepted, it is recorded as applied');
+  c.destroy();
+});
+
+test('a charger rejecting every limit is retried once per tick, not in a loop', { timeout: 3000 }, async () => {
+  // Retrying from the write's own completion at writeThrottleMs 0 was an endless
+  // loop. The timeout makes a recurrence fail rather than hang.
+  const {
+    c, writes, setReject,
+  } = makeWriteRig(0);
+  setReject(true);
+  await c.startManual(16);
+  await waitMs(20);
+  const before = writes.length;
+  assert.ok(before <= 3, `a handful of attempts, not a loop (saw ${before})`);
+
+  // Real ticks are seconds apart; yield between them so each finds the last
+  // attempt settled (back-to-back ticks correctly find it still in flight).
+  for (let i = 0; i < 3; i += 1) {
+    c.tick(new Date(), 'timer');
+    await waitMs(5); // eslint-disable-line no-await-in-loop
+  }
+  assert.equal(writes.length - before, 3, 'exactly one retry per tick');
+  c.destroy();
+});
+
+test('the applied limit is published on acceptance and cleared when the link drops', async () => {
+  const {
+    c, cs, cp, caps,
+  } = makeWriteRig(0);
+  await c.startManual(20);
+  await waitMs();
+  assert.equal(caps.charge_current_limit, 20, 'what the controller decided');
+  assert.equal(caps.charge_current_applied, 20, 'and what the charger accepted');
+
+  cs.emit('disconnect', cp);
+  assert.equal(caps.charge_current_applied, null, 'unknown once the link is gone - never the last figure as if current');
+  c.destroy();
+});
+
+test('binding asks the charger to report Current.Offered, and logs it if the charger refuses', async () => {
+  const configured: Array<{ key: string; value: string }> = [];
+  const fakeClient: RpcClient = {
+    identity: 'X',
+    handle: () => {},
+    call: async (method: string, params?: unknown) => {
+      if (method !== 'ChangeConfiguration') return { status: 'Accepted' };
+      configured.push(params as { key: string; value: string });
+      return { status: 'Rejected' };
+    },
+    close: async () => {},
+    on: () => {},
+  };
+  const cp = new ChargePoint({
+    identity: 'X', authorize: () => true, nextTransactionId: () => 1, livenessTimeoutMs: 0,
+  });
+  cp.attach(fakeClient);
+  const cs = new FakeCentralSystem() as unknown as CentralSystem;
+  const { c, logs } = makeWarnController({}, cs);
+  cs.emit('connect', cp); // no BootNotification - an app restart doesn't reboot the charger
+  await waitMs(5);
+
+  const sampled = configured.find((k) => k.key === 'MeterValuesSampledData');
+  assert.ok(sampled?.value.split(',').includes('Current.Offered'), 'requested on bind, not only on boot');
+  assert.ok(logs.some((l) => l.includes('MeterValues config not accepted (interval Rejected, measurands Rejected)')),
+    'a refusal is reported, rather than the measurand just never appearing');
+  c.destroy();
+});
+
+// ---------------------------------------------------------------------------
+// A Wallbox can report SuspendedEV while delivering full power
+// ---------------------------------------------------------------------------
+
+test('a charger delivering in SuspendedEV is netted from its meter and shown as charging', async () => {
+  const { c, cp, caps } = makeBoundController({}, { maxHouseholdA: 63 });
+  cp.emit('status', status('SuspendedEV'));
+  cp.emit('meterValues', { power: 7000 });
+  assert.equal(c.getDiagnostics().chargerPowerW, 7000, 'the meter decides, not the status');
+  assert.equal(caps.evcharger_charging_state, 'plugged_in_charging', 'the widget chip reads charging, not READY');
+  assert.equal(caps.evcharger_charging, true);
+
+  // The numbers from the field log: grid 7280W with the car's own 7000W in it.
+  // Netted, the house is 280W and the household cap is nowhere near 32A;
+  // counted as house load, it trimmed the car to 31A.
+  await c.startManual(32);
+  c.onSolarSample({ gridSignedW: 7280, pvW: 3670, batteryW: 0 });
+  assert.equal(caps.charge_current_limit, 32);
+  c.destroy();
+});
+
+test('a genuine suspend still nets as zero, and standby draw does not count as charging', () => {
+  const { c, cp, caps } = makeBoundController();
+  cp.emit('status', status('Charging'));
+  cp.emit('meterValues', { power: 7000 });
+  cp.emit('status', status('SuspendedEV'));
+  assert.equal(c.getDiagnostics().chargerPowerW, 0,
+    'the last Charging reading does not count once suspended - it would overstate the car\'s draw');
+  assert.equal(caps.measure_power, 0, 'and the reading is still zeroed at the transition');
+  assert.equal(caps.evcharger_charging_state, 'plugged_in');
+
+  cp.emit('meterValues', { power: 40 });
+  assert.equal(c.getDiagnostics().chargerPowerW, 0, 'a few watts of standby is not delivery');
+  assert.equal(caps.evcharger_charging_state, 'plugged_in');
+  assert.equal(caps.evcharger_charging, false);
+  c.destroy();
+});

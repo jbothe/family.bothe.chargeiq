@@ -13,8 +13,9 @@ const SOLAREDGE_APP = 'bothe.family.solaredge';
  * fire several independent listener callbacks within the same real-world
  * moment - confirmed via a real log with 3 near-duplicate emits ~150ms apart,
  * each driving its own downstream ChargeController.tick(). Debounced (reset
- * on every update, not a fixed delay from the first) so a burst of any size
- * collapses into one emit of the latest merged sample. Generous on purpose -
+ * on every update, not a fixed delay from the first, but never past
+ * SAMPLE_MAX_WAIT_MS in total - see there) so a burst of any size collapses
+ * into one emit of the latest merged sample. Generous on purpose -
  * per-role updates in practice are sparse (well under SolarEdge's ~10s report
  * cadence, ChargeController's TICK_MS backstop, and solarStaleMs), so this
  * only adds latency to reaching a quiet point, not to the freshness of the
@@ -34,6 +35,19 @@ const SOLAREDGE_APP = 'bothe.family.solaredge';
  * SAMPLE_DEBOUNCE_MS later than an undebounced feed would have caught it.
  */
 const SAMPLE_DEBOUNCE_MS = 1000;
+
+/**
+ * Cap on how long updates can keep resetting the debounce. Without it a feed
+ * updating faster than SAMPLE_DEBOUNCE_MS never emits at all, and nothing else
+ * notices: lastUpdateAt stays fresh, so checkAndRecover() sees a healthy feed.
+ */
+const SAMPLE_MAX_WAIT_MS = 5000;
+
+/** emitSample()'s delay. pendingSince is when the pending emit was first scheduled, null if none. */
+export function debounceDelay(pendingSince: number | null, now: number): number {
+  if (pendingSince == null) return SAMPLE_DEBOUNCE_MS;
+  return Math.max(0, Math.min(SAMPLE_DEBOUNCE_MS, pendingSince + SAMPLE_MAX_WAIT_MS - now));
+}
 
 /**
  * How often the feed checks whether it is still actually receiving anything.
@@ -153,6 +167,9 @@ export class SolarFeed extends EventEmitter {
 
   /** Debounces emitSample() - see SAMPLE_DEBOUNCE_MS. */
   private pendingEmit: ReturnType<typeof setTimeout> | null = null;
+
+  /** When the pending emission was first scheduled - see SAMPLE_MAX_WAIT_MS. */
+  private pendingSince: number | null = null;
 
   /** Periodic health check - see RESCAN_INTERVAL_MS. */
   private rescanTimer: ReturnType<typeof setInterval> | null = null;
@@ -312,12 +329,15 @@ export class SolarFeed extends EventEmitter {
   }
 
   private emitSample(): void {
+    const now = Date.now();
     if (this.pendingEmit) clearTimeout(this.pendingEmit);
+    else this.pendingSince = now;
     // eslint-disable-next-line homey-app/global-timers -- unref()'d below, cleared in stop()
     this.pendingEmit = setTimeout(() => {
       this.pendingEmit = null;
+      this.pendingSince = null;
       this.emit('sample', this.sample());
-    }, SAMPLE_DEBOUNCE_MS);
+    }, debounceDelay(this.pendingSince, now));
     this.pendingEmit.unref?.();
   }
 
@@ -344,6 +364,7 @@ export class SolarFeed extends EventEmitter {
     if (this.pendingEmit) {
       clearTimeout(this.pendingEmit);
       this.pendingEmit = null;
+      this.pendingSince = null;
     }
     if (this.rescanTimer) {
       clearInterval(this.rescanTimer);

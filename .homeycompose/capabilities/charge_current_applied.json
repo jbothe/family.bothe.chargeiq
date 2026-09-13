@@ -1,0 +1,12 @@
+{
+  "type": "number",
+  "title": { "en": "Applied Limit" },
+  "desc": { "en": "Current limit the charger last accepted. Compare with Current Limit (what ChargeIQ decided) and Current (what the car is drawing)." },
+  "units": { "en": "A" },
+  "icon": "/assets/capabilities/charge_current_limit.svg",
+  "decimals": 0,
+  "getable": true,
+  "setable": false,
+  "uiComponent": "sensor",
+  "insights": true
+}

@@ -456,3 +456,81 @@ test('an offline charger reports unknown EV power and no commanded amps, not the
     { mag: 7200, dir: 'up' },
   );
 });
+
+// ---------------------------------------------------------------------------
+// A stale solar feed must not be drawn as the live state of the house
+// ---------------------------------------------------------------------------
+
+const STALE_STATE = {
+  solarW: 4440,
+  houseW: 1200,
+  gridW: -3000,
+  batteryW: 800,
+  batterySoc: 64,
+  solarStale: true,
+  solarAgeMs: 3 * 24 * 3600_000,
+  limits: {
+    chargerMaxW: 7360, gridMaxW: 14490, batteryChargePeakW: 3300, batteryDischargePeakW: 3300, solarPeakW: 5720,
+  },
+  charger: {
+    available: true, online: true, powerW: 2691, chargingState: 'plugged_in_charging', limitA: 12,
+  },
+};
+
+test('isSolarStale: only an explicit true counts, so an older payload never reads as stale', () => {
+  assert.equal(PF.isSolarStale({ solarStale: true }), true);
+  assert.equal(PF.isSolarStale({ solarStale: false }), false);
+  assert.equal(PF.isSolarStale({}), false, 'a state payload predating the field is not an outage');
+  assert.equal(PF.isSolarStale(null), false);
+});
+
+test('a stale solar feed renders every feed-derived figure as unknown, not as the last one seen', () => {
+  // A three-day-old reading must not be drawn as the live state of the house.
+  for (const kind of ['solar', 'house', 'battery', 'grid']) {
+    assert.deepEqual(PF.flow(kind, STALE_STATE), { mag: null, dir: null }, `${kind} is unknown while stale`);
+    assert.equal(PF.fmtW((PF.flow(kind, STALE_STATE) as { mag: number | null }).mag), '–',
+      `${kind} renders as a dash`);
+    assert.equal(PF.meter(kind, STALE_STATE), null, `${kind}'s capacity strip is hidden rather than frozen`);
+  }
+  // The charger's own readings come from its MeterValues, not the solar feed.
+  assert.deepEqual(PF.flow('ev', STALE_STATE), { mag: 2691, dir: 'up' }, 'EV is unaffected by a stale solar feed');
+  assert.notEqual(PF.meter('ev', STALE_STATE), null, "and so is the EV tile's own capacity strip");
+
+  assert.equal(PF.busState(STALE_STATE.gridW, STALE_STATE), 'neutral',
+    'the bus stops claiming an export it can no longer see');
+  assert.equal(PF.busState(-3000), 'export', 'the bare-gridW form is unchanged');
+  assert.equal(PF.batterySoc(STALE_STATE), null, 'the battery gauge falls back to no-data');
+  assert.equal(PF.batterySoc({ batterySoc: 64 }), 64, 'and is untouched on a healthy feed');
+});
+
+test('a healthy feed is rendered exactly as before the staleness gate existed', () => {
+  const live = { ...STALE_STATE, solarStale: false, solarAgeMs: 4000 };
+  assert.deepEqual(PF.flow('solar', live), { mag: 4440, dir: 'down' });
+  assert.deepEqual(PF.flow('grid', live), { mag: 3000, dir: 'down' });
+  assert.equal(PF.busState(live.gridW, live), 'export');
+  assert.equal(PF.batterySoc(live), 64);
+  assert.notEqual(PF.meter('solar', live), null);
+});
+
+// ---------------------------------------------------------------------------
+// The charging chip shows what the charger accepted, not just the decision
+// ---------------------------------------------------------------------------
+
+test('chipAmps: a limit the charger has not accepted reads as pending, never as the charging figure', () => {
+  const charging = (extra: Record<string, unknown>) => ({
+    charger: {
+      available: true, online: true, chargingState: 'plugged_in_charging', limitA: 32, ...extra,
+    },
+  });
+  // The field report: chip read a confident "32A" while the car drew ~22A.
+  assert.deepEqual(PF.chipAmps(charging({ appliedA: 22 })), { text: '22A→32A', pending: true });
+  assert.deepEqual(PF.chipAmps(charging({ appliedA: null })), { text: '32A', pending: true },
+    'not yet known (reconnect, new session) is pending too');
+  assert.deepEqual(PF.chipAmps(charging({ appliedA: 32 })), { text: '32A', pending: false });
+  assert.deepEqual(PF.chipAmps(charging({})), { text: '32A', pending: false },
+    'an older payload with no appliedA field renders exactly as before');
+  assert.deepEqual(PF.chipAmps(charging({ appliedA: 22, chargingState: 'plugged_in' })), { text: '', pending: false },
+    'nothing to say when not charging');
+  assert.deepEqual(PF.chipAmps(charging({ appliedA: 22, online: false })), { text: '', pending: false },
+    'or when the charger is offline');
+});

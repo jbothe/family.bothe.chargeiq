@@ -156,6 +156,7 @@
         <button data-preset="unknownBattery">Battery reading unknown</button>
         <button data-preset="unpluggedSchedule">Unplugged + schedule</button>
         <button data-preset="offline">Charger offline 12h</button>
+        <button data-preset="solarStale">Solar feed stale 3d</button>
       </div>
     </section>
 
@@ -220,6 +221,21 @@
         },
         solarW: 0, gridW: 640, batteryW: 0, houseW: 640, batterySoc: 42,
         mode: 'solar', solarEnough: false,
+      },
+      // The solar-side mirror of `offline`: a feed that keeps answering with old data.
+      solarStale: {
+        charger: {
+          available: true,
+          online: true,
+          powerW: 2691,
+          currentA: 11.7,
+          limitA: 12,
+          chargingState: 'plugged_in_charging',
+          charging: true,
+        },
+        solarW: 4440, gridW: -3000, batteryW: 800, houseW: 1200, batterySoc: 64,
+        solarStale: true, solarAgeMs: 3 * 24 * 3600000,
+        mode: 'scheduled',
       },
     };
 

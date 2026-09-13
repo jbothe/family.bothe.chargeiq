@@ -63,6 +63,12 @@ The **App** (`app.ts`) owns the long-lived services and exposes them to the devi
   and nothing ever re-looked. `discover()` rebuilds `present` from what it actually finds, but only
   *after* `getDevices()` succeeds, so a failed rescan doesn't blank known-good state.
   `checkAndRecover(now?)` is public purely so tests can drive it without waiting on real time.
+  **The emit debounce (`SAMPLE_DEBOUNCE_MS`, 1s) is capped by `SAMPLE_MAX_WAIT_MS` (5s)** — reset on
+  every update, but never held past the ceiling. Without it a feed updating faster than the window
+  starves the emit forever: not late samples, *none*, and none of the safety nets catch it, since
+  `lastUpdateAt` is stamped by the very updates doing the starving so `checkAndRecover()` sees a
+  healthy feed, while `ChargeController` loses both hard caps after `solarStaleMs` (60s). The delay
+  calc is the pure `debounceDelay()` so the ceiling is testable without a clock seam.
 - Widget state is **pushed** to the widget via `this.homey.api.realtime('powerflow', …)` every
   10 s (`startWidgetBroadcast`). This is the widget's ongoing data channel. Immediate first paint
   on load goes through a **widget-scoped** pull endpoint (`widgets/power-flow/api.js`'s
@@ -186,11 +192,41 @@ charger, and both now say so on the same line rather than reading like a success
 - `refreshWarning()` is the single owner of `setWarning`: a fault outranks the replug prompt, and
   neither can clobber the other. `onStatus()` previously wrote the banner directly on every status,
   which cleared anything set between reports.
-- Becoming write-eligible again (`regained`) is **urgent** — it bypasses `writeThrottleMs` like a
-  tightening cap does. The charger is running whatever profile predates the gap, and the target
-  usually hasn't changed across the transition (it kept moving while blocked), so the write is
-  triggered only by the eligibility edge; making it wait out the throttle would leave the charger
-  wrong for up to 15s right after the user physically intervened.
+- **Writes reconcile against what the charger *accepted*, not against the last decision.**
+  `appliedAmps` is the limit the charger last accepted on this link and session; `ensureCharging()`
+  writes whenever `writeEligible() && appliedAmps !== target`, every tick, until they match. This
+  replaced an edge-triggered design (write when `desiredAmps` *changed* or eligibility was
+  *regained*, sampled once per tick) that lost writes three ways, each leaving the charger on an old
+  limit while every decision line and the widget chip read the new one: a write fired into a
+  reconnect gap was silently dropped by `writeProfile()` and never re-issued; a charger that rejected
+  twice was abandoned; and a disconnect/reconnect that fit **between two ticks** (the Wallbox's
+  does - seconds, against ticks up to 15s apart, and the disconnect handler doesn't tick) never let
+  the controller see eligibility drop at all. Confirmed twice on real hardware: first as a boost
+  window resolving 32A across an app restart without one `SetChargingProfile`, then as the widget
+  reading a confident `32A` while the car drew ~22A.
+  - `forgetApplied()` resets it to unknown on anything that may have invalidated the charger's
+    state: **every** `bind()` (fresh or same-ChargePoint - the charger may have rebooted), the
+    disconnect edge, and every session change (start/stop, `Finishing`, idle reconciliation - a
+    `TxProfile` belongs to the transaction it was sent for). `init()` restores `transactionId` from
+    the store, which is why `writeEligible()` also requires a live link.
+  - The first write after a reset is **urgent** (`resyncPending`), like a tightening cap: the
+    charger is on whatever predates the gap. It's cleared on the *attempt*, not on acceptance, so a
+    charger that keeps rejecting falls back to the throttled cadence instead of being hammered.
+  - One write at a time, keyed by epoch (`inFlightEpoch` vs `appliedEpoch`): a newer request while
+    one is outstanding is queued (`rewriteUrgent` carries urgency across), **but a call from a
+    superseded epoch never blocks** - a call hanging on a dead socket may not settle until the RPC
+    times out, and the resync on the new link is exactly the write that matters. An acceptance from
+    a superseded epoch is also never recorded as applied.
+  - A **failed** write is never re-issued from its own completion. That was a promise loop with
+    nothing to pace it (at `writeThrottleMs` 0 it pegged the CPU and starved every timer - caught by
+    the test suite hanging). The next tick picks it up instead, so rejection is retried at most once
+    per tick/throttle window. `test/controller.test.ts` pins it with a `{ timeout }` so a recurrence
+    fails rather than hangs.
+  - `charge_current_applied` ("Applied Limit", Insights on) publishes `appliedAmps` (null when
+    unknown), next to `charge_current_limit` (decided) and `measure_current` (drawn) - graphing the
+    three is the no-laptop post-mortem for any "stuck below target" report. The `[decision:…]` line
+    ends `| charger still at 22A` / `| charger limit unknown` while they differ, and the widget chip
+    shows `22A→32A` (see Widget).
 
 ### `transactionId` has two sources, and the charge point's wins
 `ChargePoint`'s `StartTransaction` handler allocates the id and answers the charger **whether or not
@@ -209,6 +245,38 @@ next move.
 ### Key invariants / gotchas
 - **Amps are always floored** (never rounded up) when converting W→A, in `SolarLoop`, the
   household cap, and `clampAmps` — a target must never exceed available surplus/limit.
+- **`SolarLoop`'s `settleMs` is what stabilises the solar loop, not `rampA`.** `availableW` =
+  `chargerPowerW − gridSignedW − …` is only correct if both readings are simultaneous; they are not.
+  Measured on real hardware 2026-08-14 (six manual step pairs, `test/solar-lag.js`): the SolarEdge
+  grid reading lags the OCPP charger reading by **~14s** (up-steps tight at 13.4–14.6s; down-step
+  figures are noisier only because the car drops within a single `MeterValues` sample, so the
+  crossing quantises to ±10s). Against a stale grid figure the loop counts its own last increase a
+  second time as fresh headroom and staircases — a *self-sustained* limit cycle at constant surplus,
+  matching the reported 7A→20A→6A→18A with grid import on every up-swing. Simulated against a plant
+  calibrated from that measurement, the stability boundary is **~17s of lag** — i.e. ~20% margin at
+  the measured value, which is why this shows up intermittently rather than always, and why a
+  slower cloud path (or a real ±2A weather wobble, amplified ~6× at 30s of lag) tips it over.
+  `settleMs` (45s default, `solarSettleSec`) holds the target after any real move so the next
+  decision reads a grid figure that already includes the last one; that makes the effective control
+  period exceed the dead time, and holds flat across the whole 8–46s lag range tested.
+  Consequences, all load-bearing:
+  - **`rampA`'s default is 8, not 3, and lowering it is counterproductive.** Once `settleMs` holds
+    the staircase back, `rampA` only bounds how far one spurious reading can move the target. Small
+    `rampA` on top of `settleMs` just makes tracking sluggish (6A→20A sunrise: 220s at `rampA` 3 vs
+    **70s** at 8 — both perfectly stable; even `rampA` 32 is stable across the range).
+  - **Don't lower `writeThrottleMs` to "improve responsiveness".** It is acting as a stabilising
+    filter: at the measured 14s lag, setting it to 0 makes the loop swing 5A where it was flat.
+  - The lockout gates the **step, not the evaluation** — `availableW` is still computed and returned
+    every sample, so `measure_solar_surplus` and the widget stay live at the feed's cadence.
+  - It never delays **pausing** (that's `minOnMs`'s job) and never touches the hard caps, which are
+    applied downstream in `tick()` and keep their urgent-write bypass.
+  - `lastStepAt` is deliberately separate from `lastChangeAt` (which is stamped only on state
+    transitions and is load-bearing for the `minOnMs`/`minOffMs` dwell windows), and a step that
+    clamps onto the value already held does **not** re-arm it — nothing moved, so there is no effect
+    to wait and observe.
+  `test/solar-loop.test.ts` pins this with a lagged-feed harness: one test asserts the staircase
+  *does* form at `settleMs: 0` (so the regression test can't silently stop testing anything) and
+  another that it doesn't at 45s. Still unverified on hardware — see that section below.
 - Homey fires `registerCapabilityListener` only for *external* (user/Flow) sets, not for the app's
   own `setCapabilityValue`. That's how manual actions are distinguished from the solar loop's own
   slider updates — rely on it; don't add manual-vs-auto flags.
@@ -240,13 +308,12 @@ next move.
   `transactionId` null forever. `ensureCharging()` therefore writes via `TxDefaultProfile` (no
   `transactionId`) whenever the charger's own reported status is plugged-in (not just `TxProfile` when
   a transaction id happens to be known), and only attempts `RemoteStartTransaction` while `Preparing`
-  (genuinely awaiting one) - not once already `Charging`/`SuspendedEV`/`SuspendedEVSE`. It also writes
-  on newly *becoming* eligible (transaction id gained, or charger newly reporting plugged) even if the
-  target amps value itself didn't change across that transition - a write is otherwise only triggered
-  by `desiredAmps` changing, which would silently skip the charger if the decision happened not to
-  move at that exact moment. `isCharging()` (`transactionId != null`) is **not** a reliable "is power
-  actually flowing" signal for this reason - `ChargeController.isDeliveringPower()` (`lastStatusValue
-  === 'Charging'`) is used instead everywhere `chargerPowerW`/`lastPowerW` needs netting out (solar
+  (genuinely awaiting one) - not once already `Charging`/`SuspendedEV`/`SuspendedEVSE`. Whether a
+  write goes out at all is reconciled against the limit the charger last accepted - see "Writes
+  reconcile" above. `isCharging()` (`transactionId != null`) is **not** a reliable "is power
+  actually flowing" signal for this reason - `ChargeController.isDeliveringPower()` (`Charging`, or
+  a suspended status with fresh metered draw - see the `SuspendedEV` bullet below) is used instead
+  everywhere `chargerPowerW`/`lastPowerW` needs netting out (solar
   surplus calc, household cap) - otherwise the charger's own draw reads as 0 forever in exactly the
   same stuck-transactionId scenario, making household-cap headroom look far tighter than reality.
   **`lastPowerW` itself defaults to `null` ("no `MeterValues` yet this connection"), not `0`** - found
@@ -288,6 +355,17 @@ next move.
   once `applyIdleReconciliation()` actually clears it (or there was never a transaction to begin
   with), a subsequent `Available` nets as a normal confirmed `0` rather than being stuck "unavailable"
   forever.
+- **A Wallbox can report `SuspendedEV` while delivering full power** - confirmed on hardware after a
+  replug: 7 kW / 31.6A for minutes with no `Charging` report at all. Trusting the status alone netted
+  the car's own draw as 0, so the household cap counted it as house load (trimming 32A to 31A with the
+  real house at ~300W) and the widget chip read `READY`. In `SuspendedEV`/`SuspendedEVSE`,
+  `isDeliveringPower()` lets the meter decide, but only a reading taken *since the status changed*
+  (`meteredSinceStatus`) and above `DELIVERING_MIN_W` (100W). The since-the-change rule is
+  load-bearing: at a genuine `Charging → SuspendedEV` the last reading is still the full charging
+  draw, and counting it would overstate the car's draw - the unsafe direction, letting the cap allow
+  more than the house has. A flag rather than timestamps, because a status and a reading can land in
+  the same millisecond. `onMeterValues()` also corrects `evcharger_charging_state` and
+  `evcharger_charging` from it; the `started`/`paused` Flow events still follow the reported status.
 - **The controller never issues `RemoteStopTransaction`.** Every "don't charge" decision (manual
   off, no schedule/solar target, stale solar feed, disconnected latch) resolves to `amps: 0` (pause)
   in `ChargeController.resolve()`/`tick()`, never a hard stop. The Wallbox holds `Finishing` until a
@@ -323,6 +401,29 @@ next move.
   on top of a discharging battery still counts), unlike the schedule-boost's binary gate - solar mode
   has no independent floor to fall back on, so zeroing out the entire target over any discharge at
   all would be needlessly conservative there.
+- **A quiet solar feed silently un-boosts a schedule window.** Both hard caps go unavailable once
+  `solarFeedStale()` (60s, `solarStaleSec`) trips, and an unavailable charger-circuit cap collapses a
+  `boostToCap` window back onto its `currentA` floor. `SolarFeed`'s own recovery only reacts after
+  `FEED_SILENT_MS` (30 min), and `tick()`'s "Solar feed stale; failing safe" log only covers solar
+  being the *active* mode - so inside a schedule window a dying feed was otherwise invisible.
+  Confirmed in the field: the user's SolarEdge app wedged holding a **three-day-old** reading. It
+  never stopped answering, so `getDevices()` kept returning plausible values, no capability listener
+  ever fired, and the only symptom was a charger refusing to boost above its 12A floor. Three things
+  now report it, all off one owner:
+  `sharedCircuitCapUnavailableReason()` puts the cause (no rating configured / no sample yet / stale
+  for how long) on the `[decision:...]` line; `refreshSolarFeedHealth()` logs the transition in both
+  directions and drives a **device warning banner** via `refreshWarning()` (ranked below a fault and
+  the replug prompt - both are about the charger itself); and `getDiagnostics().solarFeed` carries
+  `{stale, ageMs}` through to the widget.
+- **Reporting staleness and gating on it are two different thresholds.** `solarStaleMs` (60s) is a
+  *control* gate - dropping the caps for a minute is a cheap, self-correcting fail-safe.
+  `SOLAR_FEED_REPORT_MS` (5 min) is what the user is told, because a banner is a claim to a person
+  and one that flaps every few minutes over ordinary gaps is noise they learn to ignore. The banner
+  text carries **no age** on purpose (`fmtDuration`'s granularity would rewrite it every minute for
+  the first hour); the age goes in the log and the widget instead - the same split the OCPP outage
+  already uses. A feed that has **never** delivered a sample (`lastSolarSampleAt === 0`) is never
+  reported at all: on a Homey with no solar app there is nothing wrong, and nagging about a feed the
+  user never had is worse than saying nothing.
 - Controller diagnostics log via the **app** logger (`this.homey.app.log`) for a short
   `[ChargeIQApp]` prefix; tags are `[charger]`, `[solar]`, `[decision:<trigger>]`, `[mode]`,
   `[config]` (the full resolved config, logged on every `refreshConfig()` - boot and every settings
@@ -353,7 +454,12 @@ next move.
   almost nothing about the *vehicle* - `SoC` (the one real EV datum, and only over ISO 15118, not
   plain PWM), `Current.Offered`, `Temperature`, or a vendor measurand would otherwise be discarded
   in silence, so this makes what a real Wallbox actually sends discoverable from `homey app run`
-  rather than assumed.
+  rather than assumed. **`Current.Offered` is requested on purpose** (`configureCharger()`, on every
+  fresh bind as well as on boot, since an app restart doesn't reboot the charger), and deliberately
+  left unparsed so this log is what reports it. It's what the charger actually advertises to the car,
+  and an accepted `SetChargingProfile` doesn't guarantee it: the Wallbox's own max-current setting or
+  load management can hold it lower. It was once dropped on the assumption that it always equals
+  what the app last wrote - that's the assumption it now exists to check.
 - Settings pages must include `<script src="/homey.js" data-origin="settings">`; widgets get their
   runtime injected automatically (no include, and keep widget JS **inline/single-file**).
 
@@ -362,6 +468,21 @@ next move.
 `POWERFLOW-LOGIC-START/END` markers; `test/powerflow.test.ts` extracts and evaluates that exact
 block, so keep it dependency-free (no imports). It renders live even when the charger is unplugged;
 dims (`.stale`) after ~50 s (5 missed 10s broadcasts) without a realtime update and auto-recovers.
+
+**`PF.isSolarStale()` is the solar-side mirror of `PF.isOffline()`**, and for the same reason: solar,
+house, battery, grid and the battery SoC gauge all come from the solar feed, so once `solarStale` is
+true they render `–` (and their tile capacity strips hide, and the bus reads `neutral`) rather than
+painting a three-day-old reading as the live state of the house. Gated strictly on `=== true` so an
+older state payload without the field never reads as stale. **EV power and its own capacity strip are
+deliberately untouched** - they come from the charger's `MeterValues`, not the feed. `test/widget-preview.html`
+has a `Solar feed stale 3d` preset next to `Charger offline 12h` for previewing it.
+
+**The charging chip's amps are what the charger accepted, not what was decided** (`PF.chipAmps()`).
+`limitA` (`charge_current_limit`) is only the controller's decision; `appliedA`
+(`charge_current_applied`) is what the charger took. When they differ the chip reads `22A→32A`, and an
+unknown `appliedA` marks the target pending - both in the light text colour, while the pill stays green
+because it *is* charging. A few seconds of this after any change is the write throttle; anything
+lasting is the fault. A payload with no `appliedA` field at all renders as before.
 
 **Immediate first paint on load pulls once via `widgets/power-flow/api.js`'s `getState`
 endpoint** (declared in `widget.compose.json`'s own `api` block, not the app-level `api.ts`),
@@ -457,6 +578,18 @@ namespace being connected to socket.io, and `makeCapabilityInstance` only ever c
 re-look at all, which is the entire point of `checkAndRecover()`.
 
 ## Not yet verified on hardware
+The **solar settle lockout** (`settleMs`/`solarSettleSec`, see Key invariants) actually suppressing
+the swing on the real system. The ~14s lag it is sized against *is* a hardware measurement, and the
+loop's behaviour is pinned by unit tests, but the closed-loop result is so far simulation only —
+against a plant model whose EV response, household noise and battery behaviour are all
+approximations. Two specific gaps: the **home battery was pinned at 0W for the whole measurement
+run**, so the SolarEdge battery controller — a second closed loop on the same grid meter, chasing
+the same export, with its own lag — has never been in the picture at all (an attempt to model it was
+too crude to conclude anything); and the measured lag comes from one 15-minute window, whereas the
+cloud path plausibly varies more across a day and across seasons. Re-run `test/solar-lag.js` in
+capture mode during a real solar session to confirm, and watch `battery=` on the `[solar]` lines
+during any residual swings.
+
 The **liveness watchdog** firing against a genuinely half-open link (the failure it exists for) —
 `ChargePoint`'s unit tests drive it with a short `livenessTimeoutMs` and a fake client, which proves
 the timer/teardown logic but not that a real wedged Wallbox link reaches it before `ocpp-rpc`'s own

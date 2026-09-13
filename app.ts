@@ -12,6 +12,7 @@ interface ChargerDeviceLike {
   getDiagnostics?(): {
     availableW: number; solarState: string; targetA: number | null; mode: string;
     chargerPowerW: number | null;
+    solarFeed: { stale: boolean; ageMs: number | null };
     limits: {
       chargerMaxW: number; gridMaxW: number;
       batteryChargePeakW: number; batteryDischargePeakW: number; solarPeakW: number;
@@ -157,12 +158,16 @@ module.exports = class ChargeIQApp extends Homey.App {
     // (diag.chargerPowerW === null, e.g. briefly after a reconnect) rather than guessing.
     const chargerPowerW = diag?.chargerPowerW ?? null;
     const houseW = chargerPowerW != null ? Math.max(0, solar.houseW - chargerPowerW) : solar.houseW;
+    // SolarFeed returns its last sample forever; the controller knows how old it is.
+    const solarFeed = diag?.solarFeed ?? { stale: false, ageMs: null };
     return {
       solarW: solar.pvW,
       houseW,
       gridW: solar.gridSignedW, // import + / export -
       batteryW: solar.batteryW,
       batterySoc: solar.batterySoc,
+      solarStale: solarFeed.stale,
+      solarAgeMs: solarFeed.ageMs,
       surplusW,
       mode: modeInfo.mode,
       scheduleEndAt: modeInfo.scheduleEndAt,
@@ -180,6 +185,8 @@ module.exports = class ChargeIQApp extends Homey.App {
         powerW: (cap('measure_power') as number) ?? 0,
         currentA: (cap('measure_current') as number) ?? 0,
         limitA: (cap('charge_current_limit') as number) ?? null,
+        // What the charger accepted; limitA is only what the controller decided.
+        appliedA: (cap('charge_current_applied') as number) ?? null,
         mode: modeInfo.mode,
         chargingState: cap('evcharger_charging_state'),
         charging: !!cap('evcharger_charging'),

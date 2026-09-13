@@ -3,7 +3,7 @@
 import test from 'node:test';
 import assert from 'node:assert';
 import {
-  mergeSample, SolarFeed, HomeyApiClient, HomeyApiDevice, CapabilityInstance,
+  mergeSample, SolarFeed, HomeyApiClient, HomeyApiDevice, CapabilityInstance, debounceDelay,
 } from '../lib/solar/SolarFeed';
 
 interface FakeCapabilityInstance extends CapabilityInstance {
@@ -480,4 +480,32 @@ test('a failed rediscovery leaves the last known presence intact rather than bla
   fail = true;
   await assert.rejects(() => feed.checkAndRecover(Date.now() + 31 * 60000), /went away/);
   assert.equal(feed.hasGrid(), true, 'the fetch failed before presence was rebuilt, so nothing was lost');
+});
+
+// ---------------------------------------------------------------------------
+// The debounce may delay an emission, but must never withhold one entirely
+// ---------------------------------------------------------------------------
+
+test('the emit debounce is capped, so a feed updating faster than the window cannot starve it', () => {
+  // An uncapped reset-on-every-update debounce never emits while updates keep
+  // arriving inside the window.
+  const start = 1_000_000;
+  assert.equal(debounceDelay(null, start), 1000, 'the first update of a burst waits the full window');
+  assert.equal(debounceDelay(start, start + 500), 1000, 'a reset mid-burst still waits the full window');
+  assert.equal(debounceDelay(start, start + 4200), 800, 'until the ceiling is closer than the window');
+  assert.equal(debounceDelay(start, start + 5000), 0, 'at the ceiling the next update emits immediately');
+  assert.equal(debounceDelay(start, start + 9000), 0, 'and never goes negative past it');
+
+  // Simulated against the real constants: an update every 300ms indefinitely.
+  let pendingSince: number | null = null;
+  let emitAt: number | null = null;
+  for (let t = 0; t <= 20_000; t += 300) {
+    if (emitAt != null && t >= emitAt) {
+      pendingSince = null;
+      emitAt = null;
+    }
+    if (pendingSince == null) pendingSince = t;
+    emitAt = t + debounceDelay(pendingSince, t);
+  }
+  assert.ok(emitAt != null && emitAt <= 20_000 + 1000, 'an emission is always pending within a bounded delay');
 });

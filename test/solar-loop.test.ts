@@ -5,6 +5,8 @@ import assert from 'node:assert';
 import { SolarLoop, SolarLoopConfig } from '../lib/control/SolarLoop';
 
 const T = 100000; // realistic time base (> dwell windows)
+// settleMs 0 by default so the ramp/deadband/dwell cases below keep exercising
+// exactly what they always did; the lockout has its own tests at the bottom.
 const cfg = (): SolarLoopConfig => ({
   voltage: 230,
   phases: 1,
@@ -12,6 +14,7 @@ const cfg = (): SolarLoopConfig => ({
   maxAmps: 31,
   deadbandA: 1,
   rampA: 3,
+  settleMs: 0,
   minOnMs: 1000,
   minOffMs: 1000,
   marginW: 0,
@@ -94,6 +97,99 @@ test('omitting batteryW behaves exactly as before (no battery present)', () => {
   const r = l.evaluate({ gridSignedW: -2300, chargerPowerW: 0, now: T });
   assert.equal(r.availableW, 2300);
   assert.equal(r.target, 10);
+});
+
+/**
+ * Drives a loop against a grid feed that lags the charger reading by
+ * `lagSamples`, with the true surplus held constant - i.e. the exact condition
+ * the settle lockout exists for. The EV is modelled as following the last
+ * target immediately (the worst case: a pure delay with no smoothing from the
+ * car's own ramp). Returns the target after each sample.
+ */
+function runLaggedFeed(loop: SolarLoop, o: {
+  samples: number; surplusA: number; lagSamples: number; periodMs: number; voltage: number;
+}): number[] {
+  const targets: number[] = [];
+  const evHistory: number[] = [];
+  let lastTarget = 0;
+  for (let k = 0; k < o.samples; k++) {
+    const evW = k === 0 ? 0 : lastTarget * o.voltage;
+    evHistory.push(evW);
+    const laggedEvW = k - o.lagSamples >= 0 ? evHistory[k - o.lagSamples] : 0;
+    const r = loop.evaluate({
+      gridSignedW: laggedEvW - o.surplusA * o.voltage,
+      chargerPowerW: evW,
+      now: T + k * o.periodMs,
+    });
+    lastTarget = r.target ?? 0;
+    targets.push(lastTarget);
+  }
+  return targets;
+}
+
+const LAGGED = {
+  samples: 24, surplusA: 12, lagSamples: 2, periodMs: 10000, voltage: 230,
+};
+
+test('a lagged grid feed staircases the target without the settle lockout', () => {
+  // Guards the test below: if this ever stops oscillating, the regression test
+  // has stopped testing anything and the plant model needs revisiting.
+  const c = cfg(); c.settleMs = 0; c.deadbandA = 0;
+  const targets = runLaggedFeed(new SolarLoop(c), LAGGED);
+  const swing = Math.max(...targets) - Math.min(...targets);
+  assert.ok(swing >= 6, `expected a self-generated swing, got ${swing}A from ${targets.join(',')}`);
+});
+
+test('the settle lockout holds a constant surplus steady against the same lagged feed', () => {
+  const c = cfg(); c.settleMs = 45000; c.deadbandA = 0;
+  const targets = runLaggedFeed(new SolarLoop(c), LAGGED);
+  const settled = targets.slice(4); // ignore the initial start transient
+  assert.deepEqual([...new Set(settled)], [12],
+    `expected a flat 12A hold, got ${targets.join(',')}`);
+});
+
+test('the lockout releases once settleMs has passed, and reports surplus throughout', () => {
+  const c = cfg(); c.settleMs = 45000; c.deadbandA = 0;
+  const l = new SolarLoop(c);
+  assert.equal(l.evaluate({ gridSignedW: -2300, chargerPowerW: 0, now: T }).target, 10);
+
+  const held = l.evaluate({ gridSignedW: -6900, chargerPowerW: 0, now: T + 10000 });
+  assert.equal(held.target, 10, 'target held inside the lockout');
+  assert.equal(held.availableW, 6900,
+    'availableW still computed every sample - the surplus capability/widget must stay live');
+
+  assert.equal(l.evaluate({ gridSignedW: -6900, chargerPowerW: 0, now: T + 44000 }).target, 10);
+  assert.equal(l.evaluate({ gridSignedW: -6900, chargerPowerW: 0, now: T + 45000 }).target, 13,
+    'released, then ramp-limited to +3');
+});
+
+test('a step that clamps onto the value already held does not restart the lockout', () => {
+  const c = cfg(); c.settleMs = 45000; c.deadbandA = 0;
+  const l = new SolarLoop(c);
+  assert.equal(l.evaluate({ gridSignedW: -20000, chargerPowerW: 0, now: T }).target, 31, 'starts at max');
+  assert.equal(l.evaluate({ gridSignedW: -20000, chargerPowerW: 0, now: T + 50000 }).target, 31,
+    'still wants more than max - nothing moved');
+  assert.equal(l.evaluate({ gridSignedW: -4600, chargerPowerW: 0, now: T + 51000 }).target, 28,
+    'so the lockout is still measured from the start, not from that no-op');
+});
+
+test('the lockout never delays backing off when the surplus has gone', () => {
+  const c = cfg(); c.settleMs = 45000; c.deadbandA = 0; c.minOnMs = 1000;
+  const l = new SolarLoop(c);
+  assert.equal(l.evaluate({ gridSignedW: -2300, chargerPowerW: 0, now: T }).target, 10);
+  const paused = l.evaluate({ gridSignedW: 500, chargerPowerW: 0, now: T + 2000 });
+  assert.equal(paused.target, 0, 'pausing is governed by minOnMs, not settleMs');
+  assert.equal(paused.state, 'paused');
+});
+
+test('reset() clears the lockout along with the rest of the control state', () => {
+  const c = cfg(); c.settleMs = 45000; c.deadbandA = 0;
+  const l = new SolarLoop(c);
+  l.evaluate({ gridSignedW: -2300, chargerPowerW: 0, now: T });
+  l.reset();
+  assert.equal(l.getState(), 'off');
+  // A fresh start must not be blocked by the previous session's lockout.
+  assert.equal(l.evaluate({ gridSignedW: -2300, chargerPowerW: 0, now: T + 1000 }).target, 10);
 });
 
 test('setConfig() replaces the config used by subsequent evaluate() calls', () => {

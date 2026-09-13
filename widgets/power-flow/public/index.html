@@ -256,6 +256,8 @@
     .chip-icon { width: var(--homey-icon-size-small); height: var(--homey-icon-size-small); display: inline-flex; flex: 0 0 auto; position: relative; top: -1px; }
     .chip-icon svg { display: block; width: 100%; height: 100%; }
     .chip-boost { color: var(--homey-color-orange); }
+    /* Target not yet accepted by the charger (PF.chipAmps): grey text, the pill stays green. */
+    .chip-amps.pending { color: var(--homey-text-color-light); }
     /* text-transform:uppercase text has no descenders, but align-items:center still centers the
        *font's* full ascent/descent line box, not the glyph ink - the unused descender reserve is
        bigger than the unused ascent-to-cap-height reserve for most fonts, so the ink sits high
@@ -459,6 +461,16 @@
         var c = s.charger || {};
         return !!c.available && c.online === false;
       },
+      // Is the solar feed stale? Only an explicit true counts, like isOffline.
+      isSolarStale: function (s) {
+        return (s || {}).solarStale === true;
+      },
+      // Battery charge % for the gauge, or null (no-data grey) when the feed
+      // behind it has stopped moving.
+      batterySoc: function (s) {
+        s = s || {};
+        return PF.isSolarStale(s) ? null : s.batterySoc;
+      },
       // How long the charger has been out of contact, in ms, or null if unknown.
       offlineForMs: function (s, now) {
         if (!PF.isOffline(s)) return null;
@@ -492,6 +504,10 @@
           w = c.available ? (c.powerW || 0) : 0;
           return { mag: w, dir: w > 10 ? 'up' : null };
         }
+        // Everything but EV comes from the solar feed, so a stale feed makes it unknown.
+        if (PF.isSolarStale(s) && (kind === 'solar' || kind === 'house' || kind === 'battery' || kind === 'grid')) {
+          return { mag: null, dir: null };
+        }
         if (kind === 'solar') { w = s.solarW || 0; return { mag: w, dir: w > 10 ? 'down' : null }; }
         if (kind === 'house') { w = s.houseW || 0; return { mag: w, dir: w > 10 ? 'down' : null }; }
         if (kind === 'battery') { w = s.batteryW || 0; return { mag: Math.abs(w), dir: w > 10 ? 'down' : (w < -10 ? 'up' : null) }; }
@@ -513,7 +529,9 @@
         return { color: color, fillHeight: fillHeight, fillY: fillY };
       },
       // Which gradient the power bus should show, using the same +-10W deadband as flow().
-      busState: function (gridW) {
+      // Pass the state as well to show a stale solar feed as neutral.
+      busState: function (gridW, s) {
+        if (PF.isSolarStale(s)) return 'neutral';
         gridW = gridW || 0;
         if (gridW > 10) return 'import';
         if (gridW < -10) return 'export';
@@ -549,6 +567,20 @@
         var c = s.charger || {};
         if (!c.available || PF.isOffline(s) || c.chargingState !== 'plugged_in_charging') return 0;
         return c.limitA != null ? c.limitA : 0;
+      },
+      // Amps text for the charging chip. chargeAmps() is the controller's decision, appliedA
+      // what the charger accepted: show both while they differ, and mark an unknown appliedA
+      // pending. A payload without appliedA renders as before.
+      chipAmps: function (s) {
+        s = s || {};
+        var c = s.charger || {};
+        var target = Math.round(PF.chargeAmps(s));
+        if (!target) return { text: '', pending: false };
+        if (!('appliedA' in c)) return { text: target + 'A', pending: false };
+        if (c.appliedA == null) return { text: target + 'A', pending: true };
+        var applied = Math.round(c.appliedA);
+        if (applied !== target) return { text: applied + 'A→' + target + 'A', pending: true };
+        return { text: target + 'A', pending: false };
       },
       // Which icon represents the current mode - solar splits into two glyphs depending on
       // whether there's currently enough excess to actually charge on it.
@@ -592,6 +624,8 @@
       meter: function (kind, s) {
         s = s || {};
         var lim = s.limits || {};
+        // Same rule as flow(): no strip from a stale solar reading.
+        if (kind !== 'ev' && PF.isSolarStale(s)) return null;
         if (kind === 'ev') {
           var c = s.charger || {};
           if (!c.available || !(lim.chargerMaxW > 0)) return null;
@@ -748,8 +782,9 @@
       var chip = PF.evChip(s, Date.now());
       var chipEl = document.getElementById('ev-chip');
       if (chip && chip.cls === 'charging') {
+        var amps = PF.chipAmps(s);
         chipEl.innerHTML = '<span class="chip-icon">' + ICONS.bolt + '</span>'
-          + Math.round(PF.chargeAmps(s)) + 'A'
+          + '<span class="chip-amps' + (amps.pending ? ' pending' : '') + '">' + amps.text + '</span>'
           + (PF.showBoost(s) ? '<span class="chip-icon chip-boost">' + ICONS.boost + '</span>' : '');
       } else {
         chipEl.innerHTML = chip ? chip.label : '';
@@ -765,7 +800,7 @@
       document.getElementById('battery-val').innerHTML = PF.valHtml(battery.mag);
       document.getElementById('house-val').innerHTML = PF.valHtml(house.mag);
 
-      var bv = PF.batteryVisual(s.batterySoc);
+      var bv = PF.batteryVisual(PF.batterySoc(s));
       document.getElementById('battery-tile').innerHTML = batterySvg(bv) + PF.meterHtml(PF.meter('battery', s), 'top');
 
       // "Flowing" (drives the bus's left-to-right animated gradient, see .bus.flowing) reuses each
@@ -773,7 +808,7 @@
       // dash animation (see .conn.active) - rather than re-deriving it from raw magnitudes,
       // so the bus only animates in exact lockstep with the connectors it's summarizing.
       var flowing = !!(ev.dir || solar.dir || grid.dir || battery.dir || house.dir);
-      document.getElementById('bus').className = 'bus bus-' + PF.busState(s.gridW) + (flowing ? ' flowing' : '');
+      document.getElementById('bus').className = 'bus bus-' + PF.busState(s.gridW, s) + (flowing ? ' flowing' : '');
 
       // All connectors flow in the same blue regardless of tile - the same --icon-blue
       // token the Grid/idle House/EV/Solar tiles themselves use (see the --icon-blue CSS

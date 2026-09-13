@@ -100,6 +100,7 @@ interface ControllerConfig {
   // Solar loop tunables
   deadbandA: number;
   rampA: number;
+  settleMs: number;
   minOnMs: number;
   minOffMs: number;
   marginW: number;
@@ -140,7 +141,10 @@ const DEFAULTS: ControllerConfig = {
   meterSampleIntervalSec: 10,
   writeThrottleMs: 15000,
   deadbandA: 0,
-  rampA: 3,
+  // settleMs is what keeps the solar loop stable; rampA only bounds how far one
+  // bad reading can move the target. Lower just makes tracking sluggish.
+  rampA: 8,
+  settleMs: 45000,
   minOnMs: 3 * 60000,
   minOffMs: 3 * 60000,
   marginW: 0,
@@ -172,6 +176,10 @@ const TICK_MS = 15000;
 // still-live transaction/manual-latch) is debounced by this long so that
 // blip can't be mistaken for a genuine idle charger.
 const IDLE_RECONCILE_DELAY_MS = 5000;
+// How long the solar feed can be silent before the user is told (banner, widget,
+// log). Much longer than solarStaleMs, which only gates the caps: a banner that
+// flaps over ordinary gaps in a healthy feed is noise.
+const SOLAR_FEED_REPORT_MS = 5 * 60000;
 // How long after init() to wait for the charger to (re)connect before calling
 // it offline. A charge point reconnects within seconds of the app starting, so
 // without this every app restart/update would report a spurious offline->online
@@ -197,6 +205,12 @@ export function fmtDuration(ms: number): string {
 
 /** OCPP statuses that mean a vehicle is connected. */
 const PLUGGED = ['Preparing', 'Charging', 'SuspendedEV', 'SuspendedEVSE', 'Finishing'];
+
+/** Statuses a Wallbox has been seen to report while still delivering - see isDeliveringPower(). */
+const SUSPENDED = ['SuspendedEV', 'SuspendedEVSE'];
+
+/** Metered draw below this in a suspended status is standby, not charging. */
+const DELIVERING_MIN_W = 100;
 
 /** amps: 0 = pause (hold 0A, keep any live session alive), >0 = charge at that current. */
 interface Decision {
@@ -266,6 +280,9 @@ export class ChargeController {
 
   private solarStaleWarned = false;
 
+  /** Silent for longer than SOLAR_FEED_REPORT_MS - drives the banner and the widget. */
+  private solarFeedDown = false;
+
   /**
    * null until the first MeterValues since the charger was last confirmed
    * delivering power - see nettedChargerW(). Also reset to null (not 0) by
@@ -273,6 +290,9 @@ export class ChargeController {
    * fresh MeterValues yet is read as unknown rather than a stale reading.
    */
   private lastPowerW: number | null = null;
+
+  /** A MeterValues reading has arrived since the status last changed - see isDeliveringPower(). */
+  private meteredSinceStatus = false;
 
   /** null until the first energy reading this connection - see chargingTokens(). */
   private lastEnergyKwh: number | null = null;
@@ -315,8 +335,30 @@ export class ChargeController {
 
   private awaitingStart = false;
 
-  /** Whether the last ensureCharging() call was eligible to write a profile - see there. */
-  private wasWriteEligible = false;
+  /**
+   * The limit the charger last accepted on this link and session, or null if
+   * unknown. ensureCharging() keeps writing until the target matches it.
+   */
+  private appliedAmps: number | null = null;
+
+  /**
+   * The next write re-establishes an unknown limit, so it skips the throttle.
+   * Cleared when that write is attempted, not accepted, so a charger that keeps
+   * rejecting is retried on the normal cadence.
+   */
+  private resyncPending = true;
+
+  /** Bumped by forgetApplied(), so a write that straddles it can't mark itself applied. */
+  private appliedEpoch = 0;
+
+  /**
+   * Epoch of the SetChargingProfile call in flight, or null. A call from an
+   * older epoch (say, hanging on a dead socket) doesn't block the new link's write.
+   */
+  private inFlightEpoch: number | null = null;
+
+  /** An urgent write was requested while one was in flight. */
+  private rewriteUrgent = false;
 
   private lastWriteAt = 0;
 
@@ -403,6 +445,7 @@ export class ChargeController {
     this.listenTo(this.cs, this.csTeardowns, 'disconnect', (cp: ChargePoint) => {
       if (cp.identity !== this.host.identity) return;
       this.cp = null;
+      this.forgetApplied();
       this.noteLastSeen(cp.getConnectionInfo().lastSeenAt, true);
       this.setOnline(false);
     });
@@ -477,6 +520,7 @@ export class ChargeController {
       writeThrottleMs: g('writeThrottleMs', DEFAULTS.writeThrottleMs),
       deadbandA: g('deadbandA', DEFAULTS.deadbandA),
       rampA: g('rampA', DEFAULTS.rampA),
+      settleMs: g('solarSettleSec', DEFAULTS.settleMs / 1000) * 1000,
       minOnMs: g('minOnSec', DEFAULTS.minOnMs / 1000) * 1000,
       minOffMs: g('minOffSec', DEFAULTS.minOffMs / 1000) * 1000,
       marginW: g('marginW', DEFAULTS.marginW),
@@ -512,6 +556,7 @@ export class ChargeController {
       maxAmps: c.maxAmps,
       deadbandA: c.deadbandA,
       rampA: c.rampA,
+      settleMs: c.settleMs,
       minOnMs: c.minOnMs,
       minOffMs: c.minOffMs,
       marginW: c.marginW,
@@ -576,6 +621,12 @@ export class ChargeController {
     let next: string | null = null;
     if (this.lastFaultCode) next = `Charger fault: ${this.lastFaultCode}`;
     else if (this.needsReplug) next = 'Charging session ended - unplug and replug the cable to resume';
+    // Last: a fault or replug prompt is about the charger itself. No age in the
+    // text, or the banner would be rewritten every minute; the log has it.
+    else if (this.solarFeedDown) {
+      next = 'Solar feed stale - no update from the solar app. Solar charging is paused, '
+        + 'and the household/charger-circuit limits are not being applied.';
+    }
     if (next === this.lastWarning) return;
     this.lastWarning = next;
     this.host.setWarning(next);
@@ -662,11 +713,14 @@ export class ChargeController {
     this.setOnline(true);
     this.noteLastSeen(cp.getConnectionInfo().lastSeenAt);
     this.adoptTransactionId(cp);
+    // The charger may have rebooted, or a write may have been lost while the link was down.
+    this.forgetApplied();
     if (this.cp === cp) {
       // Same ChargePoint reconnected (its client was swapped) - not a fresh
-      // bind, but still worth a fresh status to reconcile any staleness.
+      // bind, but still worth a fresh status, and a tick to resync the limit.
       this.host.log(`[charger] reconnected (${cp.identity})`);
       this.requestFreshState();
+      this.tick(new Date(), 'reconnect');
       return;
     }
     // A different ChargePoint instance taking over: drop the previous one's
@@ -705,6 +759,7 @@ export class ChargeController {
     if (cachedReadings) this.onMeterValues(cachedReadings);
 
     this.requestFreshState();
+    this.configureCharger().catch((e) => this.host.error('configureCharger', e));
 
     this.host.log(`Controller bound to ${cp.identity}`);
     this.tick(new Date(), 'bind');
@@ -727,11 +782,17 @@ export class ChargeController {
   private async configureCharger(): Promise<void> {
     if (!this.cp) return;
     try {
-      await this.cp.changeConfiguration('MeterValueSampleInterval', String(this.cfg.meterSampleIntervalSec));
-      await this.cp.changeConfiguration(
+      const interval = await this.cp.changeConfiguration('MeterValueSampleInterval', String(this.cfg.meterSampleIntervalSec));
+      // Current.Offered is what the charger actually advertises to the car, which its
+      // own max-current setting or load management can hold below a profile it accepted.
+      // Nothing parses it; the unhandled-measurand log reports it.
+      const measurands = await this.cp.changeConfiguration(
         'MeterValuesSampledData',
-        'Power.Active.Import,Current.Import,Voltage,Energy.Active.Import.Register',
+        'Power.Active.Import,Current.Import,Voltage,Energy.Active.Import.Register,Current.Offered',
       );
+      if (interval !== 'Accepted' || measurands !== 'Accepted') {
+        this.host.log(`[charger] MeterValues config not accepted (interval ${interval}, measurands ${measurands})`);
+      }
     } catch (err) {
       this.host.log('Charger rejected MeterValues config (continuing):', (err as Error).message);
     }
@@ -868,12 +929,14 @@ export class ChargeController {
     // controller doesn't believe a dead transaction is still live.
     if (info.status === 'Finishing' && this.transactionId != null) {
       this.transactionId = null;
+      this.forgetApplied();
       this.desiredAmps = null;
       this.awaitingStart = false;
       this.host.setStore('transactionId', null).catch(this.host.error);
       this.host.setCapability('evcharger_charging', false);
     }
     this.lastStatusValue = info.status;
+    if (changed) this.meteredSinceStatus = false;
     // measure_power/measure_current are otherwise only ever written by
     // onMeterValues() - but a charger stops sending MeterValues once a
     // session ends (e.g. on unplug: confirmed on real hardware, Available
@@ -915,6 +978,7 @@ export class ChargeController {
   private applyIdleReconciliation(): void {
     if (this.transactionId != null) {
       this.transactionId = null;
+      this.forgetApplied();
       this.awaitingStart = false;
       this.host.setStore('transactionId', null).catch(this.host.error);
       this.host.log('[charger] reconciled a stale transaction id (idle confirmed)');
@@ -928,7 +992,18 @@ export class ChargeController {
 
   private onMeterValues(r: Readings): void {
     if (r.power !== undefined) {
-      this.lastPowerW = r.power; this.host.setCapability('measure_power', r.power);
+      this.lastPowerW = r.power;
+      this.meteredSinceStatus = true;
+      this.host.setCapability('measure_power', r.power);
+      // The meter corrects the charging state shown for a suspended status - see
+      // isDeliveringPower(). (onStatus() sets it from the status alone, which is
+      // right at the moment of the change: nothing has been metered since.)
+      if (this.lastStatusValue != null && SUSPENDED.includes(this.lastStatusValue)) {
+        const delivering = this.isDeliveringPower();
+        this.host.setCapability('evcharger_charging_state',
+          delivering ? 'plugged_in_charging' : toChargingState(this.lastStatusValue));
+        this.host.setCapability('evcharger_charging', delivering);
+      }
     }
     if (r.current !== undefined) this.host.setCapability('measure_current', r.current);
     if (r.voltage !== undefined) this.host.setCapability('measure_voltage', r.voltage);
@@ -975,7 +1050,9 @@ export class ChargeController {
     // next MeterValues/tick to recompute them off the new meterStart.
     this.host.setCapability('meter_power.session', 0);
     this.host.setCapability('session_duration', 0);
-    if (this.desiredAmps != null) this.scheduleWrite();
+    // A TxProfile belongs to its transaction, so the new one's limit is unknown.
+    this.forgetApplied();
+    if (this.desiredAmps != null && this.writeEligible()) this.scheduleWrite(true);
   }
 
   private onStopTransaction(req: StopTransactionReq): void {
@@ -989,6 +1066,7 @@ export class ChargeController {
         + `we were tracking ${this.transactionId} - profile writes were going to a dead session`);
     }
     this.transactionId = null;
+    this.forgetApplied();
     this.host.setStore('transactionId', null).catch(this.host.error);
     this.host.setCapability('evcharger_charging', false);
   }
@@ -1056,10 +1134,19 @@ export class ChargeController {
    * for a session it's already running (some Wallbox firmware, apparently)
    * would otherwise leave `lastPowerW` permanently un-netted-out everywhere it
    * matters (solar surplus calc, household cap), even while genuinely
-   * delivering power. Status is the more reliable ground truth here.
+   * delivering power.
+   *
+   * Status alone isn't enough either: a Wallbox can report SuspendedEV while
+   * delivering full power (7 kW for minutes after a replug, never reporting
+   * Charging). In a suspended status the meter decides - but only a reading
+   * taken since the status changed, since at a real suspend the last reading is
+   * still the full charging draw, and counting it would let the household cap
+   * allow more than the house has.
    */
   private isDeliveringPower(): boolean {
-    return this.lastStatusValue === 'Charging';
+    if (this.lastStatusValue === 'Charging') return true;
+    return this.lastStatusValue != null && SUSPENDED.includes(this.lastStatusValue)
+      && this.meteredSinceStatus && (this.lastPowerW ?? 0) >= DELIVERING_MIN_W;
   }
 
   /**
@@ -1195,11 +1282,34 @@ export class ChargeController {
     this.tick(new Date(now), 'solar');
   }
 
+  /** Too old to base either hard cap on. */
+  private solarFeedStale(): boolean {
+    return this.lastSolarSampleAt === 0 || (Date.now() - this.lastSolarSampleAt) > this.cfg.solarStaleMs;
+  }
+
+  /** Age of the last solar sample, or null if none ever arrived (no solar app - nothing to report). */
+  solarFeedAgeMs(now: number = Date.now()): number | null {
+    return this.lastSolarSampleAt === 0 ? null : Math.max(0, now - this.lastSolarSampleAt);
+  }
+
+  /**
+   * Log the feed going down and recovering. tick()'s fail-safe log only covers
+   * solar being the active mode, but the feed also drives both caps and boost.
+   */
+  private refreshSolarFeedHealth(now: number): void {
+    const age = this.solarFeedAgeMs(now);
+    const down = age != null && age > SOLAR_FEED_REPORT_MS;
+    if (down === this.solarFeedDown) return;
+    this.solarFeedDown = down;
+    this.host.log(down
+      ? `[solar] feed stale - nothing received for ${fmtDuration(age!)}; solar charging is paused `
+        + 'and the household/charger-circuit caps are unavailable until it returns'
+      : '[solar] feed recovered');
+  }
+
   private householdCapAmps(): number | null {
     if (this.cfg.maxHouseholdW <= 0) return null;
-    const stale = this.lastSolarSampleAt === 0
-      || (Date.now() - this.lastSolarSampleAt) > this.cfg.solarStaleMs;
-    if (stale) return null;
+    if (this.solarFeedStale()) return null;
     const chargerW = this.nettedChargerW();
     // Charging but no MeterValues yet this connection: same "don't guess"
     // gap as onSolarSample - trust the configured ceiling rather than netting
@@ -1236,9 +1346,7 @@ export class ChargeController {
     if (!this.cfg.sharedCircuitIncludeSolar && !this.cfg.sharedCircuitIncludeBattery) {
       return Math.floor(this.cfg.sharedCircuitA - this.cfg.sharedCircuitBufferA);
     }
-    const stale = this.lastSolarSampleAt === 0
-      || (Date.now() - this.lastSolarSampleAt) > this.cfg.solarStaleMs;
-    if (stale) return null;
+    if (this.solarFeedStale()) return null;
     const div = this.cfg.voltage * this.cfg.phases;
     const pvA = this.cfg.sharedCircuitIncludeSolar ? this.lastPvW / div : 0;
     const batteryA = this.cfg.sharedCircuitIncludeBattery ? this.lastBatteryW / div : 0;
@@ -1294,6 +1402,7 @@ export class ChargeController {
   getDiagnostics(): {
     availableW: number; solarState: string; targetA: number | null; mode: ChargeMode;
     chargerPowerW: number | null;
+    solarFeed: { stale: boolean; ageMs: number | null };
     limits: {
       chargerMaxW: number; gridMaxW: number;
       batteryChargePeakW: number; batteryDischargePeakW: number; solarPeakW: number;
@@ -1309,6 +1418,8 @@ export class ChargeController {
       // load) can subtract the EV's own draw out of a grid-derived total instead of
       // double-counting it as household consumption.
       chargerPowerW: this.nettedChargerW(),
+      // The widget blanks everything it draws from the feed while this is stale.
+      solarFeed: { stale: this.solarFeedDown, ageMs: this.solarFeedAgeMs() },
       limits: {
         chargerMaxW: this.cfg.maxAmps * this.cfg.voltage * this.cfg.phases,
         gridMaxW: this.cfg.maxHouseholdW,
@@ -1417,7 +1528,11 @@ export class ChargeController {
     }
     const cap = this.sharedCircuitCapAmps();
     if (cap == null) {
-      return { amps: floor, reason: `scheduled: floor ${floor}A (boost enabled, but shared-circuit cap unavailable)` };
+      return {
+        amps: floor,
+        reason: `scheduled: floor ${floor}A (boost enabled, but shared-circuit cap unavailable - `
+          + `${this.sharedCircuitCapUnavailableReason()})`,
+      };
     }
     if (cap <= floor) {
       return { amps: floor, reason: `scheduled: floor ${floor}A (boost enabled, circuit cap ${cap}A doesn't exceed floor)` };
@@ -1428,6 +1543,13 @@ export class ChargeController {
       reason: `scheduled: boosted floor ${floor}A -> ${amps}A (circuit cap ${cap}A, `
         + `pv=${Math.round(this.lastPvW)}W battery=${Math.round(this.lastBatteryW)}W)`,
     };
+  }
+
+  /** Why sharedCircuitCapAmps() is null - otherwise a lost boost reads as boost being ignored. */
+  private sharedCircuitCapUnavailableReason(): string {
+    if (this.cfg.sharedCircuitA <= 0) return 'no charger-circuit rating configured';
+    if (this.lastSolarSampleAt === 0) return 'no solar sample received yet';
+    return `solar feed stale, last sample ${fmtDuration(Date.now() - this.lastSolarSampleAt)} ago`;
   }
 
   tick(now: Date = new Date(), trigger: string = 'timer'): void {
@@ -1522,9 +1644,14 @@ export class ChargeController {
     // given (see writeBlockedBecause) - a decision that never reaches the
     // charger must never read like one that did.
     const blocked = this.writeBlockedBecause(amps);
+    // And one the charger hasn't accepted yet (normal for up to writeThrottleMs).
+    const target = amps <= 0 ? 0 : this.clampAmps(amps);
+    const appliedNote = !blocked && this.writeEligible() && this.appliedAmps !== target
+      ? ` | charger ${this.appliedAmps == null ? 'limit unknown' : `still at ${this.appliedAmps}A`}`
+      : '';
     this.host.log(`[decision:${trigger}] ${decision.reason}${
       capNotes.length ? ` | ${capNotes.join('; ')}` : ''} -> ${finalDesc}${linkNote}${
-      blocked ? ` | NOT SENT (${blocked})` : ''}`);
+      blocked ? ` | NOT SENT (${blocked})` : ''}${appliedNote}`);
 
     // Only the Finishing case asks something of the user; "nothing plugged in"
     // is an ordinary idle state and must not raise a banner.
@@ -1533,6 +1660,7 @@ export class ChargeController {
       this.host.log('[charger] parked in Finishing with a live target - needs a physical unplug/replug to resume');
     }
     this.needsReplug = replug;
+    this.refreshSolarFeedHealth(now.getTime());
     this.refreshWarning();
 
     this.ensureCharging(amps, capTightened);
@@ -1569,6 +1697,27 @@ export class ChargeController {
   }
 
   /**
+   * Whether a SetChargingProfile can go out: TxProfile with a transaction id, or
+   * TxDefaultProfile while plugged in without one (some charge points never send
+   * StartTransaction for a session they're already running). Needs a live link,
+   * since init() restores transactionId from the store.
+   */
+  private writeEligible(): boolean {
+    const plugged = this.lastStatusValue != null && PLUGGED.includes(this.lastStatusValue)
+      && this.lastStatusValue !== 'Finishing';
+    return this.cp?.connected === true && (this.transactionId != null || plugged);
+  }
+
+  /** The charger's limit is unknown again (link or session changed): resync it, urgently. */
+  private forgetApplied(): void {
+    this.appliedAmps = null;
+    this.appliedEpoch += 1;
+    this.resyncPending = true;
+    this.rewriteUrgent = false; // was queued behind the old epoch's call
+    this.host.setCapability('charge_current_applied', null);
+  }
+
+  /**
    * amps: 0 = pause (hold 0A, keep the transaction), >0 = charge at that
    * current. capTightened: a hard cap's ceiling dropped further this tick
    * (see tick()) - if that also means less current than we last asked for,
@@ -1577,37 +1726,19 @@ export class ChargeController {
    */
   private ensureCharging(amps: number, capTightened = false): void {
     const target = amps <= 0 ? 0 : this.clampAmps(amps);
-    // Genuinely plugged in and mid-session from the charger's own point of
-    // view, whether or not *we* hold a transaction id for it.
-    const plugged = this.lastStatusValue != null && PLUGGED.includes(this.lastStatusValue)
-      && this.lastStatusValue !== 'Finishing';
-    // TxProfile once a transaction id is known, or TxDefaultProfile whenever
-    // the charger is visibly plugged in even without one - some charge points
-    // never hand back a StartTransaction for a session they're already
-    // running (observed on real hardware: a redundant RemoteStartTransaction
-    // while already Charging gets rejected outright), which would otherwise
-    // leave the app permanently unable to adjust the current for that entire
-    // session.
-    const eligible = this.transactionId != null || plugged;
-    const ampsChanged = this.desiredAmps !== target;
-    // Newly write-eligible after a spell of not being (a replug out of
-    // Finishing, a session finally granting a transaction id): the charger is
-    // running on whatever profile predates the gap, and the throttle exists to
-    // space out routine adjustments, not to hold back the write that first
-    // reconciles it. Treated as urgent for the same reason a tightening cap is.
-    const regained = eligible && !this.wasWriteEligible;
-    const urgent = regained
-      || (capTightened && this.desiredAmps != null && target < this.desiredAmps);
-    if (ampsChanged) {
+    const prevDesired = this.desiredAmps;
+    if (prevDesired !== target) {
       this.desiredAmps = target;
       if (target > 0) this.host.setCapability('charge_current_limit', target);
     }
-    // Also write on becoming newly eligible even if the target didn't change
-    // across that transition (e.g. the charger only just reported a plugged
-    // status) - otherwise a target that happens not to move at that exact
-    // moment would never actually reach the charger.
-    if (eligible && (ampsChanged || regained)) this.scheduleWrite(urgent);
-    this.wasWriteEligible = eligible;
+    // Write until the charger has accepted the target, not just when the target
+    // changes - otherwise a dropped or rejected write is never retried.
+    if (this.writeEligible() && this.appliedAmps !== target) {
+      // Urgent when re-establishing an unknown limit, or when a hard cap tightened.
+      const urgent = this.resyncPending
+        || (capTightened && prevDesired != null && target < prevDesired);
+      this.scheduleWrite(urgent);
+    }
     // Only attempt a fresh start while the charger is genuinely waiting for
     // one (Preparing: cable connected, no session yet) - not once a session
     // already appears underway (Charging/SuspendedEV/SuspendedEVSE), which
@@ -1638,6 +1769,11 @@ export class ChargeController {
   }
 
   private scheduleWrite(urgent = false): void {
+    // One call at a time; writeProfile() re-reconciles when it finishes.
+    if (this.inFlightEpoch !== null && this.inFlightEpoch === this.appliedEpoch) {
+      this.rewriteUrgent = this.rewriteUrgent || urgent;
+      return;
+    }
     // Urgent (a hard cap tightened below what we last asked for): jump the
     // queue rather than waiting out - or continuing to wait out - the usual
     // throttle. Cancels any deferred write already pending so this one, with
@@ -1668,13 +1804,19 @@ export class ChargeController {
   // the .catch(host.error) above is a defensive backstop only.
   private async writeProfile(): Promise<void> {
     if (!this.cp?.connected || this.desiredAmps == null) return;
+    if (this.desiredAmps === this.appliedAmps) return; // already there (a pending write overtaken)
+    const epoch = this.appliedEpoch;
+    this.inFlightEpoch = epoch;
+    this.resyncPending = false;
     this.lastWriteAt = Date.now();
+    const amps = this.desiredAmps;
     const txId = this.transactionId;
     const kind = txId != null ? `TxProfile tx=${txId}` : 'TxDefaultProfile';
-    this.host.log(`[charger] setting profile: ${this.desiredAmps}A (${kind})`);
+    this.host.log(`[charger] setting profile: ${amps}A (${kind})`);
+    let landed = false;
     try {
-      const accepted = await this.cp.setChargingProfile({
-        limitAmps: this.desiredAmps,
+      let accepted = await this.cp.setChargingProfile({
+        limitAmps: amps,
         connectorId: CONNECTOR_ID,
         transactionId: txId ?? undefined,
         numberPhases: this.cfg.phases,
@@ -1683,25 +1825,41 @@ export class ChargeController {
       });
       this.host.log(`[charger] profile ${accepted ? 'accepted' : 'rejected'}`);
       // A rejected TxProfile is most often a transaction id the charger does
-      // not recognise, and the next write is only triggered by the target
-      // changing - which may not happen for minutes. TxDefaultProfile needs no
-      // transaction id and is already known to be obeyed on this hardware, so
-      // retry once immediately rather than leaving the charger on its previous
-      // limit indefinitely. Guarded on the id being unchanged so this can't
-      // fight a transaction that started while the call was in flight.
+      // not recognise. TxDefaultProfile needs no transaction id and is already
+      // known to be obeyed on this hardware, so retry once immediately.
+      // Guarded on the id being unchanged so this can't fight a transaction
+      // that started while the call was in flight.
       if (!accepted && txId != null && this.transactionId === txId && this.cp?.connected) {
         this.host.log('[charger] retrying as TxDefaultProfile (no transaction id)');
-        const retried = await this.cp.setChargingProfile({
-          limitAmps: this.desiredAmps,
+        accepted = await this.cp.setChargingProfile({
+          limitAmps: amps,
           connectorId: CONNECTOR_ID,
           numberPhases: this.cfg.phases,
           chargingProfileId: PROFILE_ID,
           stackLevel: STACK_LEVEL,
         });
-        this.host.log(`[charger] profile retry ${retried ? 'accepted' : 'rejected'}`);
+        this.host.log(`[charger] profile retry ${accepted ? 'accepted' : 'rejected'}`);
+      }
+      // Unless a reconnect or new session has made this acceptance meaningless.
+      if (accepted && epoch === this.appliedEpoch) {
+        this.appliedAmps = amps;
+        this.host.setCapability('charge_current_applied', amps);
+        landed = true;
       }
     } catch (err) {
       this.host.error('SetChargingProfile failed:', (err as Error).message);
+    } finally {
+      // A call from a superseded epoch leaves the slot to the newer write.
+      if (this.inFlightEpoch === epoch) {
+        this.inFlightEpoch = null;
+        const urgent = this.rewriteUrgent;
+        this.rewriteUrgent = false;
+        // Chase a target that moved mid-call. A failed write waits for the next
+        // tick instead - retrying from its own completion is an unpaced loop.
+        if ((landed || urgent) && this.desiredAmps !== this.appliedAmps && this.writeEligible()) {
+          this.scheduleWrite(urgent);
+        }
+      }
     }
   }
 

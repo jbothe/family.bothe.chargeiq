@@ -9,6 +9,8 @@ export interface SolarLoopConfig {
   deadbandA: number;
   /** Max change per evaluation (A). */
   rampA: number;
+  /** After the target moves, hold it this long before stepping again (ms). 0 disables. */
+  settleMs: number;
   /** Minimum time charging before it may pause (ms). */
   minOnMs: number;
   /** Minimum time off/paused before it may (re)start (ms). */
@@ -61,6 +63,9 @@ export class SolarLoop {
 
   private lastChangeAt = 0;
 
+  /** When currentA last changed. Separate from lastChangeAt, which times the minOn/minOff dwells. */
+  private lastStepAt = 0;
+
   constructor(cfg: SolarLoopConfig) {
     this.cfg = cfg;
   }
@@ -78,6 +83,7 @@ export class SolarLoop {
     this.state = 'off';
     this.currentA = 0;
     this.lastChangeAt = 0;
+    this.lastStepAt = 0;
   }
 
   private clamp(a: number): number {
@@ -86,7 +92,7 @@ export class SolarLoop {
 
   evaluate(input: SolarInput): SolarResult {
     const {
-      voltage, phases, minAmps, deadbandA, rampA, minOnMs, minOffMs, marginW,
+      voltage, phases, minAmps, deadbandA, rampA, minOnMs, minOffMs, marginW, settleMs,
     } = this.cfg;
     // Power available to the car = what it already draws, minus the net grid flow
     // (export is negative grid so it adds capacity; import is positive so it subtracts),
@@ -109,21 +115,35 @@ export class SolarLoop {
           this.state = 'charging';
           this.currentA = this.clamp(desiredA);
           this.lastChangeAt = input.now;
+          this.lastStepAt = input.now; // a start is a step too
           return this.result(this.currentA, availableW);
         }
         return this.result(null, availableW);
 
       case 'charging':
         if (enough) {
-          if (Math.abs(desiredA - this.currentA) >= deadbandA) {
+          // Settle lockout. The grid reading lags the charger's by ~14s, so without
+          // it the loop counts its own last increase as fresh surplus and
+          // staircases into a self-sustained swing (7A -> 20A -> 6A -> 18A on
+          // hardware). This, not rampA, is what keeps it stable. It gates the
+          // step only - availableW is still returned every sample.
+          const settled = settleMs <= 0 || (input.now - this.lastStepAt) >= settleMs;
+          if (settled && Math.abs(desiredA - this.currentA) >= deadbandA) {
             const step = Math.max(-rampA, Math.min(rampA, desiredA - this.currentA));
-            this.currentA = this.clamp(this.currentA + step);
+            const next = this.clamp(this.currentA + step);
+            // A step clamped onto the value already held moved nothing - no need to wait.
+            if (next !== this.currentA) {
+              this.currentA = next;
+              this.lastStepAt = input.now;
+            }
           }
           return this.result(this.currentA, availableW);
         }
+        // Pausing is minOnMs's job; the lockout never delays backing off.
         if (since >= minOnMs) {
           this.currentA = 0;
           this.lastChangeAt = input.now;
+          this.lastStepAt = input.now;
           this.state = 'paused';
           return this.result(0, availableW);
         }
@@ -135,6 +155,7 @@ export class SolarLoop {
           this.state = 'charging';
           this.currentA = this.clamp(desiredA);
           this.lastChangeAt = input.now;
+          this.lastStepAt = input.now;
           return this.result(this.currentA, availableW);
         }
         return this.result(0, availableW);

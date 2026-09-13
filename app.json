@@ -487,6 +487,7 @@
       "capabilities": [
         "evcharger_charging",
         "charge_current_limit",
+        "charge_current_applied",
         "charge_mode",
         "evcharger_charging_state",
         "session_duration",
@@ -808,11 +809,24 @@
                 "en": "Max ramp per step (A)"
               },
               "hint": {
-                "en": "While already charging, the most the current limit can change by on any single solar update. Smooths out sudden swings instead of jumping straight to the new target."
+                "en": "While already charging, the most the current limit can change by on any single step. This is a sanity bound against one bad reading, not the thing that keeps the loop steady - Settle time below does that. Setting it low on top of a settle time only makes solar tracking sluggish."
               },
-              "value": 3,
+              "value": 8,
               "min": 1,
               "max": 32
+            },
+            {
+              "id": "solarSettleSec",
+              "type": "number",
+              "label": {
+                "en": "Settle time after a change (s)"
+              },
+              "hint": {
+                "en": "After the solar target moves, hold it this long before moving again, so the next decision is made on a grid reading that already includes the last change. Your solar data arrives via the cloud and lags the charger's own meter by roughly 15 seconds; without this wait the charger counts its own increase as spare surplus and chases itself up and down. Raise it if you still see the current swinging, lower it for faster tracking. 0 disables."
+              },
+              "value": 45,
+              "min": 0,
+              "max": 300
             },
             {
               "id": "minOnSec",
@@ -922,6 +936,24 @@
     }
   },
   "capabilities": {
+    "charge_current_applied": {
+      "type": "number",
+      "title": {
+        "en": "Applied Limit"
+      },
+      "desc": {
+        "en": "Current limit the charger last accepted. Compare with Current Limit (what ChargeIQ decided) and Current (what the car is drawing)."
+      },
+      "units": {
+        "en": "A"
+      },
+      "icon": "/assets/capabilities/charge_current_limit.svg",
+      "decimals": 0,
+      "getable": true,
+      "setable": false,
+      "uiComponent": "sensor",
+      "insights": true
+    },
     "charge_current_limit": {
       "type": "number",
       "title": {
