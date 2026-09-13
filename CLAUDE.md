@@ -20,10 +20,13 @@ without reading it.
   don't suppress).
 - `homey app validate --level publish` — must pass (only the expected `homey:manager:api`
   review notice is allowed). Also run `--level debug` for quick checks.
+- `homey app validate --level verified` — must pass. It checks strictly more than `publish` (it
+  caught the missing `support`/`source` URLs and an untitled Flow card argument), and reports one
+  error per run, so expect to re-run it after touching manifests.
 - `homey app run` — run on the user's Homey (LAN). This is the only real integration env.
 - Do **not** hand-edit `app.json` — it is generated from `.homeycompose/`. Edit compose files.
 - Before **any** commit: build, test, and lint must all be clean, and `homey app validate --level
-  publish` must pass. Run all four - a green `npm test` does not imply lint is clean or vice versa.
+  verified` must pass. Run all four - a green `npm test` does not imply lint is clean or vice versa.
 
 ## Architecture
 The **App** (`app.ts`) owns the long-lived services and exposes them to the device via

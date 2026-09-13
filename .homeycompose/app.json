@@ -32,5 +32,7 @@
   "author": {
     "name": "John Bothe",
     "email": "jbothe@gmail.com"
-  }
+  },
+  "support": "https://github.com/jbothe/family.bothe.chargeiq/issues",
+  "source": "https://github.com/jbothe/family.bothe.chargeiq"
 }

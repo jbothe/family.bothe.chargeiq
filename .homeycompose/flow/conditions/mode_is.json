@@ -6,6 +6,7 @@
     {
       "type": "dropdown",
       "name": "mode",
+      "title": { "en": "Mode" },
       "values": [
         { "id": "manual", "label": { "en": "Manual" } },
         { "id": "scheduled", "label": { "en": "Scheduled" } },
