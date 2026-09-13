@@ -1,0 +1,32 @@
+name: Validate Homey App
+on:
+  workflow_dispatch:
+  push:
+  pull_request:
+
+jobs:
+  main:
+    name: Validate Homey App
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # The validate action compiles the app, and tsconfig.json extends
+      # @tsconfig/node16 from node_modules. Without this install the extends can't
+      # resolve and the action fails with an unhelpful "Tsconfig validation failed".
+      # Keep it ahead of every athombv/* step that compiles.
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+
+      # Nothing else in CI runs lint or the unit tests.
+      - run: npm run lint
+      - run: npm test
+
+      # verified, not publish: it's what the App Store requires, and it checks strictly
+      # more (support/source URLs, titles on Flow card arguments).
+      - uses: athombv/github-action-homey-app-validate@master
+        with:
+          level: verified
