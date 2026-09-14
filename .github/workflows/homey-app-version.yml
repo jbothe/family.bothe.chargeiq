@@ -1,0 +1,64 @@
+name: Update Homey App Version
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        type: choice
+        description: Version
+        required: true
+        default: patch
+        options:
+          - major
+          - minor
+          - patch
+      changelog:
+        type: string
+        description: Changelog
+        required: true
+
+# The bump goes up as a PR rather than a direct push, so it's reviewed like any
+# other change; homey-app-release.yml tags and releases it once merged. Opening
+# the PR needs the repo setting "Allow GitHub Actions to create and approve pull
+# requests".
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+
+jobs:
+  main:
+    name: Update Homey App Version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Update Homey App Version
+        uses: athombv/github-action-homey-app-version@master
+        id: update_app_version
+        with:
+          version: ${{ inputs.version }}
+          changelog: ${{ inputs.changelog }}
+
+      - name: Open release PR
+        run: |
+          branch="release/v$VERSION"
+          git config --local user.name "github-actions[bot]"
+          git config --local user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git switch -c "$branch"
+          # The Athom action only bumps the Homey manifests; keep package.json in step.
+          npm version "$VERSION" --no-git-tag-version --allow-same-version
+          git add -A
+          git commit -m "Update Homey App Version to v$VERSION"
+          git push origin "$branch"
+
+          gh pr create --base "$GITHUB_REF_NAME" --head "$branch" \
+            --title "Update Homey App Version to v$VERSION" --body "$CHANGELOG"
+
+          # A PR opened with GITHUB_TOKEN doesn't trigger other workflows, so
+          # validation wouldn't run on it. A dispatch is the exception.
+          gh workflow run homey-app-validate.yml --ref "$branch"
+        env:
+          VERSION: ${{ steps.update_app_version.outputs.version }}
+          CHANGELOG: ${{ inputs.changelog }}
+          GH_TOKEN: ${{ github.token }}

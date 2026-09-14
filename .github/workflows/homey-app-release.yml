@@ -1,0 +1,32 @@
+name: Release Homey App Version
+on:
+  pull_request:
+    types: [closed]
+
+permissions:
+  contents: write
+
+jobs:
+  main:
+    name: Tag & Release
+    # Only a merged release PR from homey-app-version.yml: same repo, into the default branch.
+    if: >-
+      github.event.pull_request.merged &&
+      startsWith(github.event.pull_request.head.ref, 'release/v') &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.base.ref == github.event.repository.default_branch
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+
+      - name: Tag & Release
+        run: |
+          # From the merged files, not the branch name, so the tag always matches what shipped.
+          tag="v$(jq -r .version .homeycompose/app.json)"
+          git tag "$tag"
+          git push origin "$tag"
+          gh release create "$tag" -t "$tag" --notes "" --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}

@@ -20,10 +20,35 @@ without reading it.
   don't suppress).
 - `homey app validate --level publish` — must pass (only the expected `homey:manager:api`
   review notice is allowed). Also run `--level debug` for quick checks.
+- `homey app validate --level verified` — must pass; **this is the level CI runs** (see CI below).
+  It checks strictly more than `publish` (it caught the missing `support`/`source` URLs and an
+  untitled Flow card argument), and reports one error per run, so expect to re-run it after
+  touching manifests.
 - `homey app run` — run on the user's Homey (LAN). This is the only real integration env.
 - Do **not** hand-edit `app.json` — it is generated from `.homeycompose/`. Edit compose files.
 - Before **any** commit: build, test, and lint must all be clean, and `homey app validate --level
-  publish` must pass. Run all four - a green `npm test` does not imply lint is clean or vice versa.
+  verified` must pass. Run all four - a green `npm test` does not imply lint is clean or vice versa.
+
+## CI (`.github/workflows/`)
+Modelled on `family.bothe.dexcom`'s workflows - its CLAUDE.md has the history behind them.
+
+**Every `athombv/*` step that compiles the app needs `actions/setup-node` + `npm ci` before it.**
+Those actions run `npx tsc --showConfig`, and `tsconfig.json` extends `@tsconfig/node16` from
+`node_modules`. Without an install the `extends` can't resolve, and the action fails with the
+misleading "Tsconfig validation failed". Don't "simplify" those install steps away.
+- `homey-app-validate.yml` - every push and PR: `npm ci`, `npm run lint`, `npm test`, then Athom's
+  validate action at **`level: verified`** - the same gate as dexcom, and what the App Store
+  requires.
+- `homey-app-version.yml` - manual dispatch: bumps the Homey manifests and `.homeychangelog.json` (so
+  the changelog is maintained through this workflow), runs `npm version` to keep `package.json` in
+  step, and opens a `release/v<version>` PR. `main` isn't protected, so the PR is there for review,
+  not as a required gate. A PR opened with `GITHUB_TOKEN` triggers no workflows, so it dispatches
+  validation on the branch itself. **Needs "Allow GitHub Actions to create and approve pull
+  requests"** (Settings → Actions → General), which is off.
+- `homey-app-release.yml` - when a `release/v*` PR from this repo merges into the default branch:
+  tags the merge commit `v<version>` (read from `.homeycompose/app.json`) and creates the GitHub
+  release.
+- `homey-app-publish.yml` - manual dispatch; needs a `HOMEY_PAT` repo secret, which doesn't exist yet.
 
 ## Architecture
 The **App** (`app.ts`) owns the long-lived services and exposes them to the device via
