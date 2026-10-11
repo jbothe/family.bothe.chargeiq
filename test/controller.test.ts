@@ -1560,12 +1560,12 @@ test('getModeInfo() for manual mode with no schedule: only mode is populated', a
   const { c } = makeController([]);
   await c.startManual(16);
   assert.deepEqual(c.getModeInfo(), {
-    mode: 'manual', scheduleEndAt: null, nextScheduleStartAt: null, boostActive: false, solarEnough: null,
+    mode: 'manual', scheduleEndAt: null, nextScheduleStartAt: null, boostActive: false, solarToCarActive: false, solarEnough: null,
   });
 
   await c.stop();
   assert.deepEqual(c.getModeInfo(), {
-    mode: 'manual', scheduleEndAt: null, nextScheduleStartAt: null, boostActive: false, solarEnough: null,
+    mode: 'manual', scheduleEndAt: null, nextScheduleStartAt: null, boostActive: false, solarToCarActive: false, solarEnough: null,
   }, 'manual on/off no longer changes the shape - the widget gets that from evcharger_charging_state instead');
 });
 
@@ -1651,6 +1651,26 @@ test('solarToCar: PV the battery is charging from goes to the car, and nothing e
   assert.ok(logs.some((l) => l.includes('car first, state=charging')), 'the [solar] line says which way it counts');
   assert.ok(logs.some((l) => l.includes('excess solar to car -> 8A')), logs.join('\n'));
   assert.equal(c.getModeInfo().boostActive, false, 'solar raising the target is not a circuit boost');
+  assert.equal(c.getModeInfo().solarToCarActive, true);
+});
+
+test('getModeInfo(): with boost and solarToCar both on, only the one that set the target is active', () => {
+  const { c } = makeController([{ ...CAR_FIRST[0], currentA: 6, boostToCap: true }], {
+    sharedCircuitA: 32, sharedCircuitBufferA: 2, sharedCircuitIncludeSolar: false, sharedCircuitIncludeBattery: false,
+  });
+  // Static circuit cap 30A beats an 8A solar target.
+  c.onSolarSample({ gridSignedW: 0, pvW: 3000, batteryW: 1840 });
+  assert.equal(c.getModeInfo().boostActive, true);
+  assert.equal(c.getModeInfo().solarToCarActive, false);
+
+  // A cap of 10 - 2 = 8A only ties solar's 8A, so boost still set it (solar must *exceed* it).
+  // At 9 - 2 = 7A boost raises the 6A floor to 7A, solar's 8A beats it, and only the sun shows.
+  const { c: c2 } = makeController([{ ...CAR_FIRST[0], currentA: 6, boostToCap: true }], {
+    sharedCircuitA: 9, sharedCircuitBufferA: 2, sharedCircuitIncludeSolar: false, sharedCircuitIncludeBattery: false,
+  });
+  c2.onSolarSample({ gridSignedW: 0, pvW: 3000, batteryW: 1840 });
+  assert.equal(c2.getModeInfo().solarToCarActive, true);
+  assert.equal(c2.getModeInfo().boostActive, false, 'boost raised the floor, but solar is what set the target');
 });
 
 test('solarToCar: too little excess holds the 0A floor and says why', () => {
@@ -1664,6 +1684,7 @@ test('solarToCar: a floor above the solar target wins', () => {
   const { c, logs } = makeController([{ ...CAR_FIRST[0], currentA: 16 }]);
   c.onSolarSample({ gridSignedW: 0, pvW: 3000, batteryW: 1840 });
   assert.deepEqual(c.resolve(at(1, 8, 0)), { mode: 'scheduled', amps: 16 });
+  assert.equal(c.getModeInfo().solarToCarActive, false, 'no badge while the floor is what is charging');
   assert.ok(logs.some((l) => l.includes("excess solar to car 8A doesn't exceed it")), logs.join('\n'));
 });
 
@@ -1687,7 +1708,7 @@ test('getModeInfo() for solar mode: solarEnough tracks whether the target meets 
   const { c } = makeController([]);
   c.setSolarTarget(10);
   assert.deepEqual(c.getModeInfo(), {
-    mode: 'solar', scheduleEndAt: null, nextScheduleStartAt: null, boostActive: false, solarEnough: true,
+    mode: 'solar', scheduleEndAt: null, nextScheduleStartAt: null, boostActive: false, solarToCarActive: false, solarEnough: true,
   });
 
   c.setSolarTarget(0);

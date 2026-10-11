@@ -23,6 +23,7 @@ interface ChargerDeviceLike {
     scheduleEndAt: string | null;
     nextScheduleStartAt: string | null;
     boostActive: boolean;
+    solarToCarActive: boolean;
     solarEnough: boolean | null;
   };
   getConnectionInfo?(): {
@@ -142,7 +143,7 @@ module.exports = class ChargeIQApp extends Homey.App {
     const cap = (id: string) => (dev && dev.hasCapability(id) ? dev.getCapabilityValue(id) : null);
     const diag = dev?.getDiagnostics?.();
     const modeInfo = dev?.getModeInfo?.() ?? {
-      mode: null, scheduleEndAt: null, nextScheduleStartAt: null, boostActive: false, solarEnough: null,
+      mode: null, scheduleEndAt: null, nextScheduleStartAt: null, boostActive: false, solarToCarActive: false, solarEnough: null,
     };
     // OCPP link state. `online: null` = not yet resolved (startup grace) - the
     // widget must not claim an outage on that, only on an explicit false.
@@ -173,6 +174,7 @@ module.exports = class ChargeIQApp extends Homey.App {
       scheduleEndAt: modeInfo.scheduleEndAt,
       nextScheduleStartAt: modeInfo.nextScheduleStartAt,
       boostActive: modeInfo.boostActive,
+      solarToCarActive: modeInfo.solarToCarActive,
       solarEnough: modeInfo.solarEnough,
       limits: diag?.limits ?? {
         chargerMaxW: 0, gridMaxW: 0, batteryChargePeakW: 0, batteryDischargePeakW: 0, solarPeakW: 0,

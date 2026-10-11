@@ -1552,6 +1552,7 @@ export class ChargeController {
     scheduleEndAt: string | null;
     nextScheduleStartAt: string | null;
     boostActive: boolean;
+    solarToCarActive: boolean;
     solarEnough: boolean | null;
     } {
     const now = new Date();
@@ -1559,12 +1560,17 @@ export class ChargeController {
     let scheduleEndAt: string | null = null;
     let nextScheduleStartAt: string | null = null;
     let boostActive = false;
+    let solarToCarActive = false;
     let solarEnough: boolean | null = null;
     if (mode === 'scheduled') {
       const end = this.scheduler.currentEnd(now);
       scheduleEndAt = end ? end.toISOString() : null;
       const floor = this.scheduleOrMax(now);
-      boostActive = this.scheduledAmpsDetail(now).amps > floor;
+      const boosted = this.scheduledAmpsDetail(now).amps;
+      // The target is the higher of the two, so at most one of them is what
+      // set it - and only that one gets a badge.
+      solarToCarActive = this.scheduledTargetDetail(now).amps > boosted;
+      boostActive = !solarToCarActive && boosted > floor;
     } else {
       const ns = this.scheduler.nextStart(now);
       nextScheduleStartAt = ns ? ns.toISOString() : null;
@@ -1574,7 +1580,7 @@ export class ChargeController {
       }
     }
     return {
-      mode, scheduleEndAt, nextScheduleStartAt, boostActive, solarEnough,
+      mode, scheduleEndAt, nextScheduleStartAt, boostActive, solarToCarActive, solarEnough,
     };
   }
 

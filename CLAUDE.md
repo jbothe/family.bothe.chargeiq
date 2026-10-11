@@ -176,8 +176,9 @@ battery yields: confirmed on hardware that a car drawing 1832W moved the battery
 funds the car here. Intended use is a `0A` window before a free-power window (e.g. 06:00–11:00):
 that morning PV would have charged the battery, and the free window refills it at no cost anyway. A
 stale feed resets the loop (the tick fail-safe covers these windows as well as Solar mode), which
-drops the window back to its floor. `boostActive` deliberately still reflects only the circuit
-boost.
+drops the window back to its floor. `getModeInfo()` reports `boostActive` and `solarToCarActive`
+for whichever of the two actually set the target: it's the higher one, so at most one is true,
+and solar only counts when it *exceeds* the floor/boost result.
 
 ### OCPP connectivity (offline detection + reporting)
 The app is the OCPP *server*, so "is the charger there?" is only ever inferred — nothing polls it.
@@ -576,6 +577,12 @@ has a `Solar feed stale 3d` preset next to `Charger offline 12h` for previewing 
 unknown `appliedA` marks the target pending - both in the light text colour, while the pill stays green
 because it *is* charging. A few seconds of this after any change is the write throttle; anything
 lasting is the fault. A payload with no `appliedA` field at all renders as before.
+
+**The chip's trailing badge says what is raising current above the window's floor**, and only while
+it is: the boost chevrons (`PF.showBoost`, `boostActive`) or a sun (`PF.showSolarToCar`,
+`solarToCarActive`), never both. Both use `--homey-color-orange`, so an orange badge always means
+"above the floor" and its shape says why. The sun is `ICONS.sun`, the `solar-enough` mode icon
+redrawn at the boost glyph's 2.4 stroke, since 1.8 reads too thin at chip size.
 
 **Immediate first paint on load pulls once via `widgets/power-flow/api.js`'s `getState`
 endpoint** (declared in `widget.compose.json`'s own `api` block, not the app-level `api.ts`),

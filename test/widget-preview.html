@@ -152,6 +152,7 @@
         <button data-preset="ready">Plugged in, ready</button>
         <button data-preset="charging">Solar charging</button>
         <button data-preset="scheduledBoost">Scheduled + boost</button>
+        <button data-preset="solarToCar">Solar to car</button>
         <button data-preset="gridCap">Grid near cap</button>
         <button data-preset="unknownBattery">Battery reading unknown</button>
         <button data-preset="unpluggedSchedule">Unplugged + schedule</button>
@@ -188,6 +189,12 @@
         charger: { available: true, powerW: 7360, chargingState: 'plugged_in_charging', limitA: 32 },
         solarW: 3200, gridW: 800, batteryW: -500, houseW: 2900, batterySoc: 62,
         mode: 'scheduled', boostActive: true, scheduleEndAt: new Date(Date.now() + 3600000).toISOString(),
+        limits: { chargerMaxW: 7360, solarPeakW: 8000, batteryChargePeakW: 5000, batteryDischargePeakW: 5000, gridMaxW: 14000 },
+      },
+      solarToCar: {
+        charger: { available: true, powerW: 1840, chargingState: 'plugged_in_charging', limitA: 8, appliedA: 8 },
+        solarW: 3260, gridW: 0, batteryW: 0, houseW: 1420, batterySoc: 48,
+        mode: 'scheduled', solarToCarActive: true, scheduleEndAt: new Date(Date.now() + 3600000).toISOString(),
         limits: { chargerMaxW: 7360, solarPeakW: 8000, batteryChargePeakW: 5000, batteryDischargePeakW: 5000, gridMaxW: 14000 },
       },
       gridCap: {

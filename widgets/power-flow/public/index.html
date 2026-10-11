@@ -255,7 +255,9 @@
        offset is applied, so the text's own position is untouched. */
     .chip-icon { width: var(--homey-icon-size-small); height: var(--homey-icon-size-small); display: inline-flex; flex: 0 0 auto; position: relative; top: -1px; }
     .chip-icon svg { display: block; width: 100%; height: 100%; }
-    .chip-boost { color: var(--homey-color-orange); }
+    /* The sun badge (PF.showSolarToCar) shares boost's orange: an orange badge always means
+       "something is raising current above the window's floor", and its shape says what. */
+    .chip-boost, .chip-solar { color: var(--homey-color-orange); }
     /* Target not yet accepted by the charger (PF.chipAmps): grey text, the pill stays green. */
     .chip-amps.pending { color: var(--homey-text-color-light); }
     /* text-transform:uppercase text has no descenders, but align-items:center still centers the
@@ -414,6 +416,10 @@
       // (replaces the old plain "CHARGING" text label). Filled, not stroked, like the boost
       // badge above it reads better than a stroke outline at this size.
       bolt: '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M13 2 3 14h7l-1 8 10-12h-7l1-8z"/></svg>',
+      // Excess-solar-to-car badge, the boost badge's counterpart (see PF.showSolarToCar). The
+      // solar-enough mode icon's sun, redrawn at the boost badge's stroke weight - the mode
+      // icon's 1.8 reads too thin at chip size - with shorter rays so they don't crowd the disc.
+      sun: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2.5v2.5M12 19v2.5M2.5 12h2.5M19 12h2.5M5.3 5.3l1.8 1.8M16.9 16.9l1.8 1.8M5.3 18.7l1.8-1.8M16.9 7.1l1.8-1.8"/></svg>',
     };
     // Mode icons: which derived mode is currently driving the charger, and (for solar)
     // whether there's currently enough excess to actually charge on it.
@@ -617,6 +623,12 @@
         s = s || {};
         return s.mode === 'scheduled' && !!s.boostActive;
       },
+      // The sun badge: same rule as showBoost, for a window's "excess solar to car" raising
+      // current above its floor right now. The controller only ever sets one of the two.
+      showSolarToCar: function (s) {
+        s = s || {};
+        return s.mode === 'scheduled' && !!s.solarToCarActive;
+      },
       // Capacity meter for a tile's edge strip: { pct: 0..1, color } or null to hide it
       // entirely (no configured peak for that node, or - for EV - no charger paired).
       // Peaks are dashboard-only config (ChargeController's resolved limits, passed
@@ -785,7 +797,8 @@
         var amps = PF.chipAmps(s);
         chipEl.innerHTML = '<span class="chip-icon">' + ICONS.bolt + '</span>'
           + '<span class="chip-amps' + (amps.pending ? ' pending' : '') + '">' + amps.text + '</span>'
-          + (PF.showBoost(s) ? '<span class="chip-icon chip-boost">' + ICONS.boost + '</span>' : '');
+          + (PF.showBoost(s) ? '<span class="chip-icon chip-boost">' + ICONS.boost + '</span>' : '')
+          + (PF.showSolarToCar(s) ? '<span class="chip-icon chip-solar">' + ICONS.sun + '</span>' : '');
       } else {
         chipEl.innerHTML = chip ? chip.label : '';
       }
