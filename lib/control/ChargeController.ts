@@ -1411,8 +1411,9 @@ export class ChargeController {
       this.tick(new Date(now), 'solar');
       return;
     }
+    const carFirst = this.scheduler.activeSolarToCar(new Date(now));
     const res = this.solarLoop.evaluate({
-      gridSignedW, chargerPowerW, batteryW: this.lastBatteryW, now,
+      gridSignedW, chargerPowerW, batteryW: this.lastBatteryW, countBatteryCharge: carFirst, now,
     });
     this.lastAvailableW = Math.max(0, res.availableW);
     this.solarTargetAmps = res.target;
@@ -1427,13 +1428,13 @@ export class ChargeController {
     // active mode, so it belongs in the fingerprint.
     const r50 = (w?: number) => (w == null ? 'na' : String(Math.round(w / 50) * 50));
     const key = [r50(sample.pvW), r50(sample.batteryW), r50(sample.houseW),
-      r50(gridSignedW), r50(chargerPowerW), res.state].join('|');
+      r50(gridSignedW), r50(chargerPowerW), res.state, carFirst].join('|');
     if (key !== this.loggedSolar) {
       this.loggedSolar = key;
       const f = (w?: number) => (w == null ? '?' : `${Math.round(w)}W`);
       this.host.log(`[solar] solar=${f(sample.pvW)} battery=${f(sample.batteryW)} house=${f(sample.houseW)} `
         + `grid=${f(gridSignedW)} charger=${f(chargerPowerW)} excess=${Math.round(this.lastAvailableW)}W`
-        + ` (state=${res.state})`);
+        + ` (${carFirst ? 'car first, ' : ''}state=${res.state})`);
     }
 
     this.tick(new Date(now), 'solar');
@@ -1619,7 +1620,7 @@ export class ChargeController {
       return { mode: 'manual', amps, reason: `manual: charging at ${amps}A` };
     }
     if (this.scheduler.isActive(now)) {
-      return { mode: 'scheduled', ...this.scheduledAmpsDetail(now) };
+      return { mode: 'scheduled', ...this.scheduledTargetDetail(now) };
     }
     if (!this.cfg.solarEnabled) {
       return {
@@ -1655,7 +1656,35 @@ export class ChargeController {
   }
 
   private scheduleOrMax(now: Date): number {
-    return this.clampAmps(this.scheduler.activeCurrent(now) ?? this.cfg.maxAmps);
+    const amps = this.scheduler.activeCurrent(now);
+    // A 0A window charges nothing of its own - a pause, not clampAmps()'s minimum.
+    if (amps === 0) return 0;
+    return this.clampAmps(amps ?? this.cfg.maxAmps);
+  }
+
+  /**
+   * The active window's target: its floor/boost (scheduledAmpsDetail), raised
+   * to the solar target when the window has `solarToCar` set. SolarLoop is
+   * already counting the battery's charging power as available during such a
+   * window (see onSolarSample), so this is just the higher of the two. A stale
+   * or never-started solar target leaves the floor in charge - for a 0A window,
+   * a pause.
+   */
+  private scheduledTargetDetail(now: Date): { amps: number; reason: string } {
+    const base = this.scheduledAmpsDetail(now);
+    if (!this.scheduler.activeSolarToCar(now)) return base;
+    const t = this.solarTargetAmps;
+    if (t == null || t <= 0) {
+      const why = this.lastSolarSampleAt > 0 && this.solarFeedStale()
+        ? 'solar feed stale'
+        : `excess ${Math.round(this.lastAvailableW)}W, needs ${this.cfg.minAmps}A`;
+      return { amps: base.amps, reason: `${base.reason}; excess solar to car: not enough (${why})` };
+    }
+    const solarA = this.clampAmps(t);
+    if (solarA <= base.amps) {
+      return { amps: base.amps, reason: `${base.reason}; excess solar to car ${solarA}A doesn't exceed it` };
+    }
+    return { amps: solarA, reason: `${base.reason}; excess solar to car -> ${solarA}A` };
   }
 
   /**
@@ -1717,8 +1746,9 @@ export class ChargeController {
     }
     this.wasInSchedule = inSchedule;
 
-    // Solar fail-safe: if the feed goes stale while solar is the effective mode.
-    if (!this.manualLatch && !inSchedule && this.lastSolarSampleAt > 0
+    // Solar fail-safe: if the feed goes stale while solar is the effective mode
+    // (including a schedule window that follows excess solar).
+    if (!this.manualLatch && (!inSchedule || this.scheduler.activeSolarToCar(now)) && this.lastSolarSampleAt > 0
       && now.getTime() - this.lastSolarSampleAt > this.cfg.solarStaleMs) {
       if (!this.solarStaleWarned) {
         this.host.log('Solar feed stale; failing safe (pausing solar charging)');

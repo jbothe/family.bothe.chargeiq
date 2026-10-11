@@ -119,7 +119,10 @@ Priority **Manual > Scheduled > Solar > Idle**, recomputed every tick:
   Persisted in device store; cleared **only** when a schedule window *starts* (rising edge) or the
   charger is *unplugged→replugged* (OCPP `Available` → plugged edge, where `Available` lasted at least
   `IDLE_RECONCILE_DELAY_MS` - see the reconnect-blip bullet under Key invariants).
-- **Scheduled** — no latch and inside a `Scheduler` window (schedule beats solar).
+- **Scheduled** — no latch and inside a `Scheduler` window (schedule beats solar). A window's
+  `currentA` is blank (= `maxAmps`), `0`, or 6–32A. **`0` is a pause, not the 6A minimum** —
+  `scheduleOrMax()` returns it before `clampAmps()` can raise it — so a 0A window on its own is
+  "don't charge during these hours", and with boost or `solarToCar` it is a floor of nothing.
 - **Solar** — default outside schedules with no latch, when the `solarEnabled` device setting
   (default on) is true; follows excess via `SolarLoop`.
 - **Idle** — no latch, not in a schedule window, and `solarEnabled` is false. Holds at 0A, same as
@@ -160,6 +163,21 @@ legitimately raises the safety-cap ceiling — the home battery must never fund 
 beyond the configured floor, only genuine spare circuit capacity may. This discharge-blocks-boost
 rule itself only applies when `sharedCircuitIncludeBattery` is on — otherwise the battery isn't part
 of this circuit and its state has no bearing on it.
+
+**Excess solar to car** (`ScheduleWindow.solarToCar`) is the other per-window top-up: the window's
+target becomes `max(floor, solar target)` (`scheduledTargetDetail()`, wrapping
+`scheduledAmpsDetail()`). While such a window is active, `onSolarSample()` passes
+`countBatteryCharge` to `SolarLoop`, which adds the battery's *charging* power back into
+`availableW` — i.e. surplus becomes PV minus the house's own load, whatever the battery is doing
+with it. Outside those windows solar stays **battery-first**: the battery soaks up PV and holds the
+grid at zero, so the car only ever sees what the battery can't absorb. It works because SolarEdge's
+battery yields: confirmed on hardware that a car drawing 1832W moved the battery from about +1010W to
+−820W with the grid flat at 0W. Discharge is still subtracted in both modes, so the battery never
+funds the car here. Intended use is a `0A` window before a free-power window (e.g. 06:00–11:00):
+that morning PV would have charged the battery, and the free window refills it at no cost anyway. A
+stale feed resets the loop (the tick fail-safe covers these windows as well as Solar mode), which
+drops the window back to its floor. `boostActive` deliberately still reflects only the circuit
+boost.
 
 ### OCPP connectivity (offline detection + reporting)
 The app is the OCPP *server*, so "is the charger there?" is only ever inferred — nothing polls it.

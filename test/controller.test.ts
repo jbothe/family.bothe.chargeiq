@@ -1607,6 +1607,72 @@ test('getModeInfo() boostActive reflects real-time boosting, not just the window
   assert.equal(c.getModeInfo().boostActive, false);
 });
 
+// All day, every day, so onSolarSample()'s real-clock window check sees it too.
+const CAR_FIRST: ScheduleWindow[] = [{
+  days: [0, 1, 2, 3, 4, 5, 6], start: '00:00', end: '00:00', currentA: 0, solarToCar: true,
+}];
+
+test('a 0A schedule window pauses instead of charging at the 6A minimum', () => {
+  const { c } = makeController([{
+    days: [1], start: '06:00', end: '11:00', currentA: 0,
+  }]);
+  c.setSolarTarget(10);
+  assert.deepEqual(c.resolve(at(1, 7, 0)), { mode: 'scheduled', amps: 0 }, 'schedule still beats solar');
+  assert.deepEqual(c.resolve(at(1, 12, 0)), { mode: 'solar', amps: 10 });
+});
+
+test('a 0A boost window charges at the circuit cap, so 0 really is just a floor', () => {
+  const { c } = makeController([{
+    days: [1], start: '11:00', end: '14:00', currentA: 0, boostToCap: true,
+  }], {
+    sharedCircuitA: 32, sharedCircuitBufferA: 2, sharedCircuitIncludeSolar: false, sharedCircuitIncludeBattery: false,
+  });
+  assert.deepEqual(c.resolve(at(1, 12, 0)), { mode: 'scheduled', amps: 30 });
+});
+
+test('solarToCar: PV the battery is charging from goes to the car, and nothing else does', () => {
+  const { c, caps, logs } = makeController(CAR_FIRST);
+  // Battery taking 1840W of PV, grid flat - battery-first solar mode would see 0W here.
+  c.onSolarSample({
+    gridSignedW: 0, pvW: 3000, batteryW: 1840, houseW: 1160,
+  });
+  assert.deepEqual(c.resolve(at(1, 8, 0)), { mode: 'scheduled', amps: 8 });
+  assert.equal(caps.measure_solar_surplus, 1840);
+  assert.ok(logs.some((l) => l.includes('car first, state=charging')), 'the [solar] line says which way it counts');
+  assert.ok(logs.some((l) => l.includes('excess solar to car -> 8A')), logs.join('\n'));
+  assert.equal(c.getModeInfo().boostActive, false, 'solar raising the target is not a circuit boost');
+});
+
+test('solarToCar: too little excess holds the 0A floor and says why', () => {
+  const { c, logs } = makeController(CAR_FIRST);
+  c.onSolarSample({ gridSignedW: 0, pvW: 2000, batteryW: 1000 });
+  assert.deepEqual(c.resolve(at(1, 8, 0)), { mode: 'scheduled', amps: 0 });
+  assert.ok(logs.some((l) => l.includes('excess solar to car: not enough (excess 1000W, needs 6A)')), logs.join('\n'));
+});
+
+test('solarToCar: a floor above the solar target wins', () => {
+  const { c, logs } = makeController([{ ...CAR_FIRST[0], currentA: 16 }]);
+  c.onSolarSample({ gridSignedW: 0, pvW: 3000, batteryW: 1840 });
+  assert.deepEqual(c.resolve(at(1, 8, 0)), { mode: 'scheduled', amps: 16 });
+  assert.ok(logs.some((l) => l.includes("excess solar to car 8A doesn't exceed it")), logs.join('\n'));
+});
+
+test('solarToCar: battery charging is only counted inside the window', () => {
+  const { c, caps } = makeController([]);
+  c.onSolarSample({ gridSignedW: 0, pvW: 3000, batteryW: 1840 });
+  assert.equal(caps.measure_solar_surplus, 0, 'battery-first outside a car-first window');
+  assert.deepEqual(c.resolve(at(1, 8, 0)), { mode: 'solar', amps: 0 });
+});
+
+test('solarToCar: a stale feed fails safe to the 0A floor', () => {
+  const { c, logs } = makeController(CAR_FIRST, { solarStaleSec: 60 });
+  c.onSolarSample({ gridSignedW: 0, pvW: 3000, batteryW: 1840 }, Date.now() - 120_000);
+  c.tick(new Date(), 'timer');
+  assert.deepEqual(c.resolve(new Date()), { mode: 'scheduled', amps: 0 });
+  assert.ok(logs.some((l) => l.includes('Solar feed stale; failing safe')), logs.join('\n'));
+  assert.ok(logs.some((l) => l.includes('excess solar to car: not enough (solar feed stale)')), logs.join('\n'));
+});
+
 test('getModeInfo() for solar mode: solarEnough tracks whether the target meets minAmps', () => {
   const { c } = makeController([]);
   c.setSolarTarget(10);

@@ -263,11 +263,13 @@
       });
     }
 
-    // Mirrors ScheduleWindow's real shape (lib/control/Scheduler.ts) - two windows so the
-    // conflict/no-conflict and weekly-chart rendering both have something to show.
+    // Mirrors ScheduleWindow's real shape (lib/control/Scheduler.ts) - enough windows so the
+    // conflict/no-conflict and weekly-chart rendering have something to show, plus a 0A
+    // solar-to-car window (0 must render as 0, not as blank/max).
     var SAMPLE_WINDOWS = [
       { days: [1, 2, 3, 4, 5], start: '22:00', end: '06:00', currentA: 16, enabled: true, boostToCap: true },
-      { days: [6, 0], start: '09:00', end: '17:00', enabled: true, boostToCap: false }
+      { days: [6, 0], start: '09:00', end: '17:00', enabled: true, boostToCap: false },
+      { days: [1, 2, 3, 4, 5], start: '06:00', end: '11:00', currentA: 0, enabled: true, solarToCar: true }
     ];
 
     function stubScript() {

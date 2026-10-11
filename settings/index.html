@@ -346,14 +346,25 @@
     }
     function windowSummary(w) {
       return summarizeDays(w.days) + ', ' + formatTime12(w.start) + '-' + formatTime12(w.end) +
-        ', ' + (w.currentA ? w.currentA + ' amps' : 'max amps') + (w.boostToCap ? ' (boosted)' : '');
+        ', ' + (w.currentA == null ? 'max amps' : w.currentA + ' amps') + (w.boostToCap ? ' (boosted)' : '') +
+        (w.solarToCar ? ' + excess solar' : '');
+    }
+
+    // Amps a window may hold: blank (max), 0 (charge nothing of its own), or MIN_A..MAX_A.
+    // 1..5A isn't a current the charger can run at, so it snaps up to MIN_A.
+    function normalizeAmps(a) {
+      if (a == null || isNaN(a)) return undefined;
+      if (a <= 0) return 0;
+      return Math.max(MIN_A, Math.min(MAX_A, Math.round(a)));
     }
 
     // Strips UI-only fields (expanded) down to what actually gets saved/charted - shared by the
     // save payload and the savedWindows snapshot the chart renders from, so both stay in sync.
     function toPayload(list) {
       return list.map(function (w) {
-        return { days: w.days, start: w.start, end: w.end, currentA: w.currentA, enabled: w.enabled, boostToCap: w.boostToCap };
+        return {
+          days: w.days, start: w.start, end: w.end, currentA: w.currentA, enabled: w.enabled, boostToCap: w.boostToCap, solarToCar: w.solarToCar,
+        };
       });
     }
 
@@ -416,7 +427,7 @@
           var on = w.days.indexOf(DAY_NUM[di]) !== -1;
           return '<span class="day ' + (on ? 'on' : '') + '" data-w="' + i + '" data-d="' + DAY_NUM[di] + '">' + d + '</span>';
         }).join('');
-        var amps = w.currentA || '';
+        var amps = w.currentA == null ? '' : w.currentA;
         var body = w.expanded
           ? (
             '<label class="homey-form-checkbox enabled-row">' +
@@ -431,7 +442,7 @@
             '<div class="homey-form-group field-amps"><label class="homey-form-label" title="Leave blank to charge at your configured Maximum current setting">Amps</label>' +
             '<div class="stepper">' +
             '<button type="button" class="homey-button-transparent homey-button-small dec" data-w="' + i + '">−</button>' +
-            '<input type="number" class="homey-form-input" min="' + MIN_A + '" max="' + MAX_A + '" data-w="' + i + '" data-f="currentA" value="' + amps + '" placeholder="max" title="Leave blank to charge at your configured Maximum current setting">' +
+            '<input type="number" class="homey-form-input" min="0" max="' + MAX_A + '" data-w="' + i + '" data-f="currentA" value="' + amps + '" placeholder="max" title="Leave blank to charge at your configured Maximum current setting, or 0 to charge only from what the options below add">' +
             '<button type="button" class="homey-button-transparent homey-button-small inc" data-w="' + i + '">+</button>' +
             '</div></div>' +
             '<div class="homey-form-group field-boost">' +
@@ -439,6 +450,13 @@
             '<input type="checkbox" class="homey-form-checkbox-input boost" data-w="' + i + '" ' + (w.boostToCap ? 'checked' : '') + '>' +
             '<span class="homey-form-checkbox-checkmark"></span>' +
             '<span class="homey-form-checkbox-text">Boost above Amps if spare capacity</span>' +
+            '</label>' +
+            '</div>' +
+            '<div class="homey-form-group field-boost">' +
+            '<label class="homey-form-checkbox" title="Charge above the Amps value from excess solar, taking it before the home battery does. Set Amps to 0 to charge only from solar">' +
+            '<input type="checkbox" class="homey-form-checkbox-input solar-to-car" data-w="' + i + '" ' + (w.solarToCar ? 'checked' : '') + '>' +
+            '<span class="homey-form-checkbox-checkmark"></span>' +
+            '<span class="homey-form-checkbox-text">Excess solar to car (before home battery)</span>' +
             '</label>' +
             '</div>' +
             '</div>'
@@ -487,7 +505,7 @@
       root.querySelectorAll('input[type=number]').forEach(function (inp) {
         inp.onchange = function () {
           var wi = +inp.getAttribute('data-w'); var f = inp.getAttribute('data-f');
-          windows[wi][f] = inp.value ? +inp.value : undefined;
+          windows[wi][f] = inp.value === '' ? undefined : normalizeAmps(+inp.value);
           render();
         };
       });
@@ -503,12 +521,21 @@
           render();
         };
       });
+      root.querySelectorAll('.solar-to-car').forEach(function (cb) {
+        cb.onchange = function () {
+          windows[+cb.getAttribute('data-w')].solarToCar = cb.checked;
+          render();
+        };
+      });
+      // Steps skip 1..5A: MIN_A steps down to 0, and 0 steps up to MIN_A.
       root.querySelectorAll('.inc, .dec').forEach(function (btn) {
         btn.onclick = function () {
           var wi = +btn.getAttribute('data-w');
-          var cur = windows[wi].currentA || MAX_A;
-          var delta = btn.className.indexOf('inc') !== -1 ? 1 : -1;
-          var next = Math.max(MIN_A, Math.min(MAX_A, cur + delta));
+          var cur = windows[wi].currentA == null ? MAX_A : windows[wi].currentA;
+          var up = btn.className.indexOf('inc') !== -1;
+          var next;
+          if (up) next = cur === 0 ? MIN_A : Math.min(MAX_A, cur + 1);
+          else next = cur <= MIN_A ? 0 : cur - 1;
           windows[wi].currentA = next;
           render();
         };
@@ -556,7 +583,7 @@
         windows = (!err && Array.isArray(result)) ? result.map(function (w) {
           return {
             days: w.days || [], start: w.start || '22:00', end: w.end || '06:00', currentA: w.currentA,
-            enabled: w.enabled !== false, boostToCap: w.boostToCap === true, expanded: false,
+            enabled: w.enabled !== false, boostToCap: w.boostToCap === true, solarToCar: w.solarToCar === true, expanded: false,
           };
         }) : [];
         savedWindows = toPayload(windows);

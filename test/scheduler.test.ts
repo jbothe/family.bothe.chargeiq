@@ -39,6 +39,29 @@ test('activeBoostToCap reflects the active window, defaulting to false', () => {
   assert.equal(s.activeBoostToCap(at(1, 20, 0)), false, 'no active window at all');
 });
 
+test('activeSolarToCar reflects the active window, and a 0A window reports 0 (not unset)', () => {
+  const s = new Scheduler([
+    {
+      days: [1], start: '06:00', end: '11:00', currentA: 0, solarToCar: true,
+    },
+    {
+      days: [1], start: '11:00', end: '14:00',
+    },
+  ]);
+  assert.equal(s.activeSolarToCar(at(1, 7, 0)), true);
+  assert.equal(s.activeCurrent(at(1, 7, 0)), 0);
+  assert.equal(s.activeSolarToCar(at(1, 12, 0)), false, 'second window did not opt in');
+  assert.equal(s.activeCurrent(at(1, 12, 0)), undefined, 'no currentA means the configured max');
+  assert.equal(s.activeSolarToCar(at(1, 20, 0)), false, 'no active window at all');
+});
+
+test('a stored null currentA reads as unset', () => {
+  const s = new Scheduler([{
+    days: [1], start: '06:00', end: '11:00', currentA: null as unknown as number,
+  }]);
+  assert.equal(s.activeCurrent(at(1, 7, 0)), undefined);
+});
+
 test('overnight window 22:00-06:00 wraps midnight', () => {
   const s = new Scheduler([{ days: [0, 1, 2, 3, 4, 5, 6], start: '22:00', end: '06:00' }]);
   assert.equal(s.isActive(at(2, 23, 0)), true);
