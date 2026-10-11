@@ -12,7 +12,9 @@ import {
   StatusNotificationReq,
   StopTransactionReq,
 } from '../ocpp/types';
-import { Scheduler, ScheduleWindow, findScheduleConflicts } from './Scheduler';
+import {
+  Scheduler, ScheduleWindow, describeWindow, findScheduleConflicts,
+} from './Scheduler';
 import { SolarLoop, SolarLoopConfig } from './SolarLoop';
 import {
   SAG_ALARM_PCT, SAG_ALARM_READINGS, SagReading, VoltageMonitor,
@@ -476,6 +478,7 @@ export class ChargeController {
     this.transactionId = this.host.getStore<number>('transactionId') ?? null;
     this.manualLatch = this.host.getStore<ManualLatch>('manualLatch') ?? null;
     this.scheduler.setWindows(this.host.getStore<ScheduleWindow[]>('schedule') ?? []);
+    this.logSchedule('loaded');
     this.wasInSchedule = this.scheduler.isActive(new Date());
 
     this.lastSeenAt = this.host.getStore<number>('ocppLastSeenAt') ?? null;
@@ -1379,7 +1382,25 @@ export class ChargeController {
     }
     this.scheduler.setWindows(windows);
     await this.host.setStore('schedule', windows);
+    this.logSchedule('saved');
     this.tick(new Date(), 'schedule-updated');
+  }
+
+  /**
+   * The schedule's counterpart to the `[config]` line: the schedule lives in
+   * the device store (the settings page saves it over the app API), not in
+   * device settings, so refreshConfig() never shows it. Logged on load and
+   * on every save so a schedule change is visible in the log, not just its
+   * `schedule-updated` decision.
+   */
+  private logSchedule(verb: string): void {
+    const windows = this.scheduler.getWindows();
+    if (windows.length === 0) {
+      this.host.log(`[schedule] ${verb}: no windows`);
+      return;
+    }
+    this.host.log(`[schedule] ${verb} ${windows.length} window${windows.length === 1 ? '' : 's'}: ${
+      windows.map((w, i) => `#${i + 1} ${describeWindow(w)}`).join('; ')}`);
   }
 
   getSchedule(): ScheduleWindow[] {

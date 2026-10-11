@@ -498,7 +498,9 @@ next move.
 - Controller diagnostics log via the **app** logger (`this.homey.app.log`) for a short
   `[ChargeIQApp]` prefix; tags are `[charger]`, `[solar]`, `[decision:<trigger>]`, `[mode]`,
   `[config]` (the full resolved config, logged on every `refreshConfig()` - boot and every settings
-  save - to make a settings change's actual effect confirmable rather than assumed).
+  save - to make a settings change's actual effect confirmable rather than assumed), `[schedule]`
+  (the same for the schedule, which lives in the device store rather than device settings, so
+  `[config]` never shows it - logged at `init()` and on every save, one `describeWindow()` per window).
   `[decision:<trigger>]` is logged on **every** `tick()` call, unconditionally (not just on change) -
   one line covering what triggered it (`timer`, `init`, `bind`, `status:<OcppStatus>`, `solar`,
   `manual-toggle`, `manual-current`, `schedule-updated`), the resolved mode and *why*

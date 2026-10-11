@@ -1612,6 +1612,16 @@ const CAR_FIRST: ScheduleWindow[] = [{
   days: [0, 1, 2, 3, 4, 5, 6], start: '00:00', end: '00:00', currentA: 0, solarToCar: true,
 }];
 
+test('the schedule is logged on load and on every save', async () => {
+  const { c, logs } = makeController(CAR_FIRST);
+  assert.ok(logs.includes('[schedule] loaded 1 window: #1 every day 00:00-00:00 0A +excess solar to car'), logs.join('\n'));
+  await c.setSchedule([]);
+  assert.ok(logs.includes('[schedule] saved: no windows'), logs.join('\n'));
+  const i = logs.indexOf('[schedule] saved: no windows');
+  const d = logs.findIndex((l) => l.startsWith('[decision:schedule-updated]'));
+  assert.ok(i >= 0 && d > i, 'logged before the decision it triggers');
+});
+
 test('a 0A schedule window pauses instead of charging at the 6A minimum', () => {
   const { c } = makeController([{
     days: [1], start: '06:00', end: '11:00', currentA: 0,

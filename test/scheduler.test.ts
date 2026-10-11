@@ -3,7 +3,7 @@
 import test from 'node:test';
 import assert from 'node:assert';
 import {
-  Scheduler, ScheduleWindow, findScheduleConflicts, windowsOverlap,
+  Scheduler, ScheduleWindow, describeWindow, findScheduleConflicts, windowsOverlap,
 } from '../lib/control/Scheduler';
 
 /** Build a local Date for weekday (0=Sun) + HH:MM. 2024-01-07 is a Sunday. */
@@ -53,6 +53,19 @@ test('activeSolarToCar reflects the active window, and a 0A window reports 0 (no
   assert.equal(s.activeSolarToCar(at(1, 12, 0)), false, 'second window did not opt in');
   assert.equal(s.activeCurrent(at(1, 12, 0)), undefined, 'no currentA means the configured max');
   assert.equal(s.activeSolarToCar(at(1, 20, 0)), false, 'no active window at all');
+});
+
+test('describeWindow() spells out a window for the log', () => {
+  assert.equal(describeWindow({
+    days: [0, 1, 2, 3, 4, 5, 6], start: '06:00', end: '11:00', currentA: 0, solarToCar: true,
+  }), 'every day 06:00-11:00 0A +excess solar to car');
+  assert.equal(describeWindow({
+    days: [5, 1, 2, 3, 4], start: '22:00', end: '06:00', currentA: 16, boostToCap: true,
+  }), 'Mon-Fri 22:00-06:00 16A +boost', 'unordered days still collapse to a range');
+  assert.equal(describeWindow({
+    days: [1, 3, 6, 0], start: '09:00', end: '17:00', enabled: false,
+  }), 'Mon, Wed, Sat-Sun 09:00-17:00 max (disabled)', 'Sunday follows Saturday, Mon-first');
+  assert.equal(describeWindow({ days: [], start: '09:00', end: '17:00' }), 'no days 09:00-17:00 max');
 });
 
 test('a stored null currentA reads as unset', () => {

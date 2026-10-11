@@ -61,6 +61,36 @@ function minuteOfWeek(d: Date, timezone?: string): number {
   return day * MIN_PER_DAY + hour * 60 + minute;
 }
 
+const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const WEEK_ORDER = [1, 2, 3, 4, 5, 6, 0]; // Mon-first, as the settings UI shows it
+
+/** "Mon-Fri, Sun" - consecutive days (Mon-first) collapsed into ranges. */
+function describeDays(days: number[]): string {
+  const on = WEEK_ORDER.filter((d) => days.includes(d));
+  if (on.length === 7) return 'every day';
+  if (on.length === 0) return 'no days';
+  const ranges: string[] = [];
+  let i = 0;
+  while (i < on.length) {
+    let j = i;
+    while (j + 1 < on.length && WEEK_ORDER.indexOf(on[j + 1]) === WEEK_ORDER.indexOf(on[j]) + 1) j++;
+    ranges.push(i === j ? DAY_NAMES[on[i]] : `${DAY_NAMES[on[i]]}-${DAY_NAMES[on[j]]}`);
+    i = j + 1;
+  }
+  return ranges.join(', ');
+}
+
+/**
+ * One window as a log line, e.g. "Mon-Fri 06:00-11:00 0A +excess solar to car".
+ * Blank current reads "max"; a disabled window still logs, marked as such.
+ */
+export function describeWindow(w: ScheduleWindow): string {
+  const amps = w.currentA == null ? 'max' : `${w.currentA}A`;
+  return `${describeDays(w.days)} ${w.start}-${w.end} ${amps}`
+    + `${w.boostToCap ? ' +boost' : ''}${w.solarToCar ? ' +excess solar to car' : ''}`
+    + `${w.enabled === false ? ' (disabled)' : ''}`;
+}
+
 interface Interval { start: number; end: number } // minutes-of-week; end may exceed MIN_PER_WEEK (wrap)
 
 /** Expand one window to weekly-minute intervals (end may wrap past week end). No currentA attached. */
