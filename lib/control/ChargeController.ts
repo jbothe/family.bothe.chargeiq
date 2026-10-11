@@ -1546,6 +1546,8 @@ export class ChargeController {
    * the client, which runs on the user's phone in its own local timezone, not
    * the Homey Pro's UTC OS clock - see the class doc). Only the field(s)
    * relevant to the current mode are populated; the rest are null/false.
+   * `solarEnough` is set in Solar mode and in a window with `solarToCar`,
+   * where it drives the widget's "waiting for solar" badge.
    */
   getModeInfo(): {
     mode: ChargeMode;
@@ -1571,17 +1573,21 @@ export class ChargeController {
       // set it - and only that one gets a badge.
       solarToCarActive = this.scheduledTargetDetail(now).amps > boosted;
       boostActive = !solarToCarActive && boosted > floor;
+      if (this.scheduler.activeSolarToCar(now)) solarEnough = this.solarIsEnough();
     } else {
       const ns = this.scheduler.nextStart(now);
       nextScheduleStartAt = ns ? ns.toISOString() : null;
-      if (mode === 'solar') {
-        const t = this.solarTargetAmps;
-        solarEnough = t != null && t >= this.cfg.minAmps;
-      }
+      if (mode === 'solar') solarEnough = this.solarIsEnough();
     }
     return {
       mode, scheduleEndAt, nextScheduleStartAt, boostActive, solarToCarActive, solarEnough,
     };
+  }
+
+  /** Whether the solar loop currently has a target the charger can run at. */
+  private solarIsEnough(): boolean {
+    const t = this.solarTargetAmps;
+    return t != null && t >= this.cfg.minAmps;
   }
 
   getDiagnostics(): {

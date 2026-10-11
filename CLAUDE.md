@@ -583,6 +583,12 @@ it is: the boost chevrons (`PF.showBoost`, `boostActive`) or a sun (`PF.showSola
 `solarToCarActive`), never both. Both use `--homey-color-orange`, so an orange badge always means
 "above the floor" and its shape says why. The sun is `ICONS.sun`, the `solar-enough` mode icon
 redrawn at the boost glyph's 2.4 stroke, since 1.8 reads too thin at chip size.
+The `READY` chip has a counterpart: in a `solarToCar` window that is waiting for enough excess, it
+reads `READY ☁` (`PF.showSolarWaiting`, `ICONS.cloud`, a sun behind a cloud). That keys off
+`solarEnough === false`, which `getModeInfo()` only fills in Solar mode and in a `solarToCar`
+window, so a plain window never shows it. The mode row keeps the clock: it is still a schedule. The
+cloud takes the chip's own blue rather than orange, because it is part of the READY state, not
+something raising the current.
 
 **Immediate first paint on load pulls once via `widgets/power-flow/api.js`'s `getState`
 endpoint** (declared in `widget.compose.json`'s own `api` block, not the app-level `api.ts`),

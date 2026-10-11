@@ -1673,6 +1673,19 @@ test('getModeInfo(): with boost and solarToCar both on, only the one that set th
   assert.equal(c2.getModeInfo().boostActive, false, 'boost raised the floor, but solar is what set the target');
 });
 
+test('getModeInfo(): solarEnough is reported in a solarToCar window, and only there', () => {
+  const { c } = makeController(CAR_FIRST);
+  c.onSolarSample({ gridSignedW: 0, pvW: 200, batteryW: -800 });
+  assert.equal(c.getModeInfo().mode, 'scheduled');
+  assert.equal(c.getModeInfo().solarEnough, false, 'waiting for solar');
+  c.onSolarSample({ gridSignedW: 0, pvW: 3000, batteryW: 1840 });
+  assert.equal(c.getModeInfo().solarEnough, true);
+
+  const { c: plain } = makeController([{ ...CAR_FIRST[0], solarToCar: false }]);
+  plain.onSolarSample({ gridSignedW: 0, pvW: 3000, batteryW: 1840 });
+  assert.equal(plain.getModeInfo().solarEnough, null, 'a plain window says nothing about solar');
+});
+
 test('solarToCar: too little excess holds the 0A floor and says why', () => {
   const { c, logs } = makeController(CAR_FIRST);
   c.onSolarSample({ gridSignedW: 0, pvW: 2000, batteryW: 1000 });

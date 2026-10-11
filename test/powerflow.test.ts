@@ -193,6 +193,14 @@ test('showSolarToCar: true only in scheduled mode with solarToCarActive set', ()
   assert.equal(PF.showSolarToCar({ mode: 'solar', solarToCarActive: true }), false, 'only a schedule window sets it');
 });
 
+test('showSolarWaiting: only a scheduled window that reports solarEnough false', () => {
+  assert.equal(PF.showSolarWaiting({ mode: 'scheduled', solarEnough: false }), true);
+  assert.equal(PF.showSolarWaiting({ mode: 'scheduled', solarEnough: true }), false);
+  assert.equal(PF.showSolarWaiting({ mode: 'scheduled', solarEnough: null }), false, 'a plain window leaves it null');
+  assert.equal(PF.showSolarWaiting({ mode: 'scheduled' }), false, 'an older payload without the field shows nothing');
+  assert.equal(PF.showSolarWaiting({ mode: 'solar', solarEnough: false }), false, 'solar mode has its own cloud mode icon');
+});
+
 test('meter: ev uses live charger power against chargerMaxW, hidden when no charger or no cap', () => {
   const limits = {
     chargerMaxW: 7360, gridMaxW: 14000, batteryChargePeakW: 3000, batteryDischargePeakW: 2600, solarPeakW: 6000,
