@@ -4,7 +4,7 @@ import test from 'node:test';
 import assert from 'node:assert';
 import { EventEmitter } from 'events';
 import {
-  ChargeController, ControllerHost, ChargingTokens, fmtDuration, toChargingState,
+  ChargeController, ControllerHost, ChargingTokens, fmtDuration, statusDetail, toChargingState,
 } from '../lib/control/ChargeController';
 import { CentralSystem } from '../lib/ocpp/CentralSystem';
 import { ChargePoint, RpcClient } from '../lib/ocpp/ChargePoint';
@@ -2527,11 +2527,11 @@ test('an unhandled measurand is logged once, and only the newly-seen ones on a l
   // A name not seen before still gets reported, on its own.
   cp.emit('meterValues', {
     power: 7200,
-    unhandled: { SoC: '44 Percent', 'Current.Offered': '16 A', Temperature: '21 Celsius' },
+    unhandled: { SoC: '44 Percent', 'Current.Export': '0 A', Temperature: '21 Celsius' },
   });
   const lines = logs.filter((l) => l.includes('not used by this app'));
   assert.equal(lines.length, 2);
-  assert.match(lines[1], /measurands not used by this app: Current\.Offered=16 A, Temperature=21 Celsius/);
+  assert.match(lines[1], /measurands not used by this app: Current\.Export=0 A, Temperature=21 Celsius/);
   assert.equal(lines[1].includes('SoC'), false, 'already-reported name is not repeated');
 });
 
@@ -2648,6 +2648,7 @@ interface ConnHarness {
   cp: ChargePoint;
   cs: CentralSystem;
   store: Record<string, unknown>;
+  caps: Record<string, unknown>;
   logs: string[];
   unavailable: (string | null)[];
   availableCount: () => number;
@@ -2676,13 +2677,16 @@ function makeConnController(extraStore: Record<string, unknown> = {}): ConnHarne
   const settings: Record<string, unknown> = {
     minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdA: 14000 / 230, householdPhases: 1,
   };
+  const caps: Record<string, unknown> = {};
   const logs: string[] = [];
   const unavailable: (string | null)[] = [];
   const conn: { online: boolean; offlineForMs: number | null }[] = [];
   const h = { availableCount: 0 };
   const host: ControllerHost = {
     identity: 'X',
-    setCapability: () => {},
+    setCapability: (k, v) => {
+      caps[k] = v;
+    },
     getSetting: <T>(k: string) => settings[k] as T,
     getStore: <T>(k: string) => store[k] as T,
     setStore: async (k, v) => {
@@ -2726,6 +2730,7 @@ function makeConnController(extraStore: Record<string, unknown> = {}): ConnHarne
     cp,
     cs,
     store,
+    caps,
     logs,
     unavailable,
     availableCount: () => h.availableCount,
@@ -2879,7 +2884,7 @@ test('the decision log calls out that a resolved target could not be sent while 
 // 21A -> 22A -> 23A without attempting a single write)
 // ---------------------------------------------------------------------------
 
-const status = (s: string) => ({ connectorId: 1, errorCode: 'NoError', status: s });
+const status = (s: string) => ({ connectorId: 1, errorCode: 'NoError', status: s as OcppStatus });
 const decisions = (logs: string[]) => logs.filter((l) => l.startsWith('[decision:'));
 
 test('a target the charger cannot be given is logged as NOT SENT, never as if it had been applied', () => {
@@ -3652,4 +3657,114 @@ test('a genuine suspend still nets as zero, and standby draw does not count as c
   assert.equal(caps.evcharger_charging_state, 'plugged_in');
   assert.equal(caps.evcharger_charging, false);
   c.destroy();
+});
+
+// ---------------------------------------------------------------------------
+// A Wallbox can charge while reporting Faulted, and its own error code matters
+// ---------------------------------------------------------------------------
+
+test('statusDetail carries the vendor code and info alongside the OCPP error code', () => {
+  assert.equal(statusDetail(status('Charging')), null);
+  assert.equal(statusDetail({ ...status('Faulted'), errorCode: 'OtherError' }), 'OtherError');
+  assert.equal(statusDetail({
+    ...status('Faulted'), errorCode: 'OtherError', vendorId: 'Wallbox', vendorErrorCode: '114', info: 'CP fault',
+  }), 'OtherError, vendor code 114 (Wallbox), "CP fault"');
+  assert.equal(statusDetail({ ...status('Charging'), vendorErrorCode: '7' }), 'vendor code 7',
+    'vendor detail is kept even without an OCPP error code');
+});
+
+test('a fault logs, banners and triggers with the vendor code, and a new code under the same status is logged', () => {
+  const {
+    cp, logs, warnings, faults,
+  } = makeBoundController();
+  cp.emit('status', status('Charging'));
+  cp.emit('status', {
+    ...status('Faulted'), errorCode: 'OtherError', vendorErrorCode: '114',
+  });
+  assert.ok(logs.includes('[charger] status Charging -> Faulted (OtherError, vendor code 114)'));
+  assert.equal(warnings[warnings.length - 1], 'Charger fault: OtherError, vendor code 114');
+  assert.deepEqual(faults, ['OtherError, vendor code 114']);
+
+  cp.emit('status', {
+    ...status('Faulted'), errorCode: 'OtherError', vendorErrorCode: '114',
+  });
+  assert.equal(logs.filter((l) => l.startsWith('[charger] status')).length, 2, 'a repeat is not re-logged');
+
+  cp.emit('status', {
+    ...status('Faulted'), errorCode: 'OtherError', vendorErrorCode: '115',
+  });
+  assert.ok(logs.includes('[charger] status Faulted (OtherError, vendor code 115)'));
+  assert.equal(warnings[warnings.length - 1], 'Charger fault: OtherError, vendor code 115');
+  assert.equal(faults.length, 1, 'the Flow trigger is for entering a fault, not every new code');
+});
+
+test('a charger delivering while Faulted is netted from its meter, as on hardware', () => {
+  const { c, cp, caps } = makeBoundController();
+  cp.emit('status', status('Charging'));
+  cp.emit('meterValues', { power: 7000 });
+  cp.emit('status', { ...status('Faulted'), errorCode: 'OtherError' });
+  assert.equal(c.getDiagnostics().chargerPowerW, 0,
+    'the reading from before the fault does not count - same rule as a suspend');
+
+  cp.emit('meterValues', { power: 1380, current: 5.8 });
+  assert.equal(c.getDiagnostics().chargerPowerW, 1380, 'the meter decides, not the status');
+  assert.equal(caps.evcharger_charging_state, 'plugged_in_charging');
+  assert.equal(caps.evcharger_charging, true);
+  assert.equal(caps.alarm_generic, true, 'still a fault');
+  c.destroy();
+});
+
+test('a Faulted charger with no session is NOT SENT for that reason, not as "nothing plugged in"', () => {
+  const { c, cp, logs } = makeBoundController();
+  c.setSolarTarget(16);
+  cp.emit('status', { ...status('Faulted'), errorCode: 'OtherError', vendorErrorCode: '114' });
+  const line = decisions(logs).pop()!;
+  assert.ok(line.includes('NOT SENT (charger reports Faulted (OtherError, vendor code 114) - not written until'), line);
+  assert.equal(line.includes('nothing plugged in'), false);
+
+  cp.emit('status', status('Unavailable'));
+  assert.ok(decisions(logs).pop()!.endsWith('NOT SENT (charger reports Unavailable)'),
+    'other non-plugged statuses are named as-is, without a guess at why');
+  c.destroy();
+});
+
+// ---------------------------------------------------------------------------
+// Current.Offered: which side is holding the current back
+// ---------------------------------------------------------------------------
+
+test('the offered current is published, logged on change, and flagged when below the accepted limit', async () => {
+  const {
+    c, cp, caps, logs,
+  } = makeBoundController();
+  // Target first, so the first eligible write (the unthrottled resync) is 32A.
+  await c.startManual(32);
+  cp.emit('status', status('Charging'));
+  await new Promise((r) => {
+    setImmediate(r);
+  });
+  assert.equal(caps.charge_current_applied, 32, 'precondition');
+
+  cp.emit('meterValues', { power: 1380, current: 5.8, offered: 6 });
+  assert.equal(caps.charge_current_offered, 6);
+  assert.ok(logs.includes('[charger] offering 6A to the car (accepted limit 32A)'));
+  c.tick(new Date(), 'timer');
+  assert.ok(decisions(logs).pop()!.endsWith('-> 32A | charger offering only 6A'), 'the charger is the one holding back');
+
+  cp.emit('meterValues', { power: 1380, current: 5.8, offered: 6.2 });
+  assert.equal(logs.filter((l) => l.startsWith('[charger] offering')).length, 1, 'jitter is not re-logged');
+
+  cp.emit('meterValues', { power: 7300, current: 31.7, offered: 32 });
+  assert.ok(logs.includes('[charger] offering 32A to the car (accepted limit 32A)'));
+  c.tick(new Date(), 'timer');
+  assert.ok(decisions(logs).pop()!.endsWith('-> 32A'), 'nothing to flag once it offers what it accepted');
+  c.destroy();
+});
+
+test('the offered current is unknown once the link drops, never the last reading', () => {
+  const h = makeConnController();
+  h.cs.emit('connect', h.cp);
+  h.cp.emit('meterValues', { offered: 16 });
+  assert.equal(h.caps.charge_current_offered, 16);
+  h.cs.emit('disconnect', h.cp);
+  assert.equal(h.caps.charge_current_offered, null);
 });

@@ -253,6 +253,16 @@ charger, and both now say so on the same line rather than reading like a success
     three is the no-laptop post-mortem for any "stuck below target" report. The `[decision:…]` line
     ends `| charger still at 22A` / `| charger limit unknown` while they differ, and the widget chip
     shows `22A→32A` (see Widget).
+  - **Accepted is still not offered.** `charge_current_offered` ("Offered Current", Insights on) is the
+    charger's own `Current.Offered` measurand - what it is actually advertising to the car - parsed
+    into `Readings.offered`, logged on a ≥0.5A move (`[charger] offering 6A to the car (accepted limit
+    32A)`), and nulled on disconnect and at `init()`. Once applied matches the target, a decision line
+    with offered below applied ends `| charger offering only 6A`. That is the one number that splits
+    "stuck at 6A" between the two sides: offered low is the charger (its own max-current setting,
+    load management, or a fault); offered at the limit while `measure_current` is low is the car.
+    Hardware case that prompted it: a Wallbox in fault 114 charging at 5.8A against an accepted 32A,
+    with no way to tell which side was holding it back short of restarting the app to catch the
+    once-per-run unhandled-measurand log.
 
 ### `transactionId` has two sources, and the charge point's wins
 `ChargePoint`'s `StartTransaction` handler allocates the id and answers the charger **whether or not
@@ -381,7 +391,7 @@ next move.
   once `applyIdleReconciliation()` actually clears it (or there was never a transaction to begin
   with), a subsequent `Available` nets as a normal confirmed `0` rather than being stuck "unavailable"
   forever.
-- **A Wallbox can report `SuspendedEV` while delivering full power** - confirmed on hardware after a
+- **A Wallbox can report `SuspendedEV` - or `Faulted` - while delivering power** - confirmed on hardware after a
   replug: 7 kW / 31.6A for minutes with no `Charging` report at all. Trusting the status alone netted
   the car's own draw as 0, so the household cap counted it as house load (trimming 32A to 31A with the
   real house at ~300W) and the widget chip read `READY`. In `SuspendedEV`/`SuspendedEVSE`,
@@ -392,6 +402,17 @@ next move.
   more than the house has. A flag rather than timestamps, because a status and a reading can land in
   the same millisecond. `onMeterValues()` also corrects `evcharger_charging_state` and
   `evcharger_charging` from it; the `started`/`paused` Flow events still follow the reported status.
+  `Faulted` is in the same `METER_DECIDES` list: a Wallbox went `Charging → Faulted (OtherError)`,
+  then started a transaction and charged at 1.4 kW for minutes without another status report. The
+  fault banner and `alarm_generic` stay up regardless - delivering power doesn't clear a fault.
+  `writeBlockedBecause()` names it as `Faulted (<detail>)`, not "nothing plugged in".
+- **A fault's useful number is the vendor code, not the OCPP one.** Wallbox reports nearly
+  everything as `errorCode: OtherError`; the code its own app shows (e.g. 114) rides in
+  `vendorErrorCode`. `statusDetail()` folds `errorCode`, `vendorErrorCode` (+`vendorId`) and `info`
+  into one string used by the `[charger] status` log, the `Charger fault: …` banner and the
+  `charger_fault` Flow token. The status line is also logged when only that detail changes under an
+  unchanged status (`prevStatusDetail`), since a charger can stay `Faulted` while its reason moves;
+  the Flow trigger still fires only on entering `Faulted`.
 - **The controller never issues `RemoteStopTransaction`.** Every "don't charge" decision (manual
   off, no schedule/solar target, stale solar feed, disconnected latch) resolves to `amps: 0` (pause)
   in `ChargeController.resolve()`/`tick()`, never a hard stop. The Wallbox holds `Finishing` until a
@@ -505,14 +526,13 @@ next move.
   name **once per app run** (`loggedMeasurands`, not cleared on rebind - a reconnect doesn't change
   what the charger sends). Purely diagnostic; nothing reads it. It exists because OCPP 1.6 carries
   almost nothing about the *vehicle* - `SoC` (the one real EV datum, and only over ISO 15118, not
-  plain PWM), `Current.Offered`, `Temperature`, or a vendor measurand would otherwise be discarded
-  in silence, so this makes what a real Wallbox actually sends discoverable from `homey app run`
-  rather than assumed. **`Current.Offered` is requested on purpose** (`configureCharger()`, on every
-  fresh bind as well as on boot, since an app restart doesn't reboot the charger), and deliberately
-  left unparsed so this log is what reports it. It's what the charger actually advertises to the car,
-  and an accepted `SetChargingProfile` doesn't guarantee it: the Wallbox's own max-current setting or
-  load management can hold it lower. It was once dropped on the assumption that it always equals
-  what the app last wrote - that's the assumption it now exists to check.
+  plain PWM), `Temperature`, or a vendor measurand would otherwise be discarded in silence, so this
+  makes what a real Wallbox actually sends discoverable from `homey app run` rather than assumed.
+  **`Current.Offered` is requested on purpose** (`configureCharger()`, on every fresh bind as well as
+  on boot, since an app restart doesn't reboot the charger). It was first left unparsed so this log
+  would report it - which it did, but only once per run, too little to answer a live "why 6A?". It
+  is now parsed and tracked; see "Accepted is still not offered" above. It was once dropped on the
+  assumption that it always equals what the app last wrote - that's the assumption it exists to check.
 - Settings pages must include `<script src="/homey.js" data-origin="settings">`; widgets get their
   runtime injected automatically (no include, and keep widget JS **inline/single-file**).
 

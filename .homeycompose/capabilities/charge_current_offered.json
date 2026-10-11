@@ -1,0 +1,12 @@
+{
+  "type": "number",
+  "title": { "en": "Offered Current" },
+  "desc": { "en": "Current the charger is offering the car right now. Lower than Applied Limit means the charger is holding back; equal to it while Current is lower means the car is." },
+  "units": { "en": "A" },
+  "icon": "/assets/capabilities/charge_current_limit.svg",
+  "decimals": 1,
+  "getable": true,
+  "setable": false,
+  "uiComponent": "sensor",
+  "insights": true
+}

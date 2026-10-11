@@ -211,11 +211,35 @@ function fmtV(v: number): string {
   return `${Math.round(v * 10) / 10}V`;
 }
 
+/** Amps for logs: at most one decimal, none when whole. */
+function fmtAmps(a: number): string {
+  return `${Math.round(a * 10) / 10}A`;
+}
+
+/**
+ * A status report's error detail for logs, the fault banner and the Flow token:
+ * the OCPP errorCode plus whatever vendor detail came with it. The vendor code
+ * is the one worth having - it's the number the charger's own app shows (a
+ * Wallbox reported "error 114" there while OCPP only said OtherError).
+ */
+export function statusDetail(info: StatusNotificationReq): string | null {
+  const parts: string[] = [];
+  if (info.errorCode && info.errorCode !== 'NoError') parts.push(info.errorCode);
+  if (info.vendorErrorCode) parts.push(`vendor code ${info.vendorErrorCode}${info.vendorId ? ` (${info.vendorId})` : ''}`);
+  if (info.info) parts.push(`"${info.info}"`);
+  return parts.length ? parts.join(', ') : null;
+}
+
 /** OCPP statuses that mean a vehicle is connected. */
 const PLUGGED = ['Preparing', 'Charging', 'SuspendedEV', 'SuspendedEVSE', 'Finishing'];
 
 /** Statuses a Wallbox has been seen to report while still delivering - see isDeliveringPower(). */
-const SUSPENDED = ['SuspendedEV', 'SuspendedEVSE'];
+/**
+ * Statuses that don't say whether power is flowing, so the meter decides - see
+ * isDeliveringPower(). Faulted is here because a Wallbox charged at 6A for
+ * minutes while reporting nothing but Faulted (OtherError) since the car started.
+ */
+const METER_DECIDES = ['SuspendedEV', 'SuspendedEVSE', 'Faulted'];
 
 /** Metered draw below this in a suspended status is standby, not charging. */
 const DELIVERING_MIN_W = 100;
@@ -320,6 +344,9 @@ export class ChargeController {
 
   private prevStatus: string | null = null;
 
+  /** statusDetail() of the last status logged, so a changed error code is logged even under the same status. */
+  private prevStatusDetail: string | null = null;
+
   /** Raw last-seen OCPP status, used to gate a new RemoteStartTransaction. */
   private lastStatusValue: OcppStatus | null = null;
 
@@ -354,6 +381,9 @@ export class ChargeController {
    * unknown. ensureCharging() keeps writing until the target matches it.
    */
   private appliedAmps: number | null = null;
+
+  /** Last Current.Offered reading on this link, or null - see noteOffered(). */
+  private offeredA: number | null = null;
 
   /**
    * The next write re-establishes an unknown limit, so it skips the throttle.
@@ -460,6 +490,7 @@ export class ChargeController {
       if (cp.identity !== this.host.identity) return;
       this.cp = null;
       this.forgetApplied();
+      this.forgetOffered();
       this.noteLastSeen(cp.getConnectionInfo().lastSeenAt, true);
       this.setOnline(false);
     });
@@ -467,6 +498,7 @@ export class ChargeController {
     // Nothing connected yet: give the charge point its reconnect window before
     // concluding it's offline (see STARTUP_GRACE_MS).
     if (this.online === null) this.armStartupGrace();
+    this.forgetOffered(); // the capability still holds the previous run's last reading
 
     this.tick(new Date(), 'init'); // establish initial mode capability; also arms the backstop timer
   }
@@ -622,7 +654,13 @@ export class ChargeController {
       return 'charger is Finishing - the session ended and it will not start another until the cable is unplugged and replugged';
     }
     if (PLUGGED.includes(this.lastStatusValue)) return null;
-    return `charger reports ${this.lastStatusValue} - nothing plugged in`;
+    // Not "nothing plugged in": on hardware a Wallbox went Charging -> Faulted
+    // with the car still connected, then started a session and charged.
+    if (this.lastStatusValue === 'Faulted') {
+      return `charger reports Faulted (${this.lastFaultCode ?? 'unknown'}) - not written until it reports a session or a plugged-in status`;
+    }
+    if (this.lastStatusValue === 'Available') return 'charger reports Available - nothing plugged in';
+    return `charger reports ${this.lastStatusValue}`;
   }
 
   /**
@@ -892,23 +930,29 @@ export class ChargeController {
 
   private onStatus(info: StatusNotificationReq): void {
     const changed = info.status !== this.prevStatus;
+    const detail = statusDetail(info);
+    // A new error or vendor code under an unchanged status is logged too: a
+    // charger can stay Faulted while its reason changes.
+    if (changed || detail !== this.prevStatusDetail) {
+      this.host.log(`[charger] status ${changed ? `${this.prevStatus ?? '?'} -> ` : ''}${info.status}${
+        detail ? ` (${detail})` : ''}`);
+      this.prevStatusDetail = detail;
+    }
     if (changed) {
-      this.host.log(`[charger] status ${this.prevStatus ?? '?'} -> ${info.status}${
-        info.errorCode && info.errorCode !== 'NoError' ? ` (${info.errorCode})` : ''}`);
       this.prevStatus = info.status;
       // Captured before any of the branches below clear transactionId/desiredAmps,
       // so a 'stopped' event's tokens reflect the current that was actually in
       // effect, not the just-cleared value.
       const event = this.statusToChargingEvent(info.status);
       if (event) this.emitChargingEvent(event);
-      if (info.status === 'Faulted') this.host.onFault?.(info.errorCode ?? 'unknown');
+      if (info.status === 'Faulted') this.host.onFault?.(detail ?? 'unknown');
     }
     this.host.setCapability('evcharger_charging_state', toChargingState(info.status));
     this.host.setCapability('evcharger_charging', info.status === 'Charging');
     // Persistent, condition-queryable fault state alongside the edge-only
     // onFault Flow trigger and the setWarning banner - all off the one signal.
     this.host.setCapability('alarm_generic', info.status === 'Faulted');
-    this.lastFaultCode = info.status === 'Faulted' ? (info.errorCode ?? 'unknown') : null;
+    this.lastFaultCode = info.status === 'Faulted' ? (detail ?? 'unknown') : null;
     this.refreshWarning();
 
     // A fresh plug-in always clears the manual latch, so a newly-connected car
@@ -1036,10 +1080,10 @@ export class ChargeController {
       this.lastPowerW = r.power;
       this.meteredSinceStatus = true;
       this.host.setCapability('measure_power', r.power);
-      // The meter corrects the charging state shown for a suspended status - see
+      // The meter corrects the charging state shown for a suspended or faulted status - see
       // isDeliveringPower(). (onStatus() sets it from the status alone, which is
       // right at the moment of the change: nothing has been metered since.)
-      if (this.lastStatusValue != null && SUSPENDED.includes(this.lastStatusValue)) {
+      if (this.lastStatusValue != null && METER_DECIDES.includes(this.lastStatusValue)) {
         const delivering = this.isDeliveringPower();
         this.host.setCapability('evcharger_charging_state',
           delivering ? 'plugged_in_charging' : toChargingState(this.lastStatusValue));
@@ -1048,6 +1092,7 @@ export class ChargeController {
     }
     if (r.current !== undefined) this.host.setCapability('measure_current', r.current);
     if (r.voltage !== undefined) this.host.setCapability('measure_voltage', r.voltage);
+    if (r.offered !== undefined) this.noteOffered(r.offered);
     if (r.energyKwh !== undefined) {
       this.lastEnergyKwh = r.energyKwh;
       this.host.setCapability('meter_power', r.energyKwh);
@@ -1076,7 +1121,7 @@ export class ChargeController {
     this.logVoltage(sag);
 
     // Discovery aid: OCPP 1.6 defines measurands this app maps onto nothing
-    // (SoC, Current.Offered, Temperature, vendor extensions), and parseMeterValues
+    // (SoC, Temperature, vendor extensions), and parseMeterValues
     // drops them silently. Report each name the first time it shows up - once
     // per app run, since it would otherwise repeat for the charger's lifetime.
     this.logUnhandledMeasurands(r.unhandled);
@@ -1124,6 +1169,21 @@ export class ChargeController {
       : `~${s.medianOhms.toFixed(2)}Ω (median of ${s.stepEstimates} steps)`;
     this.host.log(`[voltage] session: lowest ${fmtV(s.minV)} at ${s.minVAtA}A over ${s.loadedReadings} readings, `
       + `${sag}, impedance ${ohms}${s.uncommandedDrops ? `, car cut its own draw ${s.uncommandedDrops}x` : ''}`);
+  }
+
+  /**
+   * Current.Offered: what the charger is advertising to the car, as opposed to
+   * the limit it accepted (appliedAmps) or what the car draws (measure_current).
+   * Logged on change, so "stuck at 6A" says on its own which side holds it back:
+   * offered 6A is the charger, offered 32A while drawing 6A is the car.
+   */
+  private noteOffered(amps: number): void {
+    const prev = this.offeredA;
+    this.offeredA = amps;
+    this.host.setCapability('charge_current_offered', amps);
+    if (prev != null && Math.abs(amps - prev) < 0.5) return;
+    this.host.log(`[charger] offering ${fmtAmps(amps)} to the car (accepted limit ${
+      this.appliedAmps == null ? 'unknown' : `${this.appliedAmps}A`})`);
   }
 
   private logUnhandledMeasurands(unhandled: Readings['unhandled']): void {
@@ -1242,7 +1302,7 @@ export class ChargeController {
    */
   private isDeliveringPower(): boolean {
     if (this.lastStatusValue === 'Charging') return true;
-    return this.lastStatusValue != null && SUSPENDED.includes(this.lastStatusValue)
+    return this.lastStatusValue != null && METER_DECIDES.includes(this.lastStatusValue)
       && this.meteredSinceStatus && (this.lastPowerW ?? 0) >= DELIVERING_MIN_W;
   }
 
@@ -1746,9 +1806,14 @@ export class ChargeController {
     const appliedNote = !blocked && this.writeEligible() && this.appliedAmps !== target
       ? ` | charger ${this.appliedAmps == null ? 'limit unknown' : `still at ${this.appliedAmps}A`}`
       : '';
+    // And one it accepted but isn't passing on to the car - see offeredA.
+    const offeredNote = !appliedNote && this.online !== false && this.offeredA != null
+      && this.appliedAmps != null && Math.round(this.offeredA) < this.appliedAmps
+      ? ` | charger offering only ${fmtAmps(this.offeredA)}`
+      : '';
     this.host.log(`[decision:${trigger}] ${decision.reason}${
       capNotes.length ? ` | ${capNotes.join('; ')}` : ''} -> ${finalDesc}${linkNote}${
-      blocked ? ` | NOT SENT (${blocked})` : ''}${appliedNote}`);
+      blocked ? ` | NOT SENT (${blocked})` : ''}${appliedNote}${offeredNote}`);
 
     // Only the Finishing case asks something of the user; "nothing plugged in"
     // is an ordinary idle state and must not raise a banner.
@@ -1803,6 +1868,12 @@ export class ChargeController {
     const plugged = this.lastStatusValue != null && PLUGGED.includes(this.lastStatusValue)
       && this.lastStatusValue !== 'Finishing';
     return this.cp?.connected === true && (this.transactionId != null || plugged);
+  }
+
+  /** Link gone (or not up yet): whatever the charger offers now is unknown, not its last report. */
+  private forgetOffered(): void {
+    this.offeredA = null;
+    this.host.setCapability('charge_current_offered', null);
   }
 
   /** The charger's limit is unknown again (link or session changed): resync it, urgently. */

@@ -102,6 +102,12 @@ export interface Readings {
   current?: number;
   /** Voltage in V (max across phases). */
   voltage?: number;
+  /**
+   * Current.Offered in A (max across phases): what the charge point is actually
+   * advertising to the car. Not the same as the limit it accepted - its own
+   * max-current setting, load management or a fault can hold it lower.
+   */
+  offered?: number;
   /** Energy.Active.Import.Register in kWh. */
   energyKwh?: number;
   /** Timestamp of the batch. */
@@ -110,7 +116,7 @@ export interface Readings {
    * Measurands present in the batch that this app maps onto no reading, as
    * `measurand` -> the last raw `value unit @phase` seen for it. Diagnostic
    * only - nothing acts on it; ChargeController logs each name once so what a
-   * charge point actually sends (SoC? Current.Offered? a vendor measurand?) is
+   * charge point actually sends (SoC? Temperature? a vendor measurand?) is
    * discoverable from the log instead of being silently dropped here.
    */
   unhandled?: Record<string, string>;
@@ -140,6 +146,7 @@ const HANDLED_MEASURANDS = new Set([
   'Current.Import',
   'Voltage',
   'Energy.Active.Import.Register',
+  'Current.Offered',
 ]);
 
 function toNumber(v: string): number | undefined {
@@ -188,8 +195,12 @@ export function parseMeterValues(meterValue: MeterValue[]): Readings {
           out.energyKwh = unit === 'Wh' || unit === undefined ? num / 1000 : num;
           break;
         }
+        case 'Current.Offered': {
+          out.offered = Math.max(out.offered ?? 0, num);
+          break;
+        }
         // HANDLED_MEASURANDS above is the gate, so anything reaching here is
-        // one of the four cases.
+        // one of its cases.
         // no default
       }
     }
