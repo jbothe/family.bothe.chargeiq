@@ -117,7 +117,8 @@ Priority **Manual > Scheduled > Solar > Idle**, recomputed every tick:
 - **Manual** — a *manual latch* is set. Any hands-on action sets it: `evcharger_charging` toggle,
   `charge_current_limit` slider, or Flow start/stop/set-current (`on`/amps → charge, `off` → off).
   Persisted in device store; cleared **only** when a schedule window *starts* (rising edge) or the
-  charger is *unplugged→replugged* (OCPP `Available` → plugged edge).
+  charger is *unplugged→replugged* (OCPP `Available` → plugged edge, where `Available` lasted at least
+  `IDLE_RECONCILE_DELAY_MS` - see the reconnect-blip bullet under Key invariants).
 - **Scheduled** — no latch and inside a `Scheduler` window (schedule beats solar).
 - **Solar** — default outside schedules with no latch, when the `solarEnabled` device setting
   (default on) is true; follows excess via `SolarLoop`.
@@ -252,6 +253,16 @@ charger, and both now say so on the same line rather than reading like a success
     three is the no-laptop post-mortem for any "stuck below target" report. The `[decision:…]` line
     ends `| charger still at 22A` / `| charger limit unknown` while they differ, and the widget chip
     shows `22A→32A` (see Widget).
+  - **Accepted is still not offered.** `charge_current_offered` ("Offered Current", Insights on) is the
+    charger's own `Current.Offered` measurand - what it is actually advertising to the car - parsed
+    into `Readings.offered`, logged on a ≥0.5A move (`[charger] offering 6A to the car (accepted limit
+    32A)`), and nulled on disconnect and at `init()`. Once applied matches the target, a decision line
+    with offered below applied ends `| charger offering only 6A`. That is the one number that splits
+    "stuck at 6A" between the two sides: offered low is the charger (its own max-current setting,
+    load management, or a fault); offered at the limit while `measure_current` is low is the car.
+    Hardware case that prompted it: a Wallbox in fault 114 charging at 5.8A against an accepted 32A,
+    with no way to tell which side was holding it back short of restarting the app to catch the
+    once-per-run unhandled-measurand log.
 
 ### `transactionId` has two sources, and the charge point's wins
 `ChargePoint`'s `StartTransaction` handler allocates the id and answers the charger **whether or not
@@ -380,7 +391,7 @@ next move.
   once `applyIdleReconciliation()` actually clears it (or there was never a transaction to begin
   with), a subsequent `Available` nets as a normal confirmed `0` rather than being stuck "unavailable"
   forever.
-- **A Wallbox can report `SuspendedEV` while delivering full power** - confirmed on hardware after a
+- **A Wallbox can report `SuspendedEV` - or `Faulted` - while delivering power** - confirmed on hardware after a
   replug: 7 kW / 31.6A for minutes with no `Charging` report at all. Trusting the status alone netted
   the car's own draw as 0, so the household cap counted it as house load (trimming 32A to 31A with the
   real house at ~300W) and the widget chip read `READY`. In `SuspendedEV`/`SuspendedEVSE`,
@@ -391,6 +402,17 @@ next move.
   more than the house has. A flag rather than timestamps, because a status and a reading can land in
   the same millisecond. `onMeterValues()` also corrects `evcharger_charging_state` and
   `evcharger_charging` from it; the `started`/`paused` Flow events still follow the reported status.
+  `Faulted` is in the same `METER_DECIDES` list: a Wallbox went `Charging → Faulted (OtherError)`,
+  then started a transaction and charged at 1.4 kW for minutes without another status report. The
+  fault banner and `alarm_generic` stay up regardless - delivering power doesn't clear a fault.
+  `writeBlockedBecause()` names it as `Faulted (<detail>)`, not "nothing plugged in".
+- **A fault's useful number is the vendor code, not the OCPP one.** Wallbox reports nearly
+  everything as `errorCode: OtherError`; the code its own app shows (e.g. 114) rides in
+  `vendorErrorCode`. `statusDetail()` folds `errorCode`, `vendorErrorCode` (+`vendorId`) and `info`
+  into one string used by the `[charger] status` log, the `Charger fault: …` banner and the
+  `charger_fault` Flow token. The status line is also logged when only that detail changes under an
+  unchanged status (`prevStatusDetail`), since a charger can stay `Faulted` while its reason moves;
+  the Flow trigger still fires only on entering `Faulted`.
 - **The controller never issues `RemoteStopTransaction`.** Every "don't charge" decision (manual
   off, no schedule/solar target, stale solar feed, disconnected latch) resolves to `amps: 0` (pause)
   in `ChargeController.resolve()`/`tick()`, never a hard stop. The Wallbox holds `Finishing` until a
@@ -405,9 +427,15 @@ next move.
   retry `RemoteStartTransaction`, which a charger already mid-session may just accept as a no-op
   without ever sending a fresh `StartTransaction`, leaving the current stuck forever. `onStatus()`
   debounces the transaction-reconciliation side of an `Available` report by `IDLE_RECONCILE_DELAY_MS`
-  (5s), cancelling it if a plugged status supersedes it first. `prevPlugged` (fresh-plug-in / manual
-  latch clearing) is deliberately **not** debounced the same way - it needs to flip promptly for a
-  genuine plug-in, and is a separate, lower-stakes concern from transaction bookkeeping.
+  (5s), cancelling it if a plugged status supersedes it first. `prevPlugged` itself still flips
+  immediately (the plug-in edge, `onVehicleConnected`), but what a *replug* clears - the manual latch
+  and the sag banner - only counts one whose `Available` lasted at least that same 5s
+  (`unpluggedAt`). That is measured from the first status ever seen too, not only from a known
+  plugged state, because the blip is the first thing a charger reports after an app restart: before
+  this, every restart while plugged in silently dropped a manual override (confirmed on hardware,
+  `Available` → `SuspendedEV` 50ms apart, logged `manual cleared (fresh plug-in)`). Now it logs
+  `[mode] manual kept (Available for 50ms - a reconnect blip, not a replug)`. The `vehicle
+  connected`/`disconnected` Flow triggers are **not** gated the same way and still fire on the blip.
 - **Homey Pro's underlying OS clock runs in UTC**, independent of the timezone configured in the
   Homey app/mobile UI. Any wall-clock comparison (schedule windows, displayed times) must go through
   `this.homey.clock.getTimezone()` (`ControllerHost.getTimezone()` → `Scheduler.setTimezone()` /
@@ -470,6 +498,27 @@ next move.
   debugging` marker while the OCPP/solar paths were being confirmed on hardware; that's done, and
   the throttles are back. `SolarFeed`'s per-role `[solar] raw … update` lines existed only for that
   same exercise and are gone entirely - the merged `[solar]` line covers it.
+- **Voltage sag is diagnosed, never acted on.** `lib/control/VoltageMonitor.ts` (pure, clock-free)
+  is fed every `MeterValues` with both `Voltage` and `Current.Import`, stamped with `appliedAmps`.
+  It exists because a Tesla cut itself from 31.6A to exactly 23.7A (75%) with "unexpected voltage
+  drop" while the charger limit held at 32A - the car's own protection, which the app can't see or
+  override, and which points at wiring the user needs numbers for. Two measurements, because each
+  misses what the other catches: **sag against a no-load reference** (the last reading under
+  `NO_LOAD_MAX_A`, which is what the car itself watches, but it includes the network and every
+  other house load that moved meanwhile, and goes stale as grid voltage drifts through the day -
+  past `REFERENCE_MAX_AGE_MS` it's logged as "too old to trust" and never counts toward the
+  alarm), and **step impedance** (-ΔV/ΔI across a ≥`STEP_MIN_A` current change between
+  consecutive readings, which mostly isolates the charger's own current path; readings are whole
+  volts, so each estimate logs its ±1V/ΔI resolution and the session summary takes a median). A
+  step *down* with the accepted limit unchanged and still above the earlier draw is logged as the
+  car cutting its own draw. Logging is event-only (step, new session-high sag, alarm, a
+  `[voltage] session:` summary on unplug); the running sag rides on the existing
+  `[charger] power=` line. The banner (`refreshWarning()`, ranked below fault and replug, above
+  the solar feed) latches after `SAG_ALARM_READINGS` consecutive fresh readings ≥ `SAG_ALARM_PCT`
+  (5%, the usual installation voltage-drop design limit), carries the figures from the reading
+  that tripped it, and clears only on a replug after an unplug lasting at least
+  `IDLE_RECONCILE_DELAY_MS`, so the Wallbox's reconnect blip through `Available` doesn't wipe it
+  before anyone has seen it. In-memory only: an app restart drops the alarm and the reference.
 - **`parseMeterValues()` reports what it drops.** Anything outside the four measurands it maps
   (`Power.Active.Import`/`Current.Import`/`Voltage`/`Energy.Active.Import.Register`) lands in
   `Readings.unhandled` as `measurand -> "value unit @phase"` - captured *before* the numeric check,
@@ -477,14 +526,13 @@ next move.
   name **once per app run** (`loggedMeasurands`, not cleared on rebind - a reconnect doesn't change
   what the charger sends). Purely diagnostic; nothing reads it. It exists because OCPP 1.6 carries
   almost nothing about the *vehicle* - `SoC` (the one real EV datum, and only over ISO 15118, not
-  plain PWM), `Current.Offered`, `Temperature`, or a vendor measurand would otherwise be discarded
-  in silence, so this makes what a real Wallbox actually sends discoverable from `homey app run`
-  rather than assumed. **`Current.Offered` is requested on purpose** (`configureCharger()`, on every
-  fresh bind as well as on boot, since an app restart doesn't reboot the charger), and deliberately
-  left unparsed so this log is what reports it. It's what the charger actually advertises to the car,
-  and an accepted `SetChargingProfile` doesn't guarantee it: the Wallbox's own max-current setting or
-  load management can hold it lower. It was once dropped on the assumption that it always equals
-  what the app last wrote - that's the assumption it now exists to check.
+  plain PWM), `Temperature`, or a vendor measurand would otherwise be discarded in silence, so this
+  makes what a real Wallbox actually sends discoverable from `homey app run` rather than assumed.
+  **`Current.Offered` is requested on purpose** (`configureCharger()`, on every fresh bind as well as
+  on boot, since an app restart doesn't reboot the charger). It was first left unparsed so this log
+  would report it - which it did, but only once per run, too little to answer a live "why 6A?". It
+  is now parsed and tracked; see "Accepted is still not offered" above. It was once dropped on the
+  assumption that it always equals what the app last wrote - that's the assumption it exists to check.
 - Settings pages must include `<script src="/homey.js" data-origin="settings">`; widgets get their
   runtime injected automatically (no include, and keep widget JS **inline/single-file**).
 
@@ -551,7 +599,7 @@ file live. Real on-device verification (exact fonts/colors, anything the fetched
 cover) still needs `homey app run`.
 
 ## Testing
-Pure logic is unit-tested (`SolarLoop`, `Scheduler`, controller mode/latch/cap resolution, solar
+Pure logic is unit-tested (`SolarLoop`, `Scheduler`, `VoltageMonitor`, controller mode/latch/cap resolution, solar
 merge, widget presentation, `parseMeterValues()`). `test/sim-charger.ts` is an `ocpp-rpc` `RPCClient`
 simulator used by `test/ocpp-integration.test.ts` to exercise the real CentralSystem end-to-end
 without hardware. Controllers/CentralSystem are Homey-independent (host is an interface), so they run
@@ -621,6 +669,12 @@ the timer/teardown logic but not that a real wedged Wallbox link reaches it befo
 ping timeout does. Whether the 12h outage that prompted this fired `disconnect` at all is unknown
 (the old code logged nothing distinguishable); `[ocpp] offline (…)` now makes the next one legible
 either way.
+
+Whether the Wallbox reports `Voltage` at 0A at all (paused, or `SuspendedEV` before the car draws).
+The **sag** half of the voltage diagnostics (see Key invariants) needs a no-load reading as its
+reference; if the charger only meters under load, only the step-impedance half will ever report,
+and the banner can never fire. The first `[voltage] session:` line saying `no no-load reference`
+answers it.
 
 `SetChargingProfile` behaviour at exactly 6A (as opposed to 0A, confirmed below), and a live schedule
 window actually *starting* a charge from cold (`Preparing` → accepted `RemoteStartTransaction` →

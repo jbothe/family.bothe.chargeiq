@@ -28,15 +28,28 @@ test('an unhandled measurand records its unit and phase, and a non-numeric value
   const out = parseMeterValues([mv([
     { value: '42', measurand: 'SoC', unit: 'Percent' },
     {
-      value: '16', measurand: 'Current.Offered', unit: 'A', phase: 'L1',
+      value: '21', measurand: 'Temperature', unit: 'Celsius', phase: 'L1',
     },
     { value: 'Charging', measurand: 'Vendor.State' },
   ])]);
   assert.deepEqual(out.unhandled, {
     SoC: '42 Percent',
-    'Current.Offered': '16 A @L1',
+    Temperature: '21 Celsius @L1',
     'Vendor.State': 'Charging',
   });
+});
+
+test('Current.Offered is parsed (max across phases), not reported as unhandled', () => {
+  const out = parseMeterValues([mv([
+    {
+      value: '6', measurand: 'Current.Offered', unit: 'A', phase: 'L1',
+    },
+    {
+      value: '6.5', measurand: 'Current.Offered', unit: 'A', phase: 'L2',
+    },
+  ])]);
+  assert.equal(out.offered, 6.5);
+  assert.equal(out.unhandled, undefined);
 });
 
 test('a batch of only handled measurands leaves unhandled unset', () => {

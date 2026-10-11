@@ -14,6 +14,9 @@ import {
 } from '../ocpp/types';
 import { Scheduler, ScheduleWindow, findScheduleConflicts } from './Scheduler';
 import { SolarLoop, SolarLoopConfig } from './SolarLoop';
+import {
+  SAG_ALARM_PCT, SAG_ALARM_READINGS, SagReading, VoltageMonitor,
+} from './VoltageMonitor';
 
 /** Derived charging mode (not user-selected). */
 export type ChargeMode = 'manual' | 'scheduled' | 'solar' | 'idle';
@@ -203,11 +206,40 @@ export function fmtDuration(ms: number): string {
   return `${Math.round(h / 24)}d`;
 }
 
+/** Volts for logs and the banner: at most one decimal, none when whole. */
+function fmtV(v: number): string {
+  return `${Math.round(v * 10) / 10}V`;
+}
+
+/** Amps for logs: at most one decimal, none when whole. */
+function fmtAmps(a: number): string {
+  return `${Math.round(a * 10) / 10}A`;
+}
+
+/**
+ * A status report's error detail for logs, the fault banner and the Flow token:
+ * the OCPP errorCode plus whatever vendor detail came with it. The vendor code
+ * is the one worth having - it's the number the charger's own app shows (a
+ * Wallbox reported "error 114" there while OCPP only said OtherError).
+ */
+export function statusDetail(info: StatusNotificationReq): string | null {
+  const parts: string[] = [];
+  if (info.errorCode && info.errorCode !== 'NoError') parts.push(info.errorCode);
+  if (info.vendorErrorCode) parts.push(`vendor code ${info.vendorErrorCode}${info.vendorId ? ` (${info.vendorId})` : ''}`);
+  if (info.info) parts.push(`"${info.info}"`);
+  return parts.length ? parts.join(', ') : null;
+}
+
 /** OCPP statuses that mean a vehicle is connected. */
 const PLUGGED = ['Preparing', 'Charging', 'SuspendedEV', 'SuspendedEVSE', 'Finishing'];
 
 /** Statuses a Wallbox has been seen to report while still delivering - see isDeliveringPower(). */
-const SUSPENDED = ['SuspendedEV', 'SuspendedEVSE'];
+/**
+ * Statuses that don't say whether power is flowing, so the meter decides - see
+ * isDeliveringPower(). Faulted is here because a Wallbox charged at 6A for
+ * minutes while reporting nothing but Faulted (OtherError) since the car started.
+ */
+const METER_DECIDES = ['SuspendedEV', 'SuspendedEVSE', 'Faulted'];
 
 /** Metered draw below this in a suspended status is standby, not charging. */
 const DELIVERING_MIN_W = 100;
@@ -312,6 +344,9 @@ export class ChargeController {
 
   private prevStatus: string | null = null;
 
+  /** statusDetail() of the last status logged, so a changed error code is logged even under the same status. */
+  private prevStatusDetail: string | null = null;
+
   /** Raw last-seen OCPP status, used to gate a new RemoteStartTransaction. */
   private lastStatusValue: OcppStatus | null = null;
 
@@ -329,6 +364,12 @@ export class ChargeController {
   /** Fingerprint of the last [solar] line logged - see onSolarSample(). */
   private loggedSolar = '';
 
+  /** Sag/impedance diagnostics off MeterValues - see logVoltage(). */
+  private voltage = new VoltageMonitor();
+
+  /** When the vehicle was last unplugged, so a reconnect blip isn't taken for a real replug. */
+  private unpluggedAt: number | null = null;
+
   private transactionId: number | null = null;
 
   private desiredAmps: number | null = null;
@@ -340,6 +381,9 @@ export class ChargeController {
    * unknown. ensureCharging() keeps writing until the target matches it.
    */
   private appliedAmps: number | null = null;
+
+  /** Last Current.Offered reading on this link, or null - see noteOffered(). */
+  private offeredA: number | null = null;
 
   /**
    * The next write re-establishes an unknown limit, so it skips the throttle.
@@ -446,6 +490,7 @@ export class ChargeController {
       if (cp.identity !== this.host.identity) return;
       this.cp = null;
       this.forgetApplied();
+      this.forgetOffered();
       this.noteLastSeen(cp.getConnectionInfo().lastSeenAt, true);
       this.setOnline(false);
     });
@@ -453,6 +498,7 @@ export class ChargeController {
     // Nothing connected yet: give the charge point its reconnect window before
     // concluding it's offline (see STARTUP_GRACE_MS).
     if (this.online === null) this.armStartupGrace();
+    this.forgetOffered(); // the capability still holds the previous run's last reading
 
     this.tick(new Date(), 'init'); // establish initial mode capability; also arms the backstop timer
   }
@@ -608,7 +654,13 @@ export class ChargeController {
       return 'charger is Finishing - the session ended and it will not start another until the cable is unplugged and replugged';
     }
     if (PLUGGED.includes(this.lastStatusValue)) return null;
-    return `charger reports ${this.lastStatusValue} - nothing plugged in`;
+    // Not "nothing plugged in": on hardware a Wallbox went Charging -> Faulted
+    // with the car still connected, then started a session and charged.
+    if (this.lastStatusValue === 'Faulted') {
+      return `charger reports Faulted (${this.lastFaultCode ?? 'unknown'}) - not written until it reports a session or a plugged-in status`;
+    }
+    if (this.lastStatusValue === 'Available') return 'charger reports Available - nothing plugged in';
+    return `charger reports ${this.lastStatusValue}`;
   }
 
   /**
@@ -621,9 +673,16 @@ export class ChargeController {
     let next: string | null = null;
     if (this.lastFaultCode) next = `Charger fault: ${this.lastFaultCode}`;
     else if (this.needsReplug) next = 'Charging session ended - unplug and replug the cable to resume';
-    // Last: a fault or replug prompt is about the charger itself. No age in the
-    // text, or the banner would be rewritten every minute; the log has it.
-    else if (this.solarFeedDown) {
+    // Fixed at the reading that latched it, so the banner isn't rewritten as
+    // the sag moves; the log carries the running figures.
+    else if (this.voltage.alarm) {
+      const a = this.voltage.alarm;
+      next = `Voltage at the charger dropped ${a.sagPct.toFixed(1)}% under load `
+        + `(${fmtV(a.referenceV)} -> ${fmtV(a.voltage)} at ${a.current}A). `
+        + 'Have the charger circuit and supply connections checked.';
+    } else if (this.solarFeedDown) {
+      // Last: the others are about the charger itself. No age in the text, or
+      // the banner would be rewritten every minute; the log has it.
       next = 'Solar feed stale - no update from the solar app. Solar charging is paused, '
         + 'and the household/charger-circuit limits are not being applied.';
     }
@@ -871,23 +930,29 @@ export class ChargeController {
 
   private onStatus(info: StatusNotificationReq): void {
     const changed = info.status !== this.prevStatus;
+    const detail = statusDetail(info);
+    // A new error or vendor code under an unchanged status is logged too: a
+    // charger can stay Faulted while its reason changes.
+    if (changed || detail !== this.prevStatusDetail) {
+      this.host.log(`[charger] status ${changed ? `${this.prevStatus ?? '?'} -> ` : ''}${info.status}${
+        detail ? ` (${detail})` : ''}`);
+      this.prevStatusDetail = detail;
+    }
     if (changed) {
-      this.host.log(`[charger] status ${this.prevStatus ?? '?'} -> ${info.status}${
-        info.errorCode && info.errorCode !== 'NoError' ? ` (${info.errorCode})` : ''}`);
       this.prevStatus = info.status;
       // Captured before any of the branches below clear transactionId/desiredAmps,
       // so a 'stopped' event's tokens reflect the current that was actually in
       // effect, not the just-cleared value.
       const event = this.statusToChargingEvent(info.status);
       if (event) this.emitChargingEvent(event);
-      if (info.status === 'Faulted') this.host.onFault?.(info.errorCode ?? 'unknown');
+      if (info.status === 'Faulted') this.host.onFault?.(detail ?? 'unknown');
     }
     this.host.setCapability('evcharger_charging_state', toChargingState(info.status));
     this.host.setCapability('evcharger_charging', info.status === 'Charging');
     // Persistent, condition-queryable fault state alongside the edge-only
     // onFault Flow trigger and the setWarning banner - all off the one signal.
     this.host.setCapability('alarm_generic', info.status === 'Faulted');
-    this.lastFaultCode = info.status === 'Faulted' ? (info.errorCode ?? 'unknown') : null;
+    this.lastFaultCode = info.status === 'Faulted' ? (detail ?? 'unknown') : null;
     this.refreshWarning();
 
     // A fresh plug-in always clears the manual latch, so a newly-connected car
@@ -896,7 +961,14 @@ export class ChargeController {
     // charger idle before, so this doesn't fire on a transactionId restored
     // from the store at boot with no real status seen yet.
     if (info.status === 'Available') {
-      if (this.prevPlugged === true) this.host.onVehicleDisconnected?.();
+      // Stamped on entry from unknown too, not just from plugged: the Wallbox's
+      // reconnect blip is the first status after an app restart, and has to
+      // be measurable as one (see the plugged branch below).
+      if (this.prevPlugged !== false) this.unpluggedAt = Date.now();
+      if (this.prevPlugged === true) {
+        this.host.onVehicleDisconnected?.();
+        this.endVoltageSession();
+      }
       this.prevPlugged = false;
       // Debounced: see IDLE_RECONCILE_DELAY_MS. Don't trust a single Available
       // report as proof a still-tracked transaction has actually ended - only
@@ -916,7 +988,20 @@ export class ChargeController {
         this.pendingIdleReconcile = null;
       }
       if (this.prevPlugged === false) {
-        if (this.manualLatch) this.clearManualLatch('fresh plug-in');
+        // Only a real replug - someone has actually been out to the car - may
+        // clear the manual latch or a sag warning. The Wallbox's reconnect blip
+        // (see IDLE_RECONCILE_DELAY_MS) also passes through Available, on every
+        // app restart, and used to silently drop a manual override with it.
+        const unpluggedMs = this.unpluggedAt == null ? 0 : Date.now() - this.unpluggedAt;
+        if (unpluggedMs >= IDLE_RECONCILE_DELAY_MS) {
+          if (this.manualLatch) this.clearManualLatch('fresh plug-in');
+          if (this.voltage.alarm) {
+            this.voltage.clearAlarm();
+            this.refreshWarning();
+          }
+        } else if (this.manualLatch) {
+          this.host.log(`[mode] manual kept (Available for ${unpluggedMs}ms - a reconnect blip, not a replug)`);
+        }
         this.host.onVehicleConnected?.();
       }
       this.prevPlugged = true;
@@ -995,10 +1080,10 @@ export class ChargeController {
       this.lastPowerW = r.power;
       this.meteredSinceStatus = true;
       this.host.setCapability('measure_power', r.power);
-      // The meter corrects the charging state shown for a suspended status - see
+      // The meter corrects the charging state shown for a suspended or faulted status - see
       // isDeliveringPower(). (onStatus() sets it from the status alone, which is
       // right at the moment of the change: nothing has been metered since.)
-      if (this.lastStatusValue != null && SUSPENDED.includes(this.lastStatusValue)) {
+      if (this.lastStatusValue != null && METER_DECIDES.includes(this.lastStatusValue)) {
         const delivering = this.isDeliveringPower();
         this.host.setCapability('evcharger_charging_state',
           delivering ? 'plugged_in_charging' : toChargingState(this.lastStatusValue));
@@ -1007,26 +1092,98 @@ export class ChargeController {
     }
     if (r.current !== undefined) this.host.setCapability('measure_current', r.current);
     if (r.voltage !== undefined) this.host.setCapability('measure_voltage', r.voltage);
+    if (r.offered !== undefined) this.noteOffered(r.offered);
     if (r.energyKwh !== undefined) {
       this.lastEnergyKwh = r.energyKwh;
       this.host.setCapability('meter_power', r.energyKwh);
     }
     this.updateSessionCapabilities();
 
+    // limitA is what the charger accepted, not what was decided - a drop the
+    // charger was never told to make is the car's own doing.
+    const sag = r.voltage !== undefined && r.current !== undefined
+      ? this.voltage.add({
+        at: Date.now(), voltage: r.voltage, current: r.current, limitA: this.appliedAmps,
+      })
+      : null;
+
     // Gated on real movement: MeterValues arrives every meterSampleIntervalSec
     // (10s by default) for as long as the app runs, so logging every report
     // buries everything else in the log for no added information.
     if (r.power !== undefined && Math.abs(r.power - this.loggedPowerW) >= 100) {
       this.loggedPowerW = r.power;
+      const sagNote = sag?.sagV != null
+        ? ` sag=${fmtV(sag.sagV)}/${sag.sagPct!.toFixed(1)}%${sag.referenceFresh ? '' : ' (old ref)'}`
+        : '';
       this.host.log(`[charger] power=${Math.round(r.power)}W `
-        + `current=${r.current ?? '?'}A voltage=${r.voltage ?? '?'}V`);
+        + `current=${r.current ?? '?'}A voltage=${r.voltage ?? '?'}V${sagNote}`);
     }
+    this.logVoltage(sag);
 
     // Discovery aid: OCPP 1.6 defines measurands this app maps onto nothing
-    // (SoC, Current.Offered, Temperature, vendor extensions), and parseMeterValues
+    // (SoC, Temperature, vendor extensions), and parseMeterValues
     // drops them silently. Report each name the first time it shows up - once
     // per app run, since it would otherwise repeat for the charger's lifetime.
     this.logUnhandledMeasurands(r.unhandled);
+  }
+
+  /**
+   * The voltage diagnostics' log trail. Only events are logged - a current
+   * step, a new session-high sag, the alarm latching - never every reading;
+   * the [charger] power= line carries the running sag on real movement.
+   */
+  private logVoltage(r: SagReading | null): void {
+    if (!r) return;
+    const { step } = r;
+    if (step) {
+      const ohms = step.ohms == null
+        ? 'inconclusive (another load moved at the same moment)'
+        : `${step.ohms.toFixed(2)}Ω ±${step.resolutionOhms.toFixed(2)}`;
+      const note = step.uncommanded
+        ? ` | not commanded: charger limit held at ${step.limitA}A, the car cut its own draw to `
+          + `${Math.round((step.toA / step.fromA) * 100)}%`
+        : '';
+      this.host.log(`[voltage] step ${step.fromA}A -> ${step.toA}A: ${fmtV(step.fromV)} -> ${fmtV(step.toV)}, `
+        + `impedance ${ohms}${note}`);
+    }
+    if (r.newMax && r.sagV != null && r.referenceAgeMs != null) {
+      this.host.log(`[voltage] session high sag ${fmtV(r.sagV)} (${r.sagPct!.toFixed(1)}%) `
+        + `from ${fmtV(r.referenceV!)} no-load ${fmtDuration(r.referenceAgeMs)} ago`
+        + `${r.referenceFresh ? '' : ' - reference too old to trust'}`);
+    }
+    if (r.alarmRaised) {
+      this.host.log(`[voltage] sag over ${SAG_ALARM_PCT}% for ${SAG_ALARM_READINGS} readings in a row - warning raised`);
+      this.refreshWarning();
+    }
+  }
+
+  /** Log the session's voltage summary (the numbers for an electrician) and reset its stats. */
+  private endVoltageSession(): void {
+    const s = this.voltage.endSession();
+    if (!s) return;
+    const sag = s.maxSagV == null
+      ? 'no no-load reference'
+      : `max sag ${fmtV(s.maxSagV)} (${s.maxSagPct!.toFixed(1)}%) from ${fmtV(s.maxSagReferenceV!)} no-load`;
+    const ohms = s.medianOhms == null
+      ? 'no step estimate'
+      : `~${s.medianOhms.toFixed(2)}Ω (median of ${s.stepEstimates} steps)`;
+    this.host.log(`[voltage] session: lowest ${fmtV(s.minV)} at ${s.minVAtA}A over ${s.loadedReadings} readings, `
+      + `${sag}, impedance ${ohms}${s.uncommandedDrops ? `, car cut its own draw ${s.uncommandedDrops}x` : ''}`);
+  }
+
+  /**
+   * Current.Offered: what the charger is advertising to the car, as opposed to
+   * the limit it accepted (appliedAmps) or what the car draws (measure_current).
+   * Logged on change, so "stuck at 6A" says on its own which side holds it back:
+   * offered 6A is the charger, offered 32A while drawing 6A is the car.
+   */
+  private noteOffered(amps: number): void {
+    const prev = this.offeredA;
+    this.offeredA = amps;
+    this.host.setCapability('charge_current_offered', amps);
+    if (prev != null && Math.abs(amps - prev) < 0.5) return;
+    this.host.log(`[charger] offering ${fmtAmps(amps)} to the car (accepted limit ${
+      this.appliedAmps == null ? 'unknown' : `${this.appliedAmps}A`})`);
   }
 
   private logUnhandledMeasurands(unhandled: Readings['unhandled']): void {
@@ -1145,7 +1302,7 @@ export class ChargeController {
    */
   private isDeliveringPower(): boolean {
     if (this.lastStatusValue === 'Charging') return true;
-    return this.lastStatusValue != null && SUSPENDED.includes(this.lastStatusValue)
+    return this.lastStatusValue != null && METER_DECIDES.includes(this.lastStatusValue)
       && this.meteredSinceStatus && (this.lastPowerW ?? 0) >= DELIVERING_MIN_W;
   }
 
@@ -1649,9 +1806,14 @@ export class ChargeController {
     const appliedNote = !blocked && this.writeEligible() && this.appliedAmps !== target
       ? ` | charger ${this.appliedAmps == null ? 'limit unknown' : `still at ${this.appliedAmps}A`}`
       : '';
+    // And one it accepted but isn't passing on to the car - see offeredA.
+    const offeredNote = !appliedNote && this.online !== false && this.offeredA != null
+      && this.appliedAmps != null && Math.round(this.offeredA) < this.appliedAmps
+      ? ` | charger offering only ${fmtAmps(this.offeredA)}`
+      : '';
     this.host.log(`[decision:${trigger}] ${decision.reason}${
       capNotes.length ? ` | ${capNotes.join('; ')}` : ''} -> ${finalDesc}${linkNote}${
-      blocked ? ` | NOT SENT (${blocked})` : ''}${appliedNote}`);
+      blocked ? ` | NOT SENT (${blocked})` : ''}${appliedNote}${offeredNote}`);
 
     // Only the Finishing case asks something of the user; "nothing plugged in"
     // is an ordinary idle state and must not raise a banner.
@@ -1706,6 +1868,12 @@ export class ChargeController {
     const plugged = this.lastStatusValue != null && PLUGGED.includes(this.lastStatusValue)
       && this.lastStatusValue !== 'Finishing';
     return this.cp?.connected === true && (this.transactionId != null || plugged);
+  }
+
+  /** Link gone (or not up yet): whatever the charger offers now is unknown, not its last report. */
+  private forgetOffered(): void {
+    this.offeredA = null;
+    this.host.setCapability('charge_current_offered', null);
   }
 
   /** The charger's limit is unknown again (link or session changed): resync it, urgently. */

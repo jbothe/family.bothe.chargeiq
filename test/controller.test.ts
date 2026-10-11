@@ -4,7 +4,7 @@ import test from 'node:test';
 import assert from 'node:assert';
 import { EventEmitter } from 'events';
 import {
-  ChargeController, ControllerHost, ChargingTokens, fmtDuration, toChargingState,
+  ChargeController, ControllerHost, ChargingTokens, fmtDuration, statusDetail, toChargingState,
 } from '../lib/control/ChargeController';
 import { CentralSystem } from '../lib/ocpp/CentralSystem';
 import { ChargePoint, RpcClient } from '../lib/ocpp/ChargePoint';
@@ -1316,7 +1316,8 @@ test('manual off pauses at 0A (keeps the transaction) instead of hard-stopping',
   assert.ok(!calls.includes('RemoteStopTransaction'), 'still no hard stop anywhere in this flow');
 });
 
-test('manual latch set while unplugged is cleared by the fresh plug-in (never defaults to Manual)', async () => {
+test('manual latch set while unplugged is cleared by the fresh plug-in (never defaults to Manual)', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: 1_000_000 });
   const calls: string[] = [];
   const fakeClient: RpcClient = {
     identity: 'X',
@@ -1362,6 +1363,7 @@ test('manual latch set while unplugged is cleared by the fresh plug-in (never de
 
   // A fresh plug-in (no schedule window, no prior replug) must clear the
   // latch and fall through to Solar - never stay Manual.
+  t.mock.timers.tick(60_000);
   cp.emit('status', { connectorId: 1, errorCode: 'NoError', status: 'SuspendedEV' });
   assert.equal(c.resolve(new Date()).mode, 'solar', 'a fresh plug-in clears the latch -> Solar (no schedule)');
 });
@@ -2525,11 +2527,11 @@ test('an unhandled measurand is logged once, and only the newly-seen ones on a l
   // A name not seen before still gets reported, on its own.
   cp.emit('meterValues', {
     power: 7200,
-    unhandled: { SoC: '44 Percent', 'Current.Offered': '16 A', Temperature: '21 Celsius' },
+    unhandled: { SoC: '44 Percent', 'Current.Export': '0 A', Temperature: '21 Celsius' },
   });
   const lines = logs.filter((l) => l.includes('not used by this app'));
   assert.equal(lines.length, 2);
-  assert.match(lines[1], /measurands not used by this app: Current\.Offered=16 A, Temperature=21 Celsius/);
+  assert.match(lines[1], /measurands not used by this app: Current\.Export=0 A, Temperature=21 Celsius/);
   assert.equal(lines[1].includes('SoC'), false, 'already-reported name is not repeated');
 });
 
@@ -2646,6 +2648,7 @@ interface ConnHarness {
   cp: ChargePoint;
   cs: CentralSystem;
   store: Record<string, unknown>;
+  caps: Record<string, unknown>;
   logs: string[];
   unavailable: (string | null)[];
   availableCount: () => number;
@@ -2674,13 +2677,16 @@ function makeConnController(extraStore: Record<string, unknown> = {}): ConnHarne
   const settings: Record<string, unknown> = {
     minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdA: 14000 / 230, householdPhases: 1,
   };
+  const caps: Record<string, unknown> = {};
   const logs: string[] = [];
   const unavailable: (string | null)[] = [];
   const conn: { online: boolean; offlineForMs: number | null }[] = [];
   const h = { availableCount: 0 };
   const host: ControllerHost = {
     identity: 'X',
-    setCapability: () => {},
+    setCapability: (k, v) => {
+      caps[k] = v;
+    },
     getSetting: <T>(k: string) => settings[k] as T,
     getStore: <T>(k: string) => store[k] as T,
     setStore: async (k, v) => {
@@ -2724,6 +2730,7 @@ function makeConnController(extraStore: Record<string, unknown> = {}): ConnHarne
     cp,
     cs,
     store,
+    caps,
     logs,
     unavailable,
     availableCount: () => h.availableCount,
@@ -2877,7 +2884,7 @@ test('the decision log calls out that a resolved target could not be sent while 
 // 21A -> 22A -> 23A without attempting a single write)
 // ---------------------------------------------------------------------------
 
-const status = (s: string) => ({ connectorId: 1, errorCode: 'NoError', status: s });
+const status = (s: string) => ({ connectorId: 1, errorCode: 'NoError', status: s as OcppStatus });
 const decisions = (logs: string[]) => logs.filter((l) => l.startsWith('[decision:'));
 
 test('a target the charger cannot be given is logged as NOT SENT, never as if it had been applied', () => {
@@ -2936,6 +2943,105 @@ test('a fault warning is not clobbered by the next non-Faulted status report', (
   assert.ok(String(warnings[warnings.length - 1]).includes('GroundFailure'));
   cp.emit('status', status('Charging'));
   assert.equal(warnings[warnings.length - 1], null, 'and does clear once the fault actually goes away');
+});
+
+// ---------------------------------------------------------------------------
+// Voltage sag diagnostics
+// ---------------------------------------------------------------------------
+
+/** No-load reference, then SAG_ALARM_READINGS loaded readings 16V (6.7%) down. */
+function sagOverThreshold(cp: ChargePoint): void {
+  cp.emit('meterValues', { power: 0, current: 0, voltage: 240 });
+  for (let i = 0; i < 3; i++) cp.emit('meterValues', { power: 7000, current: 32, voltage: 224 });
+}
+
+test('sustained sag under load raises a warning and logs the evidence', () => {
+  const { cp, warnings, logs } = makeBoundController();
+  cp.emit('status', status('SuspendedEV'));
+  sagOverThreshold(cp);
+
+  const banner = String(warnings[warnings.length - 1]);
+  assert.ok(banner.includes('dropped 6.7% under load (240V -> 224V at 32A)'), banner);
+  assert.ok(logs.some((l) => l.startsWith('[charger] power=7000W') && l.endsWith('sag=16V/6.7%')),
+    'the running sag rides on the existing power line');
+  assert.ok(logs.some((l) => l.startsWith('[voltage] step 0A -> 32A: 240V -> 224V, impedance 0.50Ω')));
+  assert.ok(logs.some((l) => l.includes('warning raised')));
+});
+
+test('a drop the charger limit never asked for is logged as the car cutting its own draw', async () => {
+  const {
+    c, cp, caps, logs,
+  } = makeBoundController();
+  // Target first, so the first eligible write (the unthrottled resync) is 32A.
+  await c.startManual(32);
+  cp.emit('status', status('Charging'));
+  await new Promise((r) => {
+    setImmediate(r);
+  });
+  assert.equal(caps.charge_current_applied, 32, 'precondition: the charger accepted 32A');
+
+  // The hardware incident, verbatim.
+  cp.emit('meterValues', { power: 7015, current: 31.6, voltage: 222 });
+  cp.emit('meterValues', { power: 5285, current: 23.7, voltage: 223 });
+  const line = logs.find((l) => l.startsWith('[voltage] step 31.6A -> 23.7A'));
+  assert.ok(line?.includes('impedance 0.13Ω ±0.13'), String(line));
+  assert.ok(line?.includes('charger limit held at 32A, the car cut its own draw to 75%'), String(line));
+});
+
+test('the sag warning survives a reconnect blip, and clears on a real replug', (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: 1_000_000 });
+  const { cp, warnings, logs } = makeBoundController();
+  cp.emit('status', status('SuspendedEV'));
+  sagOverThreshold(cp);
+  assert.ok(String(warnings[warnings.length - 1]).includes('Voltage at the charger'));
+
+  cp.emit('status', status('Available')); // the Wallbox's reconnect blip
+  cp.emit('status', status('Charging'));
+  assert.ok(String(warnings[warnings.length - 1]).includes('Voltage at the charger'), 'still up');
+  assert.ok(logs.some((l) => l.startsWith('[voltage] session: lowest 224V at 32A over 3 readings, max sag 16V (6.7%)')),
+    'unplugging (or looking like it) closes the session with a summary');
+
+  cp.emit('status', status('Available'));
+  t.mock.timers.tick(6000);
+  cp.emit('status', status('SuspendedEV'));
+  assert.equal(warnings[warnings.length - 1], null, 'someone has been out to the car');
+});
+
+test('the reconnect blip on an app restart does not clear a manual latch, but a real replug still does', (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: 1_000_000 });
+  // As on hardware after a restart: latch restored from the store, then the
+  // first two statuses ever seen are Available and SuspendedEV ~50ms apart.
+  const {
+    c, cp, logs, store,
+  } = makeBoundController({ manualLatch: { intent: 'charge', amps: 32 } });
+  assert.equal(c.resolve(new Date()).mode, 'manual');
+  cp.emit('status', status('Available'));
+  t.mock.timers.tick(50);
+  cp.emit('status', status('SuspendedEV'));
+  assert.equal(c.resolve(new Date()).mode, 'manual', 'a blip is not a replug');
+  assert.deepEqual(store.manualLatch, { intent: 'charge', amps: 32 }, 'still persisted');
+  assert.ok(logs.includes('[mode] manual kept (Available for 50ms - a reconnect blip, not a replug)'));
+
+  // The same blip mid-session, from a known plugged state.
+  cp.emit('status', status('Available'));
+  t.mock.timers.tick(600);
+  cp.emit('status', status('Charging'));
+  assert.equal(c.resolve(new Date()).mode, 'manual');
+
+  cp.emit('status', status('Available'));
+  t.mock.timers.tick(6000);
+  cp.emit('status', status('SuspendedEV'));
+  assert.notEqual(c.resolve(new Date()).mode, 'manual', 'someone has been out to the car');
+  assert.equal(store.manualLatch, null);
+});
+
+test('a real replug after a restart that found the car unplugged clears the latch', (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: 1_000_000 });
+  const { c, cp } = makeBoundController({ manualLatch: { intent: 'off' } });
+  cp.emit('status', status('Available')); // first status: genuinely unplugged
+  t.mock.timers.tick(10 * 60_000);
+  cp.emit('status', status('SuspendedEV'));
+  assert.notEqual(c.resolve(new Date()).mode, 'manual');
 });
 
 test('recovering from Finishing writes the profile even though the target never changed while blocked', () => {
@@ -3551,4 +3657,114 @@ test('a genuine suspend still nets as zero, and standby draw does not count as c
   assert.equal(caps.evcharger_charging_state, 'plugged_in');
   assert.equal(caps.evcharger_charging, false);
   c.destroy();
+});
+
+// ---------------------------------------------------------------------------
+// A Wallbox can charge while reporting Faulted, and its own error code matters
+// ---------------------------------------------------------------------------
+
+test('statusDetail carries the vendor code and info alongside the OCPP error code', () => {
+  assert.equal(statusDetail(status('Charging')), null);
+  assert.equal(statusDetail({ ...status('Faulted'), errorCode: 'OtherError' }), 'OtherError');
+  assert.equal(statusDetail({
+    ...status('Faulted'), errorCode: 'OtherError', vendorId: 'Wallbox', vendorErrorCode: '114', info: 'CP fault',
+  }), 'OtherError, vendor code 114 (Wallbox), "CP fault"');
+  assert.equal(statusDetail({ ...status('Charging'), vendorErrorCode: '7' }), 'vendor code 7',
+    'vendor detail is kept even without an OCPP error code');
+});
+
+test('a fault logs, banners and triggers with the vendor code, and a new code under the same status is logged', () => {
+  const {
+    cp, logs, warnings, faults,
+  } = makeBoundController();
+  cp.emit('status', status('Charging'));
+  cp.emit('status', {
+    ...status('Faulted'), errorCode: 'OtherError', vendorErrorCode: '114',
+  });
+  assert.ok(logs.includes('[charger] status Charging -> Faulted (OtherError, vendor code 114)'));
+  assert.equal(warnings[warnings.length - 1], 'Charger fault: OtherError, vendor code 114');
+  assert.deepEqual(faults, ['OtherError, vendor code 114']);
+
+  cp.emit('status', {
+    ...status('Faulted'), errorCode: 'OtherError', vendorErrorCode: '114',
+  });
+  assert.equal(logs.filter((l) => l.startsWith('[charger] status')).length, 2, 'a repeat is not re-logged');
+
+  cp.emit('status', {
+    ...status('Faulted'), errorCode: 'OtherError', vendorErrorCode: '115',
+  });
+  assert.ok(logs.includes('[charger] status Faulted (OtherError, vendor code 115)'));
+  assert.equal(warnings[warnings.length - 1], 'Charger fault: OtherError, vendor code 115');
+  assert.equal(faults.length, 1, 'the Flow trigger is for entering a fault, not every new code');
+});
+
+test('a charger delivering while Faulted is netted from its meter, as on hardware', () => {
+  const { c, cp, caps } = makeBoundController();
+  cp.emit('status', status('Charging'));
+  cp.emit('meterValues', { power: 7000 });
+  cp.emit('status', { ...status('Faulted'), errorCode: 'OtherError' });
+  assert.equal(c.getDiagnostics().chargerPowerW, 0,
+    'the reading from before the fault does not count - same rule as a suspend');
+
+  cp.emit('meterValues', { power: 1380, current: 5.8 });
+  assert.equal(c.getDiagnostics().chargerPowerW, 1380, 'the meter decides, not the status');
+  assert.equal(caps.evcharger_charging_state, 'plugged_in_charging');
+  assert.equal(caps.evcharger_charging, true);
+  assert.equal(caps.alarm_generic, true, 'still a fault');
+  c.destroy();
+});
+
+test('a Faulted charger with no session is NOT SENT for that reason, not as "nothing plugged in"', () => {
+  const { c, cp, logs } = makeBoundController();
+  c.setSolarTarget(16);
+  cp.emit('status', { ...status('Faulted'), errorCode: 'OtherError', vendorErrorCode: '114' });
+  const line = decisions(logs).pop()!;
+  assert.ok(line.includes('NOT SENT (charger reports Faulted (OtherError, vendor code 114) - not written until'), line);
+  assert.equal(line.includes('nothing plugged in'), false);
+
+  cp.emit('status', status('Unavailable'));
+  assert.ok(decisions(logs).pop()!.endsWith('NOT SENT (charger reports Unavailable)'),
+    'other non-plugged statuses are named as-is, without a guess at why');
+  c.destroy();
+});
+
+// ---------------------------------------------------------------------------
+// Current.Offered: which side is holding the current back
+// ---------------------------------------------------------------------------
+
+test('the offered current is published, logged on change, and flagged when below the accepted limit', async () => {
+  const {
+    c, cp, caps, logs,
+  } = makeBoundController();
+  // Target first, so the first eligible write (the unthrottled resync) is 32A.
+  await c.startManual(32);
+  cp.emit('status', status('Charging'));
+  await new Promise((r) => {
+    setImmediate(r);
+  });
+  assert.equal(caps.charge_current_applied, 32, 'precondition');
+
+  cp.emit('meterValues', { power: 1380, current: 5.8, offered: 6 });
+  assert.equal(caps.charge_current_offered, 6);
+  assert.ok(logs.includes('[charger] offering 6A to the car (accepted limit 32A)'));
+  c.tick(new Date(), 'timer');
+  assert.ok(decisions(logs).pop()!.endsWith('-> 32A | charger offering only 6A'), 'the charger is the one holding back');
+
+  cp.emit('meterValues', { power: 1380, current: 5.8, offered: 6.2 });
+  assert.equal(logs.filter((l) => l.startsWith('[charger] offering')).length, 1, 'jitter is not re-logged');
+
+  cp.emit('meterValues', { power: 7300, current: 31.7, offered: 32 });
+  assert.ok(logs.includes('[charger] offering 32A to the car (accepted limit 32A)'));
+  c.tick(new Date(), 'timer');
+  assert.ok(decisions(logs).pop()!.endsWith('-> 32A'), 'nothing to flag once it offers what it accepted');
+  c.destroy();
+});
+
+test('the offered current is unknown once the link drops, never the last reading', () => {
+  const h = makeConnController();
+  h.cs.emit('connect', h.cp);
+  h.cp.emit('meterValues', { offered: 16 });
+  assert.equal(h.caps.charge_current_offered, 16);
+  h.cs.emit('disconnect', h.cp);
+  assert.equal(h.caps.charge_current_offered, null);
 });
