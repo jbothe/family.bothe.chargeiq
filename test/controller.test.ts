@@ -2938,6 +2938,68 @@ test('a fault warning is not clobbered by the next non-Faulted status report', (
   assert.equal(warnings[warnings.length - 1], null, 'and does clear once the fault actually goes away');
 });
 
+// ---------------------------------------------------------------------------
+// Voltage sag diagnostics
+// ---------------------------------------------------------------------------
+
+/** No-load reference, then SAG_ALARM_READINGS loaded readings 16V (6.7%) down. */
+function sagOverThreshold(cp: ChargePoint): void {
+  cp.emit('meterValues', { power: 0, current: 0, voltage: 240 });
+  for (let i = 0; i < 3; i++) cp.emit('meterValues', { power: 7000, current: 32, voltage: 224 });
+}
+
+test('sustained sag under load raises a warning and logs the evidence', () => {
+  const { cp, warnings, logs } = makeBoundController();
+  cp.emit('status', status('SuspendedEV'));
+  sagOverThreshold(cp);
+
+  const banner = String(warnings[warnings.length - 1]);
+  assert.ok(banner.includes('dropped 6.7% under load (240V -> 224V at 32A)'), banner);
+  assert.ok(logs.some((l) => l.startsWith('[charger] power=7000W') && l.endsWith('sag=16V/6.7%')),
+    'the running sag rides on the existing power line');
+  assert.ok(logs.some((l) => l.startsWith('[voltage] step 0A -> 32A: 240V -> 224V, impedance 0.50Ω')));
+  assert.ok(logs.some((l) => l.includes('warning raised')));
+});
+
+test('a drop the charger limit never asked for is logged as the car cutting its own draw', async () => {
+  const {
+    c, cp, caps, logs,
+  } = makeBoundController();
+  // Target first, so the first eligible write (the unthrottled resync) is 32A.
+  await c.startManual(32);
+  cp.emit('status', status('Charging'));
+  await new Promise((r) => {
+    setImmediate(r);
+  });
+  assert.equal(caps.charge_current_applied, 32, 'precondition: the charger accepted 32A');
+
+  // The hardware incident, verbatim.
+  cp.emit('meterValues', { power: 7015, current: 31.6, voltage: 222 });
+  cp.emit('meterValues', { power: 5285, current: 23.7, voltage: 223 });
+  const line = logs.find((l) => l.startsWith('[voltage] step 31.6A -> 23.7A'));
+  assert.ok(line?.includes('impedance 0.13Ω ±0.13'), String(line));
+  assert.ok(line?.includes('charger limit held at 32A, the car cut its own draw to 75%'), String(line));
+});
+
+test('the sag warning survives a reconnect blip, and clears on a real replug', (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: 1_000_000 });
+  const { cp, warnings, logs } = makeBoundController();
+  cp.emit('status', status('SuspendedEV'));
+  sagOverThreshold(cp);
+  assert.ok(String(warnings[warnings.length - 1]).includes('Voltage at the charger'));
+
+  cp.emit('status', status('Available')); // the Wallbox's reconnect blip
+  cp.emit('status', status('Charging'));
+  assert.ok(String(warnings[warnings.length - 1]).includes('Voltage at the charger'), 'still up');
+  assert.ok(logs.some((l) => l.startsWith('[voltage] session: lowest 224V at 32A over 3 readings, max sag 16V (6.7%)')),
+    'unplugging (or looking like it) closes the session with a summary');
+
+  cp.emit('status', status('Available'));
+  t.mock.timers.tick(6000);
+  cp.emit('status', status('SuspendedEV'));
+  assert.equal(warnings[warnings.length - 1], null, 'someone has been out to the car');
+});
+
 test('recovering from Finishing writes the profile even though the target never changed while blocked', () => {
   const { c, cp, logs } = makeBoundController();
   cp.emit('startTransaction', 49, {

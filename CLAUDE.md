@@ -470,6 +470,27 @@ next move.
   debugging` marker while the OCPP/solar paths were being confirmed on hardware; that's done, and
   the throttles are back. `SolarFeed`'s per-role `[solar] raw … update` lines existed only for that
   same exercise and are gone entirely - the merged `[solar]` line covers it.
+- **Voltage sag is diagnosed, never acted on.** `lib/control/VoltageMonitor.ts` (pure, clock-free)
+  is fed every `MeterValues` with both `Voltage` and `Current.Import`, stamped with `appliedAmps`.
+  It exists because a Tesla cut itself from 31.6A to exactly 23.7A (75%) with "unexpected voltage
+  drop" while the charger limit held at 32A - the car's own protection, which the app can't see or
+  override, and which points at wiring the user needs numbers for. Two measurements, because each
+  misses what the other catches: **sag against a no-load reference** (the last reading under
+  `NO_LOAD_MAX_A`, which is what the car itself watches, but it includes the network and every
+  other house load that moved meanwhile, and goes stale as grid voltage drifts through the day -
+  past `REFERENCE_MAX_AGE_MS` it's logged as "too old to trust" and never counts toward the
+  alarm), and **step impedance** (-ΔV/ΔI across a ≥`STEP_MIN_A` current change between
+  consecutive readings, which mostly isolates the charger's own current path; readings are whole
+  volts, so each estimate logs its ±1V/ΔI resolution and the session summary takes a median). A
+  step *down* with the accepted limit unchanged and still above the earlier draw is logged as the
+  car cutting its own draw. Logging is event-only (step, new session-high sag, alarm, a
+  `[voltage] session:` summary on unplug); the running sag rides on the existing
+  `[charger] power=` line. The banner (`refreshWarning()`, ranked below fault and replug, above
+  the solar feed) latches after `SAG_ALARM_READINGS` consecutive fresh readings ≥ `SAG_ALARM_PCT`
+  (5%, the usual installation voltage-drop design limit), carries the figures from the reading
+  that tripped it, and clears only on a replug after an unplug lasting at least
+  `IDLE_RECONCILE_DELAY_MS`, so the Wallbox's reconnect blip through `Available` doesn't wipe it
+  before anyone has seen it. In-memory only: an app restart drops the alarm and the reference.
 - **`parseMeterValues()` reports what it drops.** Anything outside the four measurands it maps
   (`Power.Active.Import`/`Current.Import`/`Voltage`/`Energy.Active.Import.Register`) lands in
   `Readings.unhandled` as `measurand -> "value unit @phase"` - captured *before* the numeric check,
@@ -551,7 +572,7 @@ file live. Real on-device verification (exact fonts/colors, anything the fetched
 cover) still needs `homey app run`.
 
 ## Testing
-Pure logic is unit-tested (`SolarLoop`, `Scheduler`, controller mode/latch/cap resolution, solar
+Pure logic is unit-tested (`SolarLoop`, `Scheduler`, `VoltageMonitor`, controller mode/latch/cap resolution, solar
 merge, widget presentation, `parseMeterValues()`). `test/sim-charger.ts` is an `ocpp-rpc` `RPCClient`
 simulator used by `test/ocpp-integration.test.ts` to exercise the real CentralSystem end-to-end
 without hardware. Controllers/CentralSystem are Homey-independent (host is an interface), so they run
@@ -621,6 +642,12 @@ the timer/teardown logic but not that a real wedged Wallbox link reaches it befo
 ping timeout does. Whether the 12h outage that prompted this fired `disconnect` at all is unknown
 (the old code logged nothing distinguishable); `[ocpp] offline (…)` now makes the next one legible
 either way.
+
+Whether the Wallbox reports `Voltage` at 0A at all (paused, or `SuspendedEV` before the car draws).
+The **sag** half of the voltage diagnostics (see Key invariants) needs a no-load reading as its
+reference; if the charger only meters under load, only the step-impedance half will ever report,
+and the banner can never fire. The first `[voltage] session:` line saying `no no-load reference`
+answers it.
 
 `SetChargingProfile` behaviour at exactly 6A (as opposed to 0A, confirmed below), and a live schedule
 window actually *starting* a charge from cold (`Preparing` → accepted `RemoteStartTransaction` →

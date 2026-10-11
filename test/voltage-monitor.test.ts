@@ -1,0 +1,152 @@
+'use strict';
+
+import test from 'node:test';
+import assert from 'node:assert';
+import {
+  VoltageMonitor, VoltageSample, median, REFERENCE_MAX_AGE_MS, SAG_ALARM_READINGS, STEP_MAX_GAP_MS,
+} from '../lib/control/VoltageMonitor';
+
+const S = (at: number, voltage: number, current: number, limitA: number | null = 32): VoltageSample => ({
+  at, voltage, current, limitA,
+});
+
+test('a no-load reading becomes the reference; a loaded one reports sag against it', () => {
+  const m = new VoltageMonitor();
+  const idle = m.add(S(0, 240, 0));
+  assert.equal(idle.referenceV, 240);
+  assert.equal(idle.sagV, null, 'no sag at no load');
+
+  const r = m.add(S(10000, 222, 31.6));
+  assert.equal(r.sagV, 18);
+  assert.ok(Math.abs(r.sagPct! - 7.5) < 1e-9);
+  assert.equal(r.referenceAgeMs, 10000);
+  assert.ok(r.referenceFresh);
+});
+
+test('no sag without a reference, and none below charging current', () => {
+  const m = new VoltageMonitor();
+  assert.equal(m.add(S(0, 222, 31.6)).sagV, null, 'never seen the no-load voltage');
+  m.add(S(10000, 240, 0));
+  assert.equal(m.add(S(20000, 238, 3)).sagV, null, 'a trickle is within reading noise');
+});
+
+test('sag against an old reference is still reported, but flagged stale', () => {
+  const m = new VoltageMonitor();
+  m.add(S(0, 240, 0));
+  const r = m.add(S(REFERENCE_MAX_AGE_MS + 1, 222, 31.6));
+  assert.equal(r.sagV, 18);
+  assert.equal(r.referenceFresh, false);
+});
+
+test('the alarm latches only after SAG_ALARM_READINGS consecutive fresh readings over 5%', () => {
+  const m = new VoltageMonitor();
+  m.add(S(0, 240, 0));
+  let t = 0;
+  for (let i = 0; i < SAG_ALARM_READINGS - 1; i++) assert.equal(m.add(S(t += 10000, 226, 32)).alarmRaised, false);
+  m.add(S(t += 10000, 232, 32)); // 3.3% - breaks the run
+  for (let i = 0; i < SAG_ALARM_READINGS - 1; i++) m.add(S(t += 10000, 226, 32));
+  assert.equal(m.alarm, null, 'an interrupted run does not count');
+
+  const r = m.add(S(t += 10000, 226, 32));
+  assert.equal(r.alarmRaised, true);
+  assert.deepEqual(m.alarm, {
+    referenceV: 240, voltage: 226, current: 32, sagPct: (14 / 240) * 100,
+  });
+  assert.equal(m.add(S(t += 10000, 226, 32)).alarmRaised, false, 'raised once, not on every reading after');
+});
+
+test('a stale reference never raises the alarm', () => {
+  const m = new VoltageMonitor();
+  m.add(S(0, 240, 0));
+  let t = REFERENCE_MAX_AGE_MS;
+  for (let i = 0; i < SAG_ALARM_READINGS + 2; i++) m.add(S(t += 10000, 220, 32));
+  assert.equal(m.alarm, null);
+});
+
+test('the hardware incident: 31.6A -> 23.7A with the limit held reads as an uncommanded drop', () => {
+  const m = new VoltageMonitor();
+  m.add(S(0, 222, 31.6, 32));
+  const { step } = m.add(S(10000, 223, 23.7, 32));
+  assert.ok(step);
+  assert.ok(Math.abs(step.ohms! - 1 / 7.9) < 1e-9, '1V back for 7.9A less');
+  assert.ok(Math.abs(step.resolutionOhms - 1 / 7.9) < 1e-9);
+  assert.equal(step.uncommanded, true);
+});
+
+test('a drop that follows a lower limit is commanded, and so is one with the limit unknown', () => {
+  const m = new VoltageMonitor();
+  m.add(S(0, 222, 31.6, 32));
+  assert.equal(m.add(S(10000, 226, 16, 16)).step?.uncommanded, false, 'limit moved');
+
+  const n = new VoltageMonitor();
+  n.add(S(0, 222, 31.6, null));
+  assert.equal(n.add(S(10000, 226, 16, null)).step?.uncommanded, false, 'nothing to judge by');
+
+  const o = new VoltageMonitor();
+  o.add(S(0, 222, 31.6, 20));
+  assert.equal(o.add(S(10000, 226, 20, 20)).step?.uncommanded, false,
+    'the limit never allowed 31.6A - the drop is the charger catching up to it');
+});
+
+test('a ramp-up is never uncommanded', () => {
+  const m = new VoltageMonitor();
+  m.add(S(0, 240, 0, 32));
+  const { step } = m.add(S(10000, 228, 32, 32));
+  assert.equal(step?.uncommanded, false);
+  assert.equal(step?.ohms, 12 / 32);
+});
+
+test('no step across a small change, a long gap, and an inconclusive direction reports null ohms', () => {
+  const m = new VoltageMonitor();
+  m.add(S(0, 222, 31.6));
+  assert.equal(m.add(S(10000, 223, 29)).step, null, 'under STEP_MIN_A');
+  assert.equal(m.add(S(10000 + STEP_MAX_GAP_MS + 1, 230, 16)).step, null, 'too far apart');
+  const { step } = m.add(S(20000 + STEP_MAX_GAP_MS, 232, 32));
+  assert.ok(step, 'still a step');
+  assert.equal(step.ohms, null, 'voltage rose as the current rose - another load moved');
+});
+
+test('newMax fires on the first sag and then only on a rise of at least 1V', () => {
+  const m = new VoltageMonitor();
+  m.add(S(0, 240, 0));
+  assert.equal(m.add(S(10000, 225, 32)).newMax, true);
+  assert.equal(m.add(S(20000, 225, 32)).newMax, false);
+  assert.equal(m.add(S(30000, 224.5, 32)).newMax, false);
+  assert.equal(m.add(S(40000, 224, 32)).newMax, true);
+});
+
+test('endSession summarises and resets the stats, but keeps the reference and the alarm', () => {
+  const m = new VoltageMonitor();
+  m.add(S(0, 240, 0, 32));
+  m.add(S(10000, 226, 32, 32)); // step 14V/32A
+  m.add(S(20000, 225, 32, 32));
+  m.add(S(30000, 224, 32, 32));
+  m.add(S(40000, 227, 24, 32)); // uncommanded, 3V/8A
+  assert.ok(m.alarm);
+
+  const s = m.endSession();
+  assert.ok(s);
+  assert.equal(s.loadedReadings, 4);
+  assert.equal(s.minV, 224);
+  assert.equal(s.minVAtA, 32);
+  assert.equal(s.maxSagV, 16);
+  assert.equal(s.maxSagReferenceV, 240);
+  assert.equal(s.stepEstimates, 2);
+  assert.equal(s.medianOhms, (14 / 32 + 3 / 8) / 2);
+  assert.equal(s.uncommandedDrops, 1);
+
+  assert.equal(m.endSession(), null, 'nothing measured since');
+  assert.ok(m.alarm, 'the alarm outlives the session');
+  const after = m.add(S(50000, 222, 32)); // 8A up from the last reading, 10s later
+  assert.equal(after.referenceV, 240, 'and so does the reference');
+  assert.equal(after.step, null, 'but a step never spans two sessions');
+
+  m.clearAlarm();
+  assert.equal(m.alarm, null);
+});
+
+test('median', () => {
+  assert.equal(median([]), null);
+  assert.equal(median([3, 1, 2]), 2);
+  assert.equal(median([4, 1, 3, 2]), 2.5);
+});
