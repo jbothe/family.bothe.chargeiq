@@ -1316,7 +1316,8 @@ test('manual off pauses at 0A (keeps the transaction) instead of hard-stopping',
   assert.ok(!calls.includes('RemoteStopTransaction'), 'still no hard stop anywhere in this flow');
 });
 
-test('manual latch set while unplugged is cleared by the fresh plug-in (never defaults to Manual)', async () => {
+test('manual latch set while unplugged is cleared by the fresh plug-in (never defaults to Manual)', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: 1_000_000 });
   const calls: string[] = [];
   const fakeClient: RpcClient = {
     identity: 'X',
@@ -1362,6 +1363,7 @@ test('manual latch set while unplugged is cleared by the fresh plug-in (never de
 
   // A fresh plug-in (no schedule window, no prior replug) must clear the
   // latch and fall through to Solar - never stay Manual.
+  t.mock.timers.tick(60_000);
   cp.emit('status', { connectorId: 1, errorCode: 'NoError', status: 'SuspendedEV' });
   assert.equal(c.resolve(new Date()).mode, 'solar', 'a fresh plug-in clears the latch -> Solar (no schedule)');
 });
@@ -2998,6 +3000,43 @@ test('the sag warning survives a reconnect blip, and clears on a real replug', (
   t.mock.timers.tick(6000);
   cp.emit('status', status('SuspendedEV'));
   assert.equal(warnings[warnings.length - 1], null, 'someone has been out to the car');
+});
+
+test('the reconnect blip on an app restart does not clear a manual latch, but a real replug still does', (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: 1_000_000 });
+  // As on hardware after a restart: latch restored from the store, then the
+  // first two statuses ever seen are Available and SuspendedEV ~50ms apart.
+  const {
+    c, cp, logs, store,
+  } = makeBoundController({ manualLatch: { intent: 'charge', amps: 32 } });
+  assert.equal(c.resolve(new Date()).mode, 'manual');
+  cp.emit('status', status('Available'));
+  t.mock.timers.tick(50);
+  cp.emit('status', status('SuspendedEV'));
+  assert.equal(c.resolve(new Date()).mode, 'manual', 'a blip is not a replug');
+  assert.deepEqual(store.manualLatch, { intent: 'charge', amps: 32 }, 'still persisted');
+  assert.ok(logs.includes('[mode] manual kept (Available for 50ms - a reconnect blip, not a replug)'));
+
+  // The same blip mid-session, from a known plugged state.
+  cp.emit('status', status('Available'));
+  t.mock.timers.tick(600);
+  cp.emit('status', status('Charging'));
+  assert.equal(c.resolve(new Date()).mode, 'manual');
+
+  cp.emit('status', status('Available'));
+  t.mock.timers.tick(6000);
+  cp.emit('status', status('SuspendedEV'));
+  assert.notEqual(c.resolve(new Date()).mode, 'manual', 'someone has been out to the car');
+  assert.equal(store.manualLatch, null);
+});
+
+test('a real replug after a restart that found the car unplugged clears the latch', (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: 1_000_000 });
+  const { c, cp } = makeBoundController({ manualLatch: { intent: 'off' } });
+  cp.emit('status', status('Available')); // first status: genuinely unplugged
+  t.mock.timers.tick(10 * 60_000);
+  cp.emit('status', status('SuspendedEV'));
+  assert.notEqual(c.resolve(new Date()).mode, 'manual');
 });
 
 test('recovering from Finishing writes the profile even though the target never changed while blocked', () => {

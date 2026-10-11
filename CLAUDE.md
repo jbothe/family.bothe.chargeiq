@@ -117,7 +117,8 @@ Priority **Manual > Scheduled > Solar > Idle**, recomputed every tick:
 - **Manual** — a *manual latch* is set. Any hands-on action sets it: `evcharger_charging` toggle,
   `charge_current_limit` slider, or Flow start/stop/set-current (`on`/amps → charge, `off` → off).
   Persisted in device store; cleared **only** when a schedule window *starts* (rising edge) or the
-  charger is *unplugged→replugged* (OCPP `Available` → plugged edge).
+  charger is *unplugged→replugged* (OCPP `Available` → plugged edge, where `Available` lasted at least
+  `IDLE_RECONCILE_DELAY_MS` - see the reconnect-blip bullet under Key invariants).
 - **Scheduled** — no latch and inside a `Scheduler` window (schedule beats solar).
 - **Solar** — default outside schedules with no latch, when the `solarEnabled` device setting
   (default on) is true; follows excess via `SolarLoop`.
@@ -405,9 +406,15 @@ next move.
   retry `RemoteStartTransaction`, which a charger already mid-session may just accept as a no-op
   without ever sending a fresh `StartTransaction`, leaving the current stuck forever. `onStatus()`
   debounces the transaction-reconciliation side of an `Available` report by `IDLE_RECONCILE_DELAY_MS`
-  (5s), cancelling it if a plugged status supersedes it first. `prevPlugged` (fresh-plug-in / manual
-  latch clearing) is deliberately **not** debounced the same way - it needs to flip promptly for a
-  genuine plug-in, and is a separate, lower-stakes concern from transaction bookkeeping.
+  (5s), cancelling it if a plugged status supersedes it first. `prevPlugged` itself still flips
+  immediately (the plug-in edge, `onVehicleConnected`), but what a *replug* clears - the manual latch
+  and the sag banner - only counts one whose `Available` lasted at least that same 5s
+  (`unpluggedAt`). That is measured from the first status ever seen too, not only from a known
+  plugged state, because the blip is the first thing a charger reports after an app restart: before
+  this, every restart while plugged in silently dropped a manual override (confirmed on hardware,
+  `Available` → `SuspendedEV` 50ms apart, logged `manual cleared (fresh plug-in)`). Now it logs
+  `[mode] manual kept (Available for 50ms - a reconnect blip, not a replug)`. The `vehicle
+  connected`/`disconnected` Flow triggers are **not** gated the same way and still fire on the blip.
 - **Homey Pro's underlying OS clock runs in UTC**, independent of the timezone configured in the
   Homey app/mobile UI. Any wall-clock comparison (schedule windows, displayed times) must go through
   `this.homey.clock.getTimezone()` (`ControllerHost.getTimezone()` → `Scheduler.setTimezone()` /

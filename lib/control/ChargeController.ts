@@ -917,10 +917,13 @@ export class ChargeController {
     // charger idle before, so this doesn't fire on a transactionId restored
     // from the store at boot with no real status seen yet.
     if (info.status === 'Available') {
+      // Stamped on entry from unknown too, not just from plugged: the Wallbox's
+      // reconnect blip is the first status after an app restart, and has to
+      // be measurable as one (see the plugged branch below).
+      if (this.prevPlugged !== false) this.unpluggedAt = Date.now();
       if (this.prevPlugged === true) {
         this.host.onVehicleDisconnected?.();
         this.endVoltageSession();
-        this.unpluggedAt = Date.now();
       }
       this.prevPlugged = false;
       // Debounced: see IDLE_RECONCILE_DELAY_MS. Don't trust a single Available
@@ -941,14 +944,19 @@ export class ChargeController {
         this.pendingIdleReconcile = null;
       }
       if (this.prevPlugged === false) {
-        if (this.manualLatch) this.clearManualLatch('fresh plug-in');
-        // A sag warning stays up until someone has actually been out to the
-        // car - not cleared by the reconnect blip (see IDLE_RECONCILE_DELAY_MS),
-        // which also passes through Available.
-        if (this.voltage.alarm && this.unpluggedAt != null
-          && Date.now() - this.unpluggedAt >= IDLE_RECONCILE_DELAY_MS) {
-          this.voltage.clearAlarm();
-          this.refreshWarning();
+        // Only a real replug - someone has actually been out to the car - may
+        // clear the manual latch or a sag warning. The Wallbox's reconnect blip
+        // (see IDLE_RECONCILE_DELAY_MS) also passes through Available, on every
+        // app restart, and used to silently drop a manual override with it.
+        const unpluggedMs = this.unpluggedAt == null ? 0 : Date.now() - this.unpluggedAt;
+        if (unpluggedMs >= IDLE_RECONCILE_DELAY_MS) {
+          if (this.manualLatch) this.clearManualLatch('fresh plug-in');
+          if (this.voltage.alarm) {
+            this.voltage.clearAlarm();
+            this.refreshWarning();
+          }
+        } else if (this.manualLatch) {
+          this.host.log(`[mode] manual kept (Available for ${unpluggedMs}ms - a reconnect blip, not a replug)`);
         }
         this.host.onVehicleConnected?.();
       }
