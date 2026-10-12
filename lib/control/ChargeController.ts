@@ -12,7 +12,9 @@ import {
   StatusNotificationReq,
   StopTransactionReq,
 } from '../ocpp/types';
-import { Scheduler, ScheduleWindow, findScheduleConflicts } from './Scheduler';
+import {
+  Scheduler, ScheduleWindow, describeWindow, findScheduleConflicts,
+} from './Scheduler';
 import { SolarLoop, SolarLoopConfig } from './SolarLoop';
 import {
   SAG_ALARM_PCT, SAG_ALARM_READINGS, SagReading, VoltageMonitor,
@@ -476,6 +478,7 @@ export class ChargeController {
     this.transactionId = this.host.getStore<number>('transactionId') ?? null;
     this.manualLatch = this.host.getStore<ManualLatch>('manualLatch') ?? null;
     this.scheduler.setWindows(this.host.getStore<ScheduleWindow[]>('schedule') ?? []);
+    this.logSchedule('loaded');
     this.wasInSchedule = this.scheduler.isActive(new Date());
 
     this.lastSeenAt = this.host.getStore<number>('ocppLastSeenAt') ?? null;
@@ -1379,7 +1382,25 @@ export class ChargeController {
     }
     this.scheduler.setWindows(windows);
     await this.host.setStore('schedule', windows);
+    this.logSchedule('saved');
     this.tick(new Date(), 'schedule-updated');
+  }
+
+  /**
+   * The schedule's counterpart to the `[config]` line: the schedule lives in
+   * the device store (the settings page saves it over the app API), not in
+   * device settings, so refreshConfig() never shows it. Logged on load and
+   * on every save so a schedule change is visible in the log, not just its
+   * `schedule-updated` decision.
+   */
+  private logSchedule(verb: string): void {
+    const windows = this.scheduler.getWindows();
+    if (windows.length === 0) {
+      this.host.log(`[schedule] ${verb}: no windows`);
+      return;
+    }
+    this.host.log(`[schedule] ${verb} ${windows.length} window${windows.length === 1 ? '' : 's'}: ${
+      windows.map((w, i) => `#${i + 1} ${describeWindow(w)}`).join('; ')}`);
   }
 
   getSchedule(): ScheduleWindow[] {
@@ -1411,8 +1432,9 @@ export class ChargeController {
       this.tick(new Date(now), 'solar');
       return;
     }
+    const carFirst = this.scheduler.activeSolarToCar(new Date(now));
     const res = this.solarLoop.evaluate({
-      gridSignedW, chargerPowerW, batteryW: this.lastBatteryW, now,
+      gridSignedW, chargerPowerW, batteryW: this.lastBatteryW, countBatteryCharge: carFirst, now,
     });
     this.lastAvailableW = Math.max(0, res.availableW);
     this.solarTargetAmps = res.target;
@@ -1427,13 +1449,13 @@ export class ChargeController {
     // active mode, so it belongs in the fingerprint.
     const r50 = (w?: number) => (w == null ? 'na' : String(Math.round(w / 50) * 50));
     const key = [r50(sample.pvW), r50(sample.batteryW), r50(sample.houseW),
-      r50(gridSignedW), r50(chargerPowerW), res.state].join('|');
+      r50(gridSignedW), r50(chargerPowerW), res.state, carFirst].join('|');
     if (key !== this.loggedSolar) {
       this.loggedSolar = key;
       const f = (w?: number) => (w == null ? '?' : `${Math.round(w)}W`);
       this.host.log(`[solar] solar=${f(sample.pvW)} battery=${f(sample.batteryW)} house=${f(sample.houseW)} `
         + `grid=${f(gridSignedW)} charger=${f(chargerPowerW)} excess=${Math.round(this.lastAvailableW)}W`
-        + ` (state=${res.state})`);
+        + ` (${carFirst ? 'car first, ' : ''}state=${res.state})`);
     }
 
     this.tick(new Date(now), 'solar');
@@ -1524,12 +1546,15 @@ export class ChargeController {
    * the client, which runs on the user's phone in its own local timezone, not
    * the Homey Pro's UTC OS clock - see the class doc). Only the field(s)
    * relevant to the current mode are populated; the rest are null/false.
+   * `solarEnough` is set in Solar mode and in a window with `solarToCar`,
+   * where it drives the widget's "waiting for solar" badge.
    */
   getModeInfo(): {
     mode: ChargeMode;
     scheduleEndAt: string | null;
     nextScheduleStartAt: string | null;
     boostActive: boolean;
+    solarToCarActive: boolean;
     solarEnough: boolean | null;
     } {
     const now = new Date();
@@ -1537,23 +1562,32 @@ export class ChargeController {
     let scheduleEndAt: string | null = null;
     let nextScheduleStartAt: string | null = null;
     let boostActive = false;
+    let solarToCarActive = false;
     let solarEnough: boolean | null = null;
     if (mode === 'scheduled') {
       const end = this.scheduler.currentEnd(now);
       scheduleEndAt = end ? end.toISOString() : null;
       const floor = this.scheduleOrMax(now);
-      boostActive = this.scheduledAmpsDetail(now).amps > floor;
+      const boosted = this.scheduledAmpsDetail(now).amps;
+      // The target is the higher of the two, so at most one of them is what
+      // set it - and only that one gets a badge.
+      solarToCarActive = this.scheduledTargetDetail(now).amps > boosted;
+      boostActive = !solarToCarActive && boosted > floor;
+      if (this.scheduler.activeSolarToCar(now)) solarEnough = this.solarIsEnough();
     } else {
       const ns = this.scheduler.nextStart(now);
       nextScheduleStartAt = ns ? ns.toISOString() : null;
-      if (mode === 'solar') {
-        const t = this.solarTargetAmps;
-        solarEnough = t != null && t >= this.cfg.minAmps;
-      }
+      if (mode === 'solar') solarEnough = this.solarIsEnough();
     }
     return {
-      mode, scheduleEndAt, nextScheduleStartAt, boostActive, solarEnough,
+      mode, scheduleEndAt, nextScheduleStartAt, boostActive, solarToCarActive, solarEnough,
     };
+  }
+
+  /** Whether the solar loop currently has a target the charger can run at. */
+  private solarIsEnough(): boolean {
+    const t = this.solarTargetAmps;
+    return t != null && t >= this.cfg.minAmps;
   }
 
   getDiagnostics(): {
@@ -1619,7 +1653,7 @@ export class ChargeController {
       return { mode: 'manual', amps, reason: `manual: charging at ${amps}A` };
     }
     if (this.scheduler.isActive(now)) {
-      return { mode: 'scheduled', ...this.scheduledAmpsDetail(now) };
+      return { mode: 'scheduled', ...this.scheduledTargetDetail(now) };
     }
     if (!this.cfg.solarEnabled) {
       return {
@@ -1655,7 +1689,35 @@ export class ChargeController {
   }
 
   private scheduleOrMax(now: Date): number {
-    return this.clampAmps(this.scheduler.activeCurrent(now) ?? this.cfg.maxAmps);
+    const amps = this.scheduler.activeCurrent(now);
+    // A 0A window charges nothing of its own - a pause, not clampAmps()'s minimum.
+    if (amps === 0) return 0;
+    return this.clampAmps(amps ?? this.cfg.maxAmps);
+  }
+
+  /**
+   * The active window's target: its floor/boost (scheduledAmpsDetail), raised
+   * to the solar target when the window has `solarToCar` set. SolarLoop is
+   * already counting the battery's charging power as available during such a
+   * window (see onSolarSample), so this is just the higher of the two. A stale
+   * or never-started solar target leaves the floor in charge - for a 0A window,
+   * a pause.
+   */
+  private scheduledTargetDetail(now: Date): { amps: number; reason: string } {
+    const base = this.scheduledAmpsDetail(now);
+    if (!this.scheduler.activeSolarToCar(now)) return base;
+    const t = this.solarTargetAmps;
+    if (t == null || t <= 0) {
+      const why = this.lastSolarSampleAt > 0 && this.solarFeedStale()
+        ? 'solar feed stale'
+        : `excess ${Math.round(this.lastAvailableW)}W, needs ${this.cfg.minAmps}A`;
+      return { amps: base.amps, reason: `${base.reason}; excess solar to car: not enough (${why})` };
+    }
+    const solarA = this.clampAmps(t);
+    if (solarA <= base.amps) {
+      return { amps: base.amps, reason: `${base.reason}; excess solar to car ${solarA}A doesn't exceed it` };
+    }
+    return { amps: solarA, reason: `${base.reason}; excess solar to car -> ${solarA}A` };
   }
 
   /**
@@ -1717,8 +1779,9 @@ export class ChargeController {
     }
     this.wasInSchedule = inSchedule;
 
-    // Solar fail-safe: if the feed goes stale while solar is the effective mode.
-    if (!this.manualLatch && !inSchedule && this.lastSolarSampleAt > 0
+    // Solar fail-safe: if the feed goes stale while solar is the effective mode
+    // (including a schedule window that follows excess solar).
+    if (!this.manualLatch && (!inSchedule || this.scheduler.activeSolarToCar(now)) && this.lastSolarSampleAt > 0
       && now.getTime() - this.lastSolarSampleAt > this.cfg.solarStaleMs) {
       if (!this.solarStaleWarned) {
         this.host.log('Solar feed stale; failing safe (pausing solar charging)');

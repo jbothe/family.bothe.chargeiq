@@ -5,10 +5,15 @@
  * `start`/`end` are "HH:MM" local time. If `end` <= `start` the window runs
  * overnight into the following day. `currentA` optionally overrides the charge
  * current while this window is active - here it acts as a floor, not a fixed
- * target, when `boostToCap` is set. `enabled` (default true) lets a window be
- * kept configured but temporarily inactive, instead of deleting it. `boostToCap`
- * lets the controller raise the current above `currentA` up to the shared-circuit
- * cap when there's spare capacity (see ChargeController.scheduledAmps).
+ * target, when `boostToCap` or `solarToCar` is set. Absent means the configured
+ * maximum; `0` means the window charges nothing of its own (a pause, not the
+ * 6A minimum). `enabled` (default true) lets a window be kept configured but
+ * temporarily inactive, instead of deleting it. `boostToCap` lets the controller
+ * raise the current above `currentA` up to the shared-circuit cap when there's
+ * spare capacity (see ChargeController.scheduledAmpsDetail). `solarToCar` raises
+ * it to follow excess solar, counting PV the home battery would otherwise have
+ * charged from as available to the car (see SolarInput.countBatteryCharge) -
+ * with `currentA: 0` that is "charge only from solar, car before battery".
  */
 export interface ScheduleWindow {
   days: number[];
@@ -17,6 +22,7 @@ export interface ScheduleWindow {
   currentA?: number;
   enabled?: boolean;
   boostToCap?: boolean;
+  solarToCar?: boolean;
 }
 
 const MIN_PER_DAY = 1440;
@@ -53,6 +59,36 @@ function minuteOfWeek(d: Date, timezone?: string): number {
   const hour = Number(get('hour'));
   const minute = Number(get('minute'));
   return day * MIN_PER_DAY + hour * 60 + minute;
+}
+
+const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const WEEK_ORDER = [1, 2, 3, 4, 5, 6, 0]; // Mon-first, as the settings UI shows it
+
+/** "Mon-Fri, Sun" - consecutive days (Mon-first) collapsed into ranges. */
+function describeDays(days: number[]): string {
+  const on = WEEK_ORDER.filter((d) => days.includes(d));
+  if (on.length === 7) return 'every day';
+  if (on.length === 0) return 'no days';
+  const ranges: string[] = [];
+  let i = 0;
+  while (i < on.length) {
+    let j = i;
+    while (j + 1 < on.length && WEEK_ORDER.indexOf(on[j + 1]) === WEEK_ORDER.indexOf(on[j]) + 1) j++;
+    ranges.push(i === j ? DAY_NAMES[on[i]] : `${DAY_NAMES[on[i]]}-${DAY_NAMES[on[j]]}`);
+    i = j + 1;
+  }
+  return ranges.join(', ');
+}
+
+/**
+ * One window as a log line, e.g. "Mon-Fri 06:00-11:00 0A +excess solar to car".
+ * Blank current reads "max"; a disabled window still logs, marked as such.
+ */
+export function describeWindow(w: ScheduleWindow): string {
+  const amps = w.currentA == null ? 'max' : `${w.currentA}A`;
+  return `${describeDays(w.days)} ${w.start}-${w.end} ${amps}`
+    + `${w.boostToCap ? ' +boost' : ''}${w.solarToCar ? ' +excess solar to car' : ''}`
+    + `${w.enabled === false ? ' (disabled)' : ''}`;
 }
 
 interface Interval { start: number; end: number } // minutes-of-week; end may exceed MIN_PER_WEEK (wrap)
@@ -138,13 +174,19 @@ export class Scheduler {
   }
 
   /** Expand enabled windows to weekly-minute intervals (end may wrap past week end). */
-  private intervals(): Array<Interval & { currentA?: number; boostToCap?: boolean }> {
-    const out: Array<Interval & { currentA?: number; boostToCap?: boolean }> = [];
+  private intervals(): Array<Interval & { window: ScheduleWindow }> {
+    const out: Array<Interval & { window: ScheduleWindow }> = [];
     for (const w of this.windows) {
       if (w.enabled === false) continue;
-      for (const iv of expandWindow(w)) out.push({ ...iv, currentA: w.currentA, boostToCap: w.boostToCap });
+      for (const iv of expandWindow(w)) out.push({ ...iv, window: w });
     }
     return out;
+  }
+
+  /** The enabled window active at `now`, if any. */
+  private activeWindow(now: Date): ScheduleWindow | undefined {
+    const mow = minuteOfWeek(now, this.timezone);
+    return this.intervals().find((iv) => Scheduler.contains(iv, mow))?.window;
   }
 
   private static contains(iv: Interval, mow: number): boolean {
@@ -158,18 +200,19 @@ export class Scheduler {
     return this.intervals().some((iv) => Scheduler.contains(iv, mow));
   }
 
-  /** Charge current for the active window at `now`, if specified. */
+  /** Charge current for the active window at `now`, if specified (0 included). */
   activeCurrent(now: Date): number | undefined {
-    const mow = minuteOfWeek(now, this.timezone);
-    const hit = this.intervals().find((iv) => Scheduler.contains(iv, mow));
-    return hit?.currentA;
+    return this.activeWindow(now)?.currentA ?? undefined;
   }
 
   /** Whether the active window at `now` allows boosting above its current (see `ScheduleWindow.boostToCap`). */
   activeBoostToCap(now: Date): boolean {
-    const mow = minuteOfWeek(now, this.timezone);
-    const hit = this.intervals().find((iv) => Scheduler.contains(iv, mow));
-    return hit?.boostToCap === true;
+    return this.activeWindow(now)?.boostToCap === true;
+  }
+
+  /** Whether the active window at `now` sends excess solar to the car first (see `ScheduleWindow.solarToCar`). */
+  activeSolarToCar(now: Date): boolean {
+    return this.activeWindow(now)?.solarToCar === true;
   }
 
   /** The next Date a window starts (strictly after now), or undefined if none. */

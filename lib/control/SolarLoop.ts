@@ -34,6 +34,15 @@ export interface SolarInput {
    * applied to the schedule-boost feature (ChargeController.scheduledAmpsDetail).
    */
   batteryW?: number;
+  /**
+   * Count the battery's *charging* power as available too - "excess solar to
+   * the car first" (`ScheduleWindow.solarToCar`). PV the battery is soaking up
+   * is surplus the car could have instead: SolarEdge's battery chases zero grid
+   * flow, so when the car draws more the battery simply charges less. Without
+   * this the battery claims the surplus first and the car only ever sees what
+   * it can't absorb. Discharge is still subtracted either way.
+   */
+  countBatteryCharge?: boolean;
   now: number;
 }
 
@@ -102,8 +111,12 @@ export class SolarLoop {
     // discharging battery would get mistaken for solar surplus and fund EV charging
     // (the same failure mode the shared-circuit boost feature avoids by using the
     // real battery/pv readings instead of a grid-based proxy).
+    // With countBatteryCharge, battery charging is added back: that makes this
+    // PV minus the house's own load (house = pv + grid - battery, which includes
+    // the car), whatever the battery happens to be doing with it right now.
     const batteryDischargeW = Math.max(0, -(input.batteryW ?? 0));
-    const availableW = input.chargerPowerW - input.gridSignedW - marginW - batteryDischargeW;
+    const batteryChargeW = input.countBatteryCharge ? Math.max(0, input.batteryW ?? 0) : 0;
+    const availableW = input.chargerPowerW - input.gridSignedW - marginW - batteryDischargeW + batteryChargeW;
     // Floor to bias toward slight export rather than import.
     const desiredA = Math.max(0, Math.min(this.cfg.maxAmps, Math.floor(availableW / (voltage * phases))));
     const enough = desiredA >= minAmps;

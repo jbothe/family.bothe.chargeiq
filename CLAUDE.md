@@ -119,7 +119,10 @@ Priority **Manual > Scheduled > Solar > Idle**, recomputed every tick:
   Persisted in device store; cleared **only** when a schedule window *starts* (rising edge) or the
   charger is *unplugged→replugged* (OCPP `Available` → plugged edge, where `Available` lasted at least
   `IDLE_RECONCILE_DELAY_MS` - see the reconnect-blip bullet under Key invariants).
-- **Scheduled** — no latch and inside a `Scheduler` window (schedule beats solar).
+- **Scheduled** — no latch and inside a `Scheduler` window (schedule beats solar). A window's
+  `currentA` is blank (= `maxAmps`), `0`, or 6–32A. **`0` is a pause, not the 6A minimum** —
+  `scheduleOrMax()` returns it before `clampAmps()` can raise it — so a 0A window on its own is
+  "don't charge during these hours", and with boost or `solarToCar` it is a floor of nothing.
 - **Solar** — default outside schedules with no latch, when the `solarEnabled` device setting
   (default on) is true; follows excess via `SolarLoop`.
 - **Idle** — no latch, not in a schedule window, and `solarEnabled` is false. Holds at 0A, same as
@@ -160,6 +163,27 @@ legitimately raises the safety-cap ceiling — the home battery must never fund 
 beyond the configured floor, only genuine spare circuit capacity may. This discharge-blocks-boost
 rule itself only applies when `sharedCircuitIncludeBattery` is on — otherwise the battery isn't part
 of this circuit and its state has no bearing on it.
+
+**Excess solar to car** (`ScheduleWindow.solarToCar`) is the other per-window top-up: the window's
+target becomes `max(floor, solar target)` (`scheduledTargetDetail()`, wrapping
+`scheduledAmpsDetail()`). While such a window is active, `onSolarSample()` passes
+`countBatteryCharge` to `SolarLoop`, which adds the battery's *charging* power back into
+`availableW` — i.e. surplus becomes PV minus the house's own load, whatever the battery is doing
+with it. Outside those windows solar stays **battery-first**: the battery soaks up PV and holds the
+grid at zero, so the car only ever sees what the battery can't absorb. It works because SolarEdge's
+battery yields: confirmed on hardware that a car drawing 1832W moved the battery from about +1010W to
+−820W with the grid flat at 0W. Discharge is still subtracted in both modes, so the battery never
+funds the car here. **Confirmed on hardware 2026-10-12:** a 06:00–11:00 window started the car at 6A
+once PV beat the house by 1570W (most of it going into the battery), and paused it again under
+cloud. The pause only comes after `minOnMs` (180s), and for the rest of that dwell the battery
+covers the car (up to ~850W, roughly 40Wh across the morning). That's accepted: before a free
+window, that battery energy costs nothing to replace. Intended use is a `0A` window before a
+free-power window (e.g. 06:00–11:00):
+that morning PV would have charged the battery, and the free window refills it at no cost anyway. A
+stale feed resets the loop (the tick fail-safe covers these windows as well as Solar mode), which
+drops the window back to its floor. `getModeInfo()` reports `boostActive` and `solarToCarActive`
+for whichever of the two actually set the target: it's the higher one, so at most one is true,
+and solar only counts when it *exceeds* the floor/boost result.
 
 ### OCPP connectivity (offline detection + reporting)
 The app is the OCPP *server*, so "is the charger there?" is only ever inferred — nothing polls it.
@@ -480,7 +504,9 @@ next move.
 - Controller diagnostics log via the **app** logger (`this.homey.app.log`) for a short
   `[ChargeIQApp]` prefix; tags are `[charger]`, `[solar]`, `[decision:<trigger>]`, `[mode]`,
   `[config]` (the full resolved config, logged on every `refreshConfig()` - boot and every settings
-  save - to make a settings change's actual effect confirmable rather than assumed).
+  save - to make a settings change's actual effect confirmable rather than assumed), `[schedule]`
+  (the same for the schedule, which lives in the device store rather than device settings, so
+  `[config]` never shows it - logged at `init()` and on every save, one `describeWindow()` per window).
   `[decision:<trigger>]` is logged on **every** `tick()` call, unconditionally (not just on change) -
   one line covering what triggered it (`timer`, `init`, `bind`, `status:<OcppStatus>`, `solar`,
   `manual-toggle`, `manual-current`, `schedule-updated`), the resolved mode and *why*
@@ -556,6 +582,18 @@ has a `Solar feed stale 3d` preset next to `Charger offline 12h` for previewing 
 unknown `appliedA` marks the target pending - both in the light text colour, while the pill stays green
 because it *is* charging. A few seconds of this after any change is the write throttle; anything
 lasting is the fault. A payload with no `appliedA` field at all renders as before.
+
+**The chip's trailing badge says what is raising current above the window's floor**, and only while
+it is: the boost chevrons (`PF.showBoost`, `boostActive`) or a sun (`PF.showSolarToCar`,
+`solarToCarActive`), never both. Both use `--homey-color-orange`, so an orange badge always means
+"above the floor" and its shape says why. The sun is `ICONS.sun`, the `solar-enough` mode icon
+redrawn at the boost glyph's 2.4 stroke, since 1.8 reads too thin at chip size.
+The `READY` chip has a counterpart: in a `solarToCar` window that is waiting for enough excess, it
+reads `READY ☁` (`PF.showSolarWaiting`, `ICONS.cloud`, a sun behind a cloud). That keys off
+`solarEnough === false`, which `getModeInfo()` only fills in Solar mode and in a `solarToCar`
+window, so a plain window never shows it. The mode row keeps the clock: it is still a schedule. The
+cloud takes the chip's own blue rather than orange, because it is part of the READY state, not
+something raising the current.
 
 **Immediate first paint on load pulls once via `widgets/power-flow/api.js`'s `getState`
 endpoint** (declared in `widget.compose.json`'s own `api` block, not the app-level `api.ts`),

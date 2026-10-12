@@ -92,6 +92,33 @@ test('battery charging is not double-counted - the grid reading already reflects
   assert.equal(withCharging.availableW, withoutBattery.availableW, 'positive (charging) batteryW needs no extra adjustment');
 });
 
+test('countBatteryCharge: PV the battery is soaking up is available to the car', () => {
+  // Battery taking 1500W of PV, grid flat: battery-first sees nothing, car-first sees it all.
+  const batteryFirst = new SolarLoop(cfg()).evaluate({
+    gridSignedW: 0, chargerPowerW: 0, batteryW: 1500, now: T,
+  });
+  assert.equal(batteryFirst.availableW, 0);
+  assert.equal(batteryFirst.target, null);
+  const carFirst = new SolarLoop(cfg()).evaluate({
+    gridSignedW: 0, chargerPowerW: 0, batteryW: 1500, countBatteryCharge: true, now: T,
+  });
+  assert.equal(carFirst.availableW, 1500);
+  assert.equal(carFirst.target, 6);
+});
+
+test('countBatteryCharge still subtracts discharge - car-first is PV minus house load either way', () => {
+  // Hardware log, 10:45: pv=3260W, house incl. car=4080W, car at 8A manual (1832W), battery
+  // covering the rest (-820W), grid 0. PV minus the house's own load is 1012W - under 6A.
+  const input = {
+    gridSignedW: 0, chargerPowerW: 1832, batteryW: -820, now: T,
+  };
+  const batteryFirst = new SolarLoop(cfg()).evaluate(input);
+  const carFirst = new SolarLoop(cfg()).evaluate({ ...input, countBatteryCharge: true });
+  assert.equal(carFirst.availableW, 1012);
+  assert.equal(carFirst.availableW, batteryFirst.availableW, 'a discharging battery has nothing to give up');
+  assert.equal(carFirst.target, null, 'not enough to start at 6A');
+});
+
 test('omitting batteryW behaves exactly as before (no battery present)', () => {
   const l = new SolarLoop(cfg());
   const r = l.evaluate({ gridSignedW: -2300, chargerPowerW: 0, now: T });
