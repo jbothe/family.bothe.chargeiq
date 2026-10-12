@@ -14,6 +14,18 @@ export const LOADED_MIN_A = 6;
  */
 export const REFERENCE_MAX_AGE_MS = 30 * 60000;
 
+/**
+ * How far the rest of the household's draw from the supply may move after the
+ * reference was taken before the reference stops describing "now". Sag against
+ * it includes every other load's own drop on the shared supply, and the alarm
+ * banner blames the charger's wiring - which is wrong when it was the house
+ * that moved (confirmed on hardware: 11:00 brought a home battery charging at
+ * 3.3kW plus the house, ~4.7kW, on top of a reference taken minutes earlier, and
+ * a 6.7% "sag" latched the alarm). At the ~0.34Ω step impedance measured on the
+ * same site, 1.5kW elsewhere (~6.5A) accounts for about 1 point of a 5% alarm.
+ */
+export const OTHER_LOAD_MAX_SHIFT_W = 1500;
+
 /** Sag at or above this share of the no-load voltage counts toward the alarm. */
 export const SAG_ALARM_PCT = 5;
 
@@ -36,6 +48,12 @@ export interface VoltageSample {
   current: number;
   /** Limit the charger last accepted when this reading arrived, or null if unknown. */
   limitA: number | null;
+  /**
+   * What the rest of the household was drawing from the supply around this
+   * reading (W, grid import minus the charger, export negative), or null/absent
+   * when unknown - e.g. no solar feed. Unknown never blocks the alarm.
+   */
+  otherLoadW?: number | null;
 }
 
 /** A current change between two consecutive readings, and what the voltage did across it. */
@@ -67,6 +85,10 @@ export interface SagReading {
   referenceAgeMs: number | null;
   /** The reference is recent enough for the alarm to trust (see REFERENCE_MAX_AGE_MS). */
   referenceFresh: boolean;
+  /** How far the rest of the household's draw moved since the reference (W), or null if unknown. */
+  otherLoadShiftW: number | null;
+  /** Fresh, and the rest of the household hasn't moved more than OTHER_LOAD_MAX_SHIFT_W: counts toward the alarm. */
+  referenceTrusted: boolean;
   /** Drop from the reference at this reading, or null when not loaded or no reference. */
   sagV: number | null;
   sagPct: number | null;
@@ -93,6 +115,8 @@ export interface VoltageSessionSummary {
   maxSagV: number | null;
   maxSagPct: number | null;
   maxSagReferenceV: number | null;
+  /** Whether the reading behind maxSag had a trusted reference (see SagReading.referenceTrusted). */
+  maxSagTrusted: boolean | null;
   /** Median of the step estimates, or null if no step produced one. */
   medianOhms: number | null;
   stepEstimates: number;
@@ -122,7 +146,7 @@ export function median(xs: number[]): number | null {
  */
 export class VoltageMonitor {
 
-  private reference: { voltage: number; at: number } | null = null;
+  private reference: { voltage: number; at: number; otherLoadW: number | null } | null = null;
 
   private prev: VoltageSample | null = null;
 
@@ -134,7 +158,7 @@ export class VoltageMonitor {
 
   private minV: { voltage: number; current: number } | null = null;
 
-  private maxSag: { sagV: number; sagPct: number; referenceV: number } | null = null;
+  private maxSag: { sagV: number; sagPct: number; referenceV: number; trusted: boolean } | null = null;
 
   private stepOhms: number[] = [];
 
@@ -154,15 +178,23 @@ export class VoltageMonitor {
     }
     if (step?.uncommanded) this.uncommandedDrops += 1;
 
-    if (s.current < NO_LOAD_MAX_A) this.reference = { voltage: s.voltage, at: s.at };
+    const otherLoadW = s.otherLoadW ?? null;
+    if (s.current < NO_LOAD_MAX_A) this.reference = { voltage: s.voltage, at: s.at, otherLoadW };
     const ref = this.reference;
     const referenceAgeMs = ref ? s.at - ref.at : null;
     const referenceFresh = referenceAgeMs != null && referenceAgeMs <= REFERENCE_MAX_AGE_MS;
+    const otherLoadShiftW = ref?.otherLoadW != null && otherLoadW != null ? otherLoadW - ref.otherLoadW : null;
+    // Either direction: a drop elsewhere raises the voltage and hides sag just as
+    // a rise inflates it - the reference no longer describes the baseline.
+    const referenceTrusted = referenceFresh
+      && (otherLoadShiftW == null || Math.abs(otherLoadShiftW) <= OTHER_LOAD_MAX_SHIFT_W);
 
     const out: SagReading = {
       referenceV: ref?.voltage ?? null,
       referenceAgeMs,
       referenceFresh,
+      otherLoadShiftW,
+      referenceTrusted,
       sagV: null,
       sagPct: null,
       newMax: false,
@@ -186,11 +218,13 @@ export class VoltageMonitor {
     out.sagV = sagV;
     out.sagPct = sagPct;
     if (sagV > 0 && (!this.maxSag || sagV >= this.maxSag.sagV + 1)) {
-      this.maxSag = { sagV, sagPct, referenceV: ref.voltage };
+      this.maxSag = {
+        sagV, sagPct, referenceV: ref.voltage, trusted: referenceTrusted,
+      };
       out.newMax = true;
     }
 
-    this.overCount = referenceFresh && sagPct >= SAG_ALARM_PCT ? this.overCount + 1 : 0;
+    this.overCount = referenceTrusted && sagPct >= SAG_ALARM_PCT ? this.overCount + 1 : 0;
     if (!this.alarmState && this.overCount >= SAG_ALARM_READINGS) {
       this.alarmState = {
         referenceV: ref.voltage, voltage: s.voltage, current: s.current, sagPct,
@@ -233,6 +267,7 @@ export class VoltageMonitor {
       maxSagV: this.maxSag?.sagV ?? null,
       maxSagPct: this.maxSag?.sagPct ?? null,
       maxSagReferenceV: this.maxSag?.referenceV ?? null,
+      maxSagTrusted: this.maxSag?.trusted ?? null,
       medianOhms: median(this.stepOhms),
       stepEstimates: this.stepOhms.length,
       uncommandedDrops: this.uncommandedDrops,
