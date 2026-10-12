@@ -724,7 +724,7 @@ test('solar surplus evaluation is skipped, not zeroed, while Charging with no Me
   c.onSolarSample({ gridSignedW: 2000, pvW: 0, batteryW: 0 });
   assert.equal(caps.measure_solar_surplus, undefined,
     'surplus is left untouched (not overwritten with a wrong 0-charger-power figure) while unknown');
-  assert.ok(logs.some((l) => l.includes('no MeterValues yet this connection')), 'the gap is visible in the log');
+  assert.ok(logs.some((l) => l.includes('no MeterValues reading since the status changed')), 'the gap is visible in the log');
 });
 
 test('household cap is unavailable, not a guessed pause, before any status arrives with a transaction id already known from a persisted restart', () => {
@@ -765,7 +765,8 @@ test('household cap is unavailable, not a guessed pause, before any status arriv
   c.onSolarSample({ gridSignedW: 13330, pvW: 80, batteryW: 3290 });
   const line = logs.filter((l) => l.startsWith('[decision:')).pop();
   assert.ok(line?.includes('-> 16A'), `the schedule's floor should pass through uncapped, got: ${line}`);
-  assert.ok(!line?.includes('household cap'), 'household cap note is absent (unavailable), not a wrongly-computed pause');
+  assert.ok(line?.includes('household cap unavailable (charger power unknown - no status received yet this connection)'),
+    `household cap reported unavailable, not a wrongly-computed pause, got: ${line}`);
 });
 
 test('an unknown status with no known transaction id still nets as a confirmed 0 (no session to hide a draw)', () => {
@@ -823,7 +824,8 @@ test('household cap is unavailable, not a guessed-low value, on a transient Avai
   cp.emit('status', { connectorId: 1, errorCode: 'NoError', status: 'Available' });
   const line = logs.filter((l) => l.startsWith('[decision:')).pop();
   assert.ok(line?.includes('-> 16A'), `expected the schedule floor to pass through uncapped, got: ${line}`);
-  assert.ok(!line?.includes('household cap'), 'household cap note is absent (unavailable), not a wrongly-computed drop');
+  assert.ok(line?.includes('household cap unavailable (charger power unknown - Available but a transaction is still on record'),
+    `household cap reported unavailable, not a wrongly-computed drop, got: ${line}`);
 });
 
 test('a genuinely idle Available (no known transaction) still nets as a confirmed 0, not stuck unavailable forever', () => {
@@ -3096,6 +3098,58 @@ test('a drop the charger limit never asked for is logged as the car cutting its 
   const line = logs.find((l) => l.startsWith('[voltage] step 31.6A -> 23.7A'));
   assert.ok(line?.includes('impedance 0.13Ω ±0.13'), String(line));
   assert.ok(line?.includes('charger limit held at 32A, the car cut its own draw to 75%'), String(line));
+});
+
+test('a sag the rest of the house caused is logged but raises no warning (the 11:00 surge)', (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: 1_000_000 });
+  const {
+    c, cp, warnings, logs,
+  } = makeBoundController();
+  cp.emit('status', status('SuspendedEV'));
+  c.onSolarSample({ gridSignedW: 0, pvW: 2000, batteryW: 0 }, Date.now());
+  cp.emit('meterValues', { power: 0, current: 0, voltage: 239 }); // reference, house at ~0
+  t.mock.timers.tick(20000);
+  cp.emit('meterValues', { power: 5300, current: 23, voltage: 231 });
+  t.mock.timers.tick(20000);
+  // A home battery charging and the house came on: grid = the car (as it was 14s ago) + 4.7kW.
+  c.onSolarSample({ gridSignedW: 10000, pvW: 1800, batteryW: 3290 }, Date.now());
+  for (const power of [5450, 5600, 5750]) {
+    t.mock.timers.tick(5000);
+    cp.emit('meterValues', { power, current: 23, voltage: 223 });
+  }
+  assert.ok(!warnings.some((w) => String(w).includes('Voltage at the charger')), 'not blamed on the wiring');
+  assert.ok(logs.some((l) => l.includes('[voltage] session high sag 16V (6.7%) from 239V no-load')
+    && l.endsWith('- rest of the house +4.7kW since the reference (over 1.5kW), not counted')), logs.join('\n'));
+  assert.ok(logs.some((l) => l.startsWith('[charger] power=5450W') && l.endsWith('sag=16V/6.7% (house +4.7kW since ref)')),
+    logs.join('\n'));
+});
+
+test('a charger ramp the lagging grid reading has not caught up with is not mistaken for the house moving', (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: 1_000_000 });
+  const { c, cp, warnings } = makeBoundController();
+  cp.emit('status', status('SuspendedEV'));
+  c.onSolarSample({ gridSignedW: 0, pvW: 0, batteryW: 0 }, Date.now());
+  cp.emit('meterValues', { power: 0, current: 0, voltage: 240 });
+  t.mock.timers.tick(10000);
+  cp.emit('meterValues', { power: 7000, current: 32, voltage: 230 });
+  t.mock.timers.tick(5000);
+  // Still 0: the grid reading reflects the charger as it was 14s ago, before it started. Paired
+  // with the charger's power now, that would read as the house dropping 7kW.
+  c.onSolarSample({ gridSignedW: 0, pvW: 0, batteryW: 0 }, Date.now());
+  for (let i = 0; i < 3; i++) {
+    t.mock.timers.tick(5000);
+    cp.emit('meterValues', { power: 7000, current: 32, voltage: 224 });
+  }
+  assert.ok(String(warnings[warnings.length - 1]).includes('Voltage at the charger'),
+    'the house did not move, so the charger circuit is still the suspect');
+});
+
+test('the decision line says when a configured cap cannot be computed, and why', () => {
+  const { c, logs } = makeController([], { sharedCircuitA: 32, sharedCircuitIncludeSolar: true });
+  c.setSolarTarget(10);
+  const line = logs.filter((l) => l.startsWith('[decision:')).pop();
+  assert.ok(line?.includes('household cap unavailable (no solar sample received yet)'), String(line));
+  assert.ok(line?.includes('shared circuit cap unavailable (no solar sample received yet)'), String(line));
 });
 
 test('the sag warning survives a reconnect blip, and clears on a real replug', (t) => {

@@ -3,7 +3,7 @@
 import test from 'node:test';
 import assert from 'node:assert';
 import {
-  VoltageMonitor, VoltageSample, median, REFERENCE_MAX_AGE_MS, SAG_ALARM_READINGS, STEP_MAX_GAP_MS,
+  VoltageMonitor, VoltageSample, median, OTHER_LOAD_MAX_SHIFT_W, REFERENCE_MAX_AGE_MS, SAG_ALARM_READINGS, STEP_MAX_GAP_MS,
 } from '../lib/control/VoltageMonitor';
 
 const S = (at: number, voltage: number, current: number, limitA: number | null = 32): VoltageSample => ({
@@ -36,6 +36,45 @@ test('sag against an old reference is still reported, but flagged stale', () => 
   const r = m.add(S(REFERENCE_MAX_AGE_MS + 1, 222, 31.6));
   assert.equal(r.sagV, 18);
   assert.equal(r.referenceFresh, false);
+});
+
+/** A reference with the rest of the house at `refW`, then readings 16V (6.7%) down with it at `nowW`. */
+function sagWithHouseAt(refW: number | null, nowW: number | null, readings = SAG_ALARM_READINGS + 2) {
+  const m = new VoltageMonitor();
+  m.add({ ...S(0, 239, 0), otherLoadW: refW });
+  let last = m.add({ ...S(10000, 223, 23), otherLoadW: nowW });
+  for (let i = 1; i < readings; i++) last = m.add({ ...S(10000 + i * 5000, 223, 23), otherLoadW: nowW });
+  return { m, last };
+}
+
+test('sag while the rest of the house moved a lot since the reference is reported, but never alarms', () => {
+  // Hardware, 11:00: reference with the house at ~0, then a home battery and the house came on.
+  const { m, last } = sagWithHouseAt(0, 4700);
+  assert.equal(last.sagV, 16, 'still measured and reported');
+  assert.equal(last.otherLoadShiftW, 4700);
+  assert.equal(last.referenceFresh, true, 'not a question of age');
+  assert.equal(last.referenceTrusted, false);
+  assert.equal(m.alarm, null);
+  assert.equal(m.endSession()!.maxSagTrusted, false, 'the summary says its max sag is not to be trusted');
+});
+
+test('a big drop elsewhere distrusts the reference too - it hides sag as surely as a rise inflates it', () => {
+  const { last } = sagWithHouseAt(3000, 3000 - OTHER_LOAD_MAX_SHIFT_W - 1);
+  assert.equal(last.referenceTrusted, false);
+});
+
+test('a shift within OTHER_LOAD_MAX_SHIFT_W still alarms', () => {
+  const { m, last } = sagWithHouseAt(0, OTHER_LOAD_MAX_SHIFT_W);
+  assert.equal(last.referenceTrusted, true);
+  assert.ok(m.alarm, 'the charger circuit is the likely cause, so the banner still fires');
+  assert.equal(m.endSession()!.maxSagTrusted, true);
+});
+
+test('an unknown household draw, on either side, never blocks the alarm', () => {
+  assert.ok(sagWithHouseAt(null, 4700).m.alarm, 'no figure when the reference was taken');
+  const { m, last } = sagWithHouseAt(0, null);
+  assert.equal(last.otherLoadShiftW, null);
+  assert.ok(m.alarm, 'no figure now - e.g. the solar feed went stale');
 });
 
 test('the alarm latches only after SAG_ALARM_READINGS consecutive fresh readings over 5%', () => {

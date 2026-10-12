@@ -17,7 +17,7 @@ import {
 } from './Scheduler';
 import { SolarLoop, SolarLoopConfig } from './SolarLoop';
 import {
-  SAG_ALARM_PCT, SAG_ALARM_READINGS, SagReading, VoltageMonitor,
+  OTHER_LOAD_MAX_SHIFT_W, SAG_ALARM_PCT, SAG_ALARM_READINGS, SagReading, VoltageMonitor,
 } from './VoltageMonitor';
 
 /** Derived charging mode (not user-selected). */
@@ -213,6 +213,11 @@ function fmtV(v: number): string {
   return `${Math.round(v * 10) / 10}V`;
 }
 
+/** A signed power change for logs: "+4.7kW" / "-0.3kW". */
+function fmtKwDelta(w: number): string {
+  return `${w < 0 ? '-' : '+'}${(Math.abs(w) / 1000).toFixed(1)}kW`;
+}
+
 /** Amps for logs: at most one decimal, none when whole. */
 function fmtAmps(a: number): string {
   return `${Math.round(a * 10) / 10}A`;
@@ -245,6 +250,17 @@ const METER_DECIDES = ['SuspendedEV', 'SuspendedEVSE', 'Faulted'];
 
 /** Metered draw below this in a suspended status is standby, not charging. */
 const DELIVERING_MIN_W = 100;
+
+/**
+ * How far the solar feed's grid reading trails the charger's own (measured on
+ * hardware, ~14s - see SolarLoop's settleMs). Pairing a grid sample with the
+ * charger's power from this long before keeps a charger ramp from reading as
+ * the rest of the house moving the other way.
+ */
+const SOLAR_FEED_LAG_MS = 14000;
+
+/** How much charger power history is kept for that pairing. */
+const CHARGER_POWER_HISTORY_MS = 60000;
 
 /** amps: 0 = pause (hold 0A, keep any live session alive), >0 = charge at that current. */
 interface Decision {
@@ -324,6 +340,17 @@ export class ChargeController {
    * fresh MeterValues yet is read as unknown rather than a stale reading.
    */
   private lastPowerW: number | null = null;
+
+  /** Recent metered charger power, oldest first - see chargerPowerAt(). */
+  private chargerPowerHistory: Array<{ at: number; w: number }> = [];
+
+  /**
+   * The rest of the household's draw from the supply (grid import minus the
+   * charger, W) at the last solar sample, or null if it couldn't be paired.
+   * Fed to the voltage monitor, which uses it to tell a sag the charger's own
+   * current caused from one the rest of the house did.
+   */
+  private lastOtherLoadW: number | null = null;
 
   /** A MeterValues reading has arrived since the status last changed - see isDeliveringPower(). */
   private meteredSinceStatus = false;
@@ -1081,6 +1108,7 @@ export class ChargeController {
   private onMeterValues(r: Readings): void {
     if (r.power !== undefined) {
       this.lastPowerW = r.power;
+      this.noteChargerPower(Date.now(), r.power);
       this.meteredSinceStatus = true;
       this.host.setCapability('measure_power', r.power);
       // The meter corrects the charging state shown for a suspended or faulted status - see
@@ -1106,7 +1134,11 @@ export class ChargeController {
     // charger was never told to make is the car's own doing.
     const sag = r.voltage !== undefined && r.current !== undefined
       ? this.voltage.add({
-        at: Date.now(), voltage: r.voltage, current: r.current, limitA: this.appliedAmps,
+        at: Date.now(),
+        voltage: r.voltage,
+        current: r.current,
+        limitA: this.appliedAmps,
+        otherLoadW: this.solarFeedStale() ? null : this.lastOtherLoadW,
       })
       : null;
 
@@ -1116,7 +1148,7 @@ export class ChargeController {
     if (r.power !== undefined && Math.abs(r.power - this.loggedPowerW) >= 100) {
       this.loggedPowerW = r.power;
       const sagNote = sag?.sagV != null
-        ? ` sag=${fmtV(sag.sagV)}/${sag.sagPct!.toFixed(1)}%${sag.referenceFresh ? '' : ' (old ref)'}`
+        ? ` sag=${fmtV(sag.sagV)}/${sag.sagPct!.toFixed(1)}%${ChargeController.untrustedNote(sag, true)}`
         : '';
       this.host.log(`[charger] power=${Math.round(r.power)}W `
         + `current=${r.current ?? '?'}A voltage=${r.voltage ?? '?'}V${sagNote}`);
@@ -1152,12 +1184,48 @@ export class ChargeController {
     if (r.newMax && r.sagV != null && r.referenceAgeMs != null) {
       this.host.log(`[voltage] session high sag ${fmtV(r.sagV)} (${r.sagPct!.toFixed(1)}%) `
         + `from ${fmtV(r.referenceV!)} no-load ${fmtDuration(r.referenceAgeMs)} ago`
-        + `${r.referenceFresh ? '' : ' - reference too old to trust'}`);
+        + `${ChargeController.untrustedNote(r, false)}`);
     }
     if (r.alarmRaised) {
       this.host.log(`[voltage] sag over ${SAG_ALARM_PCT}% for ${SAG_ALARM_READINGS} readings in a row - warning raised`);
       this.refreshWarning();
     }
+  }
+
+  /**
+   * Why a sag reading doesn't count toward the alarm, or '' if it does. Short
+   * for the running [charger] power= line, spelled out for event lines.
+   */
+  private static untrustedNote(r: SagReading, short: boolean): string {
+    if (!r.referenceFresh) return short ? ' (old ref)' : ' - reference too old to trust';
+    if (r.referenceTrusted || r.otherLoadShiftW == null) return '';
+    const shift = fmtKwDelta(r.otherLoadShiftW);
+    return short
+      ? ` (house ${shift} since ref)`
+      : ` - rest of the house ${shift} since the reference (over ${OTHER_LOAD_MAX_SHIFT_W / 1000}kW), not counted`;
+  }
+
+  /** Record a metered charger power for chargerPowerAt(), dropping what's too old to need. */
+  private noteChargerPower(at: number, w: number): void {
+    this.chargerPowerHistory.push({ at, w });
+    while (this.chargerPowerHistory.length > 1 && this.chargerPowerHistory[1].at <= at - CHARGER_POWER_HISTORY_MS) {
+      this.chargerPowerHistory.shift();
+    }
+  }
+
+  /**
+   * The charger's metered power as of `at`: the last reading at or before it.
+   * Before the oldest reading kept, a charger confirmed not delivering counts as
+   * 0; anything else is unknown (null).
+   */
+  private chargerPowerAt(at: number): number | null {
+    let w: number | null = null;
+    for (const p of this.chargerPowerHistory) {
+      if (p.at > at) break;
+      w = p.w;
+    }
+    if (w != null) return w;
+    return this.nettedChargerW() === 0 ? 0 : null;
   }
 
   /** Log the session's voltage summary (the numbers for an electrician) and reset its stats. */
@@ -1166,7 +1234,8 @@ export class ChargeController {
     if (!s) return;
     const sag = s.maxSagV == null
       ? 'no no-load reference'
-      : `max sag ${fmtV(s.maxSagV)} (${s.maxSagPct!.toFixed(1)}%) from ${fmtV(s.maxSagReferenceV!)} no-load`;
+      : `max sag ${fmtV(s.maxSagV)} (${s.maxSagPct!.toFixed(1)}%) from ${fmtV(s.maxSagReferenceV!)} no-load`
+        + `${s.maxSagTrusted ? '' : ' (reference not trusted - too old, or the rest of the house moved)'}`;
     const ohms = s.medianOhms == null
       ? 'no step estimate'
       : `~${s.medianOhms.toFixed(2)}Ω (median of ${s.stepEstimates} steps)`;
@@ -1367,7 +1436,7 @@ export class ChargeController {
     if (this.lastStatusValue == null) return 'no status received yet this connection';
     if (this.lastStatusValue === 'Available') return 'Available but a transaction is still on record, not yet reconciled';
     if (this.online === false) return 'OCPP link down - last reading is as old as the outage';
-    return 'Charging but no MeterValues yet this connection';
+    return 'delivering, but no MeterValues reading since the status changed';
   }
 
   isWithinSchedule(now: Date = new Date()): boolean {
@@ -1418,6 +1487,9 @@ export class ChargeController {
     this.solarStaleWarned = false;
     const { gridSignedW } = sample;
     this.lastGridSignedW = gridSignedW;
+    // This grid reading reflects the charger as it was SOLAR_FEED_LAG_MS ago.
+    const lagChargerW = this.chargerPowerAt(now - SOLAR_FEED_LAG_MS);
+    this.lastOtherLoadW = lagChargerW == null ? null : gridSignedW - lagChargerW;
     this.lastPvW = sample.pvW ?? 0;
     this.lastBatteryW = sample.batteryW ?? 0;
     if (!this.solarLoop) return;
@@ -1764,6 +1836,15 @@ export class ChargeController {
     };
   }
 
+  /** Why householdCapAmps() is null while a cap is configured. Log-only. */
+  private householdCapUnavailableReason(): string {
+    if (this.lastSolarSampleAt === 0) return 'no solar sample received yet';
+    if (this.solarFeedStale()) {
+      return `solar feed stale, last sample ${fmtDuration(Date.now() - this.lastSolarSampleAt)} ago`;
+    }
+    return `charger power unknown - ${this.chargerPowerUnknownReason()}`;
+  }
+
   /** Why sharedCircuitCapAmps() is null - otherwise a lost boost reads as boost being ignored. */
   private sharedCircuitCapUnavailableReason(): string {
     if (this.cfg.sharedCircuitA <= 0) return 'no charger-circuit rating configured';
@@ -1833,6 +1914,10 @@ export class ChargeController {
         // now (baseline load already netted out) - not spare capacity above
         // the current request, which is `cap - requested` if that's wanted.
         capNotes.push(`household cap ok (ceiling ${cap}A >= requested ${requested}A)`);
+      } else if (this.cfg.maxHouseholdW > 0) {
+        // Configured but not computable right now - say so, or the line reads
+        // the same as a cap that was never set up.
+        capNotes.push(`household cap unavailable (${this.householdCapUnavailableReason()})`);
       }
     }
 
@@ -1850,6 +1935,8 @@ export class ChargeController {
         amps = capped;
       } else if (circuitCap != null) {
         capNotes.push(`shared circuit cap ok (ceiling ${circuitCap}A >= requested ${requested}A)`);
+      } else if (this.cfg.sharedCircuitA > 0) {
+        capNotes.push(`shared circuit cap unavailable (${this.sharedCircuitCapUnavailableReason()})`);
       }
     }
 

@@ -545,6 +545,18 @@ next move.
   that tripped it, and clears only on a replug after an unplug lasting at least
   `IDLE_RECONCILE_DELAY_MS`, so the Wallbox's reconnect blip through `Available` doesn't wipe it
   before anyone has seen it. In-memory only: an app restart drops the alarm and the reference.
+  **The reference also stops counting once the rest of the house has moved.** Each reading
+  carries `otherLoadW` (grid import minus the charger, from the solar feed). Once that has shifted
+  more than `OTHER_LOAD_MAX_SHIFT_W` (1.5kW, either direction) since the reference, the reading
+  is still logged but no longer counts toward the alarm, just like a stale reference. This is
+  needed because the banner tells the user to have the charger circuit checked. Confirmed on
+  hardware: at 11:00 a home battery (3.3kW) and the house came on within three minutes of a 239V
+  reference and latched a "6.7% sag" that was mostly theirs (step impedance put the car's own
+  share near 8V of 16V). The grid figure lags the charger's by ~14s, so `onSolarSample()` pairs it
+  with the charger's power from `SOLAR_FEED_LAG_MS` earlier (`chargerPowerAt()`, a 60s history).
+  Paired with the power *now*, every charger ramp reads as the house moving the other way by the
+  ramp's size, which would suppress exactly the alarms that matter. No solar feed (or a stale one)
+  means `otherLoadW` is null, and unknown never blocks the alarm.
 - **`parseMeterValues()` reports what it drops.** Anything outside the four measurands it maps
   (`Power.Active.Import`/`Current.Import`/`Voltage`/`Energy.Active.Import.Register`) lands in
   `Readings.unhandled` as `measurand -> "value unit @phase"` - captured *before* the numeric check,
@@ -708,15 +720,11 @@ ping timeout does. Whether the 12h outage that prompted this fired `disconnect` 
 (the old code logged nothing distinguishable); `[ocpp] offline (…)` now makes the next one legible
 either way.
 
-Whether the Wallbox reports `Voltage` at 0A at all (paused, or `SuspendedEV` before the car draws).
-The **sag** half of the voltage diagnostics (see Key invariants) needs a no-load reading as its
-reference; if the charger only meters under load, only the step-impedance half will ever report,
-and the banner can never fire. The first `[voltage] session:` line saying `no no-load reference`
-answers it.
-
 `SetChargingProfile` behaviour at exactly 6A (as opposed to 0A, confirmed below), and a live schedule
 window actually *starting* a charge from cold (`Preparing` → accepted `RemoteStartTransaction` →
 `StartTransaction`) — plausibly untestable on this charger at all, see below. Confirmed on-device:
+the Wallbox **does** report `Voltage` at 0A (`power=0W current=0A voltage=240V` while paused in
+`SuspendedEVSE`), so the sag half of the voltage diagnostics does get its no-load reference;
 OCPP port bind (`:9000`), charger connect/bind, SolarFeed discovery, realtime widget, the widget's
 `getState` pull endpoint (Widget section above - `homey app run` shows `[widget-api] getState hit`),
 **`TxDefaultProfile` writes (no transaction id known) are genuinely obeyed** - a real Wallbox with no
