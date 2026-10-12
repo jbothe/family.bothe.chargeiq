@@ -173,7 +173,12 @@ with it. Outside those windows solar stays **battery-first**: the battery soaks 
 grid at zero, so the car only ever sees what the battery can't absorb. It works because SolarEdge's
 battery yields: confirmed on hardware that a car drawing 1832W moved the battery from about +1010W to
 −820W with the grid flat at 0W. Discharge is still subtracted in both modes, so the battery never
-funds the car here. Intended use is a `0A` window before a free-power window (e.g. 06:00–11:00):
+funds the car here. **Confirmed on hardware 2026-10-12:** a 06:00–11:00 window started the car at 6A
+once PV beat the house by 1570W (most of it going into the battery), and paused it again under
+cloud. The pause only comes after `minOnMs` (180s), and for the rest of that dwell the battery
+covers the car (up to ~850W, roughly 40Wh across the morning). That's accepted: before a free
+window, that battery energy costs nothing to replace. Intended use is a `0A` window before a
+free-power window (e.g. 06:00–11:00):
 that morning PV would have charged the battery, and the free window refills it at no cost anyway. A
 stale feed resets the loop (the tick fail-safe covers these windows as well as Solar mode), which
 drops the window back to its floor. `getModeInfo()` reports `boostActive` and `solarToCarActive`
