@@ -2132,6 +2132,76 @@ test('a boot event triggers configureCharger(), which logs rather than throws on
     'a rejected ChangeConfiguration is caught and logged, not left to crash the controller');
 });
 
+test('changing the MeterValues interval setting sends it to a connected charger straight away', async () => {
+  // Otherwise the charger only hears it on bind/boot. Confirmed on hardware: a
+  // 10s -> 5s change waited for the Wallbox's next reconnect to take effect.
+  const configured: { key: string; value: string }[] = [];
+  let connected = true;
+  const fakeClient: RpcClient = {
+    identity: 'X',
+    handle: () => {},
+    call: async (method: string, params?: unknown) => {
+      if (method === 'ChangeConfiguration') configured.push(params as { key: string; value: string });
+      return { status: 'Accepted' };
+    },
+    close: async () => {},
+    on: () => {},
+  };
+  const cp = new ChargePoint({ identity: 'X', authorize: () => true, nextTransactionId: () => 1 });
+  cp.attach(fakeClient);
+  Object.defineProperty(cp, 'connected', { get: () => connected });
+
+  const settings: Record<string, unknown> = {
+    minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdA: 14000 / 230, householdPhases: 1, meterSampleIntervalSec: 10,
+  };
+  const logs: string[] = [];
+  const host: ControllerHost = {
+    identity: 'X',
+    setCapability: () => {},
+    getSetting: <T>(k: string) => settings[k] as T,
+    getStore: <T>(k: string) => ({ schedule: [] } as Record<string, unknown>)[k] as T,
+    setStore: async () => {},
+    setAvailable: () => {},
+    setUnavailable: () => {},
+    setWarning: () => {},
+    log: (...a) => {
+      logs.push(a.join(' '));
+    },
+    error: () => {},
+  };
+  const cs = { getChargePoint: () => cp, on: () => {}, removeListener: () => {} } as unknown as CentralSystem;
+  const c = new ChargeController(host, cs);
+  c.init();
+  const settle = () => new Promise((r) => setTimeout(r, 0));
+  await settle();
+  const intervals = () => configured.filter((x) => x.key === 'MeterValueSampleInterval').map((x) => x.value);
+  assert.deepEqual(intervals(), ['10'], 'configured once on bind');
+
+  // A save that doesn't touch the interval sends nothing.
+  settings.marginW = 100;
+  c.refreshConfig();
+  await settle();
+  assert.deepEqual(intervals(), ['10']);
+
+  settings.meterSampleIntervalSec = 5;
+  c.refreshConfig();
+  await settle();
+  assert.deepEqual(intervals(), ['10', '5']);
+  assert.ok(configured.some((x) => x.key === 'MeterValuesSampledData' && x.value.includes('Current.Offered')),
+    'the measurand list goes with it');
+  assert.ok(logs.some((l) => l.includes('[config] MeterValues interval 10s -> 5s, sending to the charger')));
+  assert.ok(logs.some((l) => l.includes('[charger] MeterValues config accepted (interval 5s)')),
+    'acceptance is logged, so a working change is confirmed rather than inferred from no error');
+
+  // Offline: nothing to send to - the next bind configures it anyway.
+  connected = false;
+  settings.meterSampleIntervalSec = 20;
+  c.refreshConfig();
+  await settle();
+  assert.deepEqual(intervals(), ['10', '5']);
+  c.destroy();
+});
+
 // ---------------------------------------------------------------------------
 // Error-handling catch branches around outbound OCPP writes
 // ---------------------------------------------------------------------------

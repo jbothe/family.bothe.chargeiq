@@ -617,7 +617,9 @@ next move.
   plain PWM), `Temperature`, or a vendor measurand would otherwise be discarded in silence, so this
   makes what a real Wallbox actually sends discoverable from `homey app run` rather than assumed.
   **`Current.Offered` is requested on purpose** (`configureCharger()`, on every fresh bind as well as
-  on boot, since an app restart doesn't reboot the charger). It was first left unparsed so this log
+  on boot, since an app restart doesn't reboot the charger - and from `refreshConfig()` when a save
+  changes `meterSampleIntervalSec` while connected; before that, a changed interval only reached the
+  charger at its next reconnect, confirmed on hardware). It was first left unparsed so this log
   would report it - which it did, but only once per run, too little to answer a live "why 6A?". It
   is now parsed and tracked; see "Accepted is still not offered" above. It was once dropped on the
   assumption that it always equals what the app last wrote - that's the assumption it exists to check.

@@ -590,6 +590,8 @@ export class ChargeController {
   }
 
   refreshConfig(): void {
+    // Unset on the constructor's first call, before there is a previous config.
+    const prevInterval = (this.cfg as ControllerConfig | undefined)?.meterSampleIntervalSec;
     const g = <T>(k: string, d: T): T => (this.host.getSetting<T>(k) ?? d);
     const voltage = g('voltage', DEFAULTS.voltage);
     const maxHouseholdA = g('maxHouseholdA', DEFAULTS.maxHouseholdA);
@@ -621,6 +623,13 @@ export class ChargeController {
     this.solarLoop?.setConfig(this.solarLoopConfig());
     // target_power is in watts, so the same current reads differently now.
     if (this.limitAmps != null) this.publishLimit(this.limitAmps);
+    // The charger is otherwise only configured on bind and boot, so a changed
+    // interval would wait for the next reconnect - which could be days. While
+    // offline there is nothing to send to; the next bind configures it anyway.
+    if (prevInterval !== undefined && prevInterval !== this.cfg.meterSampleIntervalSec && this.cp?.connected) {
+      this.host.log(`[config] MeterValues interval ${prevInterval}s -> ${this.cfg.meterSampleIntervalSec}s, sending to the charger`);
+      this.configureCharger().catch((e) => this.host.error('configureCharger', e));
+    }
     this.timezone = this.host.getTimezone?.();
     this.scheduler.setTimezone(this.timezone);
     // Logs the full resolved config on every refresh (boot + every settings
@@ -881,13 +890,15 @@ export class ChargeController {
       const interval = await this.cp.changeConfiguration('MeterValueSampleInterval', String(this.cfg.meterSampleIntervalSec));
       // Current.Offered is what the charger actually advertises to the car, which its
       // own max-current setting or load management can hold below a profile it accepted.
-      // Nothing parses it; the unhandled-measurand log reports it.
+      // parseMeterValues() maps it to Readings.offered -> charge_current_offered.
       const measurands = await this.cp.changeConfiguration(
         'MeterValuesSampledData',
         'Power.Active.Import,Current.Import,Voltage,Energy.Active.Import.Register,Current.Offered',
       );
       if (interval !== 'Accepted' || measurands !== 'Accepted') {
         this.host.log(`[charger] MeterValues config not accepted (interval ${interval}, measurands ${measurands})`);
+      } else {
+        this.host.log(`[charger] MeterValues config accepted (interval ${this.cfg.meterSampleIntervalSec}s)`);
       }
     } catch (err) {
       this.host.log('Charger rejected MeterValues config (continuing):', (err as Error).message);
