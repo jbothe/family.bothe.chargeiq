@@ -594,6 +594,13 @@ older state payload without the field never reads as stale. **EV power and its o
 deliberately untouched** - they come from the charger's `MeterValues`, not the feed. `test/widget-preview.html`
 has a `Solar feed stale 3d` preset next to `Charger offline 12h` for previewing it.
 
+**The solar/battery meter peaks are widget settings, not device settings** (`widget.compose.json`'s
+`settings`: `peakSolarW`, `peakBatteryChargeW`, `peakBatteryDischargeW`). They are display-only, so
+they live with the dashboard; `onHomeyReady` reads `Homey.getSettings()` and `PF.withPeaks()` merges
+them into the state's `limits` before `render()`. The controller's `limits` now carry only
+`chargerMaxW`/`gridMaxW`. An absent setting leaves a peak already in `limits` alone, which is what
+keeps `test/widget-preview.html`'s presets (no `Homey` stub) drawing their strips.
+
 **The charging chip's amps are what the charger accepted, not what was decided** (`PF.chipAmps()`).
 `limitA` (`charge_current_limit`) is only the controller's decision; `appliedA`
 (`charge_current_applied`) is what the charger took. When they differ the chip reads `22A→32A`, and an
@@ -765,6 +772,8 @@ disagreement, not confirm which way a real widget WKWebView actually behaves.
 (`test/pair-login-preview.html` has a `getChargerStatus` toggle), but not yet run through a real
 pairing. Homey documents no timeout on a `list_devices` handler; if its pair UI gives up before the
 5-minute wait does, the start view's status line still tells the user when to press Continue.
+Also unconfirmed: that Homey reloads the widget after its settings are changed, which is the only
+point `onHomeyReady` re-reads them.
 
 ## Conventions
 - Match the surrounding style. `'use strict'` + `import` + `module.exports = class …` for

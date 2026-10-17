@@ -642,10 +642,34 @@
         s = s || {};
         return s.mode === 'scheduled' && s.solarEnough === false;
       },
+      // Merges this widget's own settings (Homey.getSettings()) into the state's limits.
+      // The solar/battery peaks are display-only, so they live with the widget instead of
+      // in the charger's device settings. A setting that is absent leaves any limit the
+      // state already carries alone, which keeps older payloads and the preview working.
+      withPeaks: function (s, settings) {
+        s = s || {};
+        settings = settings || {};
+        var lim = {};
+        var k;
+        for (k in (s.limits || {})) lim[k] = s.limits[k];
+        var map = {
+          peakSolarW: 'solarPeakW',
+          peakBatteryChargeW: 'batteryChargePeakW',
+          peakBatteryDischargeW: 'batteryDischargePeakW',
+        };
+        for (k in map) {
+          var v = Number(settings[k]);
+          if (settings[k] != null && settings[k] !== '' && isFinite(v)) lim[map[k]] = v;
+        }
+        var out = {};
+        for (k in s) out[k] = s[k];
+        out.limits = lim;
+        return out;
+      },
       // Capacity meter for a tile's edge strip: { pct: 0..1, color } or null to hide it
       // entirely (no configured peak for that node, or - for EV - no charger paired).
-      // Peaks are dashboard-only config (ChargeController's resolved limits, passed
-      // through verbatim) with no bearing on any control decision.
+      // Solar/battery peaks come from the widget's settings (withPeaks), charger/grid
+      // from the controller's resolved limits; none has any bearing on a control decision.
       meter: function (kind, s) {
         s = s || {};
         var lim = s.limits || {};
@@ -863,10 +887,14 @@
       document.querySelector('.card').className = 'card' + (stale ? ' stale' : '');
     }
 
+    // This widget instance's settings (the meter peaks); re-read on every mount, since
+    // Homey reloads the widget when they are changed.
+    var widgetSettings = {};
+
     function onData(result) {
       if (!result || typeof result !== 'object') return;
       lastOkAt = Date.now(); hadData = true;
-      render(result); applyStale();
+      render(PF.withPeaks(result, widgetSettings)); applyStale();
     }
 
     // Homey re-invokes onHomeyReady every time this widget (re)mounts - notably when
@@ -881,6 +909,7 @@
     var staleTimer = null;
 
     function onHomeyReady(Homey) {
+      widgetSettings = (Homey.getSettings && Homey.getSettings()) || {};
       Homey.ready();
       render({});
       // Immediate paint: pull current state once via the widget's own api.js

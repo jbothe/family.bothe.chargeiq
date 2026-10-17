@@ -131,10 +131,6 @@ interface ControllerConfig {
   // solar samples being consumed (surplus meter, household/circuit caps stay
   // live) - only gates whether resolveDetailed() falls into the solar branch.
   solarEnabled: boolean;
-  // Dashboard capacity-meter peaks (0 = meter hidden); no bearing on control decisions.
-  peakSolarW: number;
-  peakBatteryChargeW: number;
-  peakBatteryDischargeW: number;
 }
 
 const DEFAULTS: ControllerConfig = {
@@ -162,9 +158,6 @@ const DEFAULTS: ControllerConfig = {
   sharedCircuitIncludeSolar: false,
   sharedCircuitIncludeBattery: false,
   solarEnabled: true,
-  peakSolarW: 0,
-  peakBatteryChargeW: 0,
-  peakBatteryDischargeW: 0,
 };
 
 const PROFILE_ID = 1;
@@ -609,9 +602,6 @@ export class ChargeController {
       sharedCircuitIncludeSolar: g('sharedCircuitIncludeSolar', DEFAULTS.sharedCircuitIncludeSolar),
       sharedCircuitIncludeBattery: g('sharedCircuitIncludeBattery', DEFAULTS.sharedCircuitIncludeBattery),
       solarEnabled: g('solarEnabled', DEFAULTS.solarEnabled),
-      peakSolarW: g('peakSolarW', DEFAULTS.peakSolarW),
-      peakBatteryChargeW: g('peakBatteryChargeW', DEFAULTS.peakBatteryChargeW),
-      peakBatteryDischargeW: g('peakBatteryDischargeW', DEFAULTS.peakBatteryDischargeW),
     };
     this.solarLoop?.setConfig(this.solarLoopConfig());
     this.timezone = this.host.getTimezone?.();
@@ -1666,10 +1656,7 @@ export class ChargeController {
     availableW: number; solarState: string; targetA: number | null; mode: ChargeMode;
     chargerPowerW: number | null;
     solarFeed: { stale: boolean; ageMs: number | null };
-    limits: {
-      chargerMaxW: number; gridMaxW: number;
-      batteryChargePeakW: number; batteryDischargePeakW: number; solarPeakW: number;
-    };
+    limits: { chargerMaxW: number; gridMaxW: number };
     } {
     return {
       availableW: this.lastAvailableW,
@@ -1686,9 +1673,6 @@ export class ChargeController {
       limits: {
         chargerMaxW: this.cfg.maxAmps * this.cfg.voltage * this.cfg.phases,
         gridMaxW: this.cfg.maxHouseholdW,
-        batteryChargePeakW: this.cfg.peakBatteryChargeW,
-        batteryDischargePeakW: this.cfg.peakBatteryDischargeW,
-        solarPeakW: this.cfg.peakSolarW,
       },
     };
   }
