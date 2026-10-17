@@ -123,6 +123,11 @@ export class CentralSystem extends EventEmitter {
     return [...this.points.keys()];
   }
 
+  /** Identities with a live link right now (the pairing screen's status line). */
+  connectedIdentities(): string[] {
+    return [...this.points.values()].filter((cp) => cp.connected).map((cp) => cp.identity);
+  }
+
   /**
    * Closing the server was not enough on its own: each ChargePoint holds a
    * liveness timer and a reference to its socket, and neither is reached by

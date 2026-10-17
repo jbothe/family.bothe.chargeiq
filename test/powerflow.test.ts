@@ -219,6 +219,30 @@ test('meter: ev uses live charger power against chargerMaxW, hidden when no char
   );
 });
 
+test('withPeaks: the widget\'s own settings supply the solar/battery peaks', () => {
+  const state = { solarW: 3000, limits: { chargerMaxW: 7360, gridMaxW: 14000 } };
+  const merged = PF.withPeaks(state, {
+    peakSolarW: 6000, peakBatteryChargeW: 3000, peakBatteryDischargeW: 2600,
+  }) as { solarW: number; limits: Record<string, number> };
+  assert.deepEqual(merged.limits, {
+    chargerMaxW: 7360, gridMaxW: 14000, solarPeakW: 6000, batteryChargePeakW: 3000, batteryDischargePeakW: 2600,
+  });
+  assert.equal(merged.solarW, 3000, 'the rest of the state passes through');
+  assert.deepEqual(state.limits, { chargerMaxW: 7360, gridMaxW: 14000 }, 'the input is not mutated');
+  assert.deepEqual(PF.meter('solar', merged), { pct: 0.5, color: 'var(--homey-color-green)' });
+
+  assert.equal(PF.meter('solar', PF.withPeaks(state, { peakSolarW: 0 })), null, '0 hides the strip');
+  assert.equal(PF.meter('solar', PF.withPeaks(state, {})), null, 'unset hides it too');
+});
+
+test('withPeaks: an absent or blank setting leaves a peak the state already carries', () => {
+  const state = { limits: { solarPeakW: 8000 } };
+  assert.deepEqual((PF.withPeaks(state, {}) as { limits: object }).limits, { solarPeakW: 8000 });
+  assert.deepEqual((PF.withPeaks(state, { peakSolarW: null }) as { limits: object }).limits, { solarPeakW: 8000 });
+  assert.deepEqual((PF.withPeaks(state, { peakSolarW: '' }) as { limits: object }).limits, { solarPeakW: 8000 });
+  assert.deepEqual((PF.withPeaks(undefined, undefined) as { limits: object }).limits, {}, 'no state at all');
+});
+
 test('meter: solar against solarPeakW, hidden when no peak configured', () => {
   const limits = {
     chargerMaxW: 7360, gridMaxW: 14000, batteryChargePeakW: 3000, batteryDischargePeakW: 2600, solarPeakW: 6000,

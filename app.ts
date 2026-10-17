@@ -13,10 +13,7 @@ interface ChargerDeviceLike {
     availableW: number; solarState: string; targetA: number | null; mode: string;
     chargerPowerW: number | null;
     solarFeed: { stale: boolean; ageMs: number | null };
-    limits: {
-      chargerMaxW: number; gridMaxW: number;
-      batteryChargePeakW: number; batteryDischargePeakW: number; solarPeakW: number;
-    };
+    limits: { chargerMaxW: number; gridMaxW: number };
   };
   getModeInfo?(): {
     mode: string | null;
@@ -176,9 +173,8 @@ module.exports = class ChargeIQApp extends Homey.App {
       boostActive: modeInfo.boostActive,
       solarToCarActive: modeInfo.solarToCarActive,
       solarEnough: modeInfo.solarEnough,
-      limits: diag?.limits ?? {
-        chargerMaxW: 0, gridMaxW: 0, batteryChargePeakW: 0, batteryDischargePeakW: 0, solarPeakW: 0,
-      },
+      // The solar/battery peaks are the widget's own settings, merged in there.
+      limits: diag?.limits ?? { chargerMaxW: 0, gridMaxW: 0 },
       charger: {
         available: !!dev,
         online: conn.online,

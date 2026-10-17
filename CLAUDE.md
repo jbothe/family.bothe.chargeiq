@@ -13,6 +13,12 @@ pair handler). The app→widget→schedule glue also assumes `devices[0]`. See `
 the full gap analysis and what lifting the cap would require — don't add a second driver/device path
 without reading it.
 
+**Pairing waits for the charger.** Saving the OCPP URL restarts a Wallbox, so the user presses
+Continue while it is still booting; `list_devices` answering at once gave Homey's "No devices found"
+on every fresh install. It now awaits `waitForChargePoint()` (`lib/pairing.ts`, up to `PAIR_WAIT_MS`,
+5 min, ended early by the pair session's `disconnect`), and the start view polls `getChargerStatus`
+(`CentralSystem.connectedIdentities()`) to show "Waiting for your charger…" / "Charger connected".
+
 ## Commands
 - `npm run build` — `tsc` → `.homeybuild/` (the run/publish output).
 - `npm test` — `tsc && node --test .homeybuild/test/*.test.js` (node:test; no framework dep).
@@ -588,6 +594,13 @@ older state payload without the field never reads as stale. **EV power and its o
 deliberately untouched** - they come from the charger's `MeterValues`, not the feed. `test/widget-preview.html`
 has a `Solar feed stale 3d` preset next to `Charger offline 12h` for previewing it.
 
+**The solar/battery meter peaks are widget settings, not device settings** (`widget.compose.json`'s
+`settings`: `peakSolarW`, `peakBatteryChargeW`, `peakBatteryDischargeW`). They are display-only, so
+they live with the dashboard; `onHomeyReady` reads `Homey.getSettings()` and `PF.withPeaks()` merges
+them into the state's `limits` before `render()`. The controller's `limits` now carry only
+`chargerMaxW`/`gridMaxW`. An absent setting leaves a peak already in `limits` alone, which is what
+keeps `test/widget-preview.html`'s presets (no `Homey` stub) drawing their strips.
+
 **The charging chip's amps are what the charger accepted, not what was decided** (`PF.chipAmps()`).
 `limitA` (`charge_current_limit`) is only the controller's decision; `appliedA`
 (`charge_current_applied`) is what the charger took. When they differ the chip reads `22A→32A`, and an
@@ -754,6 +767,13 @@ not independently verified on a real device. `test/widget-preview.html`'s "OS on
 exists to make this case previewable (clears the forced `.homey-dark-mode` override so only the
 real OS/browser `prefers-color-scheme` drives that fallback), but it can only simulate the
 disagreement, not confirm which way a real widget WKWebView actually behaves.
+
+**Pairing's wait for a restarting charger** (see the top of this file) is unit-tested and previewed
+(`test/pair-login-preview.html` has a `getChargerStatus` toggle), but not yet run through a real
+pairing. Homey documents no timeout on a `list_devices` handler; if its pair UI gives up before the
+5-minute wait does, the start view's status line still tells the user when to press Continue.
+Also unconfirmed: that Homey reloads the widget after its settings are changed, which is the only
+point `onHomeyReady` re-reads them.
 
 ## Conventions
 - Match the surrounding style. `'use strict'` + `import` + `module.exports = class …` for

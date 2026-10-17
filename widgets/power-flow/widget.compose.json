@@ -1,8 +1,53 @@
 {
-  "name": { "en": "Power Flow" },
+  "name": {
+    "en": "Power Flow"
+  },
   "height": 218,
-  "settings": [],
+  "settings": [
+    {
+      "id": "peakSolarW",
+      "type": "number",
+      "title": {
+        "en": "Peak solar production (W)"
+      },
+      "hint": {
+        "en": "Your system's peak PV output, for the % capacity strip on the Solar tile. 0 hides it."
+      },
+      "value": 0,
+      "min": 0,
+      "max": 100000
+    },
+    {
+      "id": "peakBatteryChargeW",
+      "type": "number",
+      "title": {
+        "en": "Peak battery charge (W)"
+      },
+      "hint": {
+        "en": "Your battery's peak charge power, for the % capacity strip on the Battery tile while charging. 0 hides it."
+      },
+      "value": 0,
+      "min": 0,
+      "max": 100000
+    },
+    {
+      "id": "peakBatteryDischargeW",
+      "type": "number",
+      "title": {
+        "en": "Peak battery discharge (W)"
+      },
+      "hint": {
+        "en": "Your battery's peak discharge power, for the % capacity strip on the Battery tile while discharging. 0 hides it."
+      },
+      "value": 0,
+      "min": 0,
+      "max": 100000
+    }
+  ],
   "api": {
-    "getState": { "method": "GET", "path": "/state" }
+    "getState": {
+      "method": "GET",
+      "path": "/state"
+    }
   }
 }
