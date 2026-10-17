@@ -121,6 +121,11 @@
         <button class="outcome-btn" data-outcome="empty">Resolves (empty)</button>
         <button class="outcome-btn" data-outcome="fail">Rejects</button>
       </div>
+      <div class="row">
+        <span class="label">getChargerStatus</span>
+        <button class="charger-btn" data-connected="" aria-pressed="true">Waiting</button>
+        <button class="charger-btn" data-connected="WB123456">Connected</button>
+      </div>
       <div class="divider"></div>
       <button id="reload">Reload view</button>
     </div>
@@ -145,6 +150,8 @@
     var bannerEl = document.getElementById('banner');
     var currentTheme = '';
     var currentOutcome = 'ok';
+    // Read live by the stub on every poll, so toggling it needs no reload.
+    var chargerConnected = '';
     var cssReady = false;
 
     // Homey darkens a pair view by inverting it, not by theming the --homey-* tokens (they have no
@@ -269,6 +276,10 @@
       return '<script>\n'
         + 'window.Homey = {\n'
         + '  emit: function (event, data) {\n'
+        + '    if (event === "getChargerStatus") {\n'
+        + '      var id = window.parent.__previewCharger();\n'
+        + '      return Promise.resolve({ connected: id ? [id] : [] });\n'
+        + '    }\n'
         + '    window.parent.__previewLog("Homey.emit(" + JSON.stringify(event) + ", " + JSON.stringify(data) + ")");\n'
         + '    return new Promise(function (resolve, reject) {\n'
         + '      setTimeout(function () {\n'
@@ -340,12 +351,22 @@
 
     window.__previewLog = log;
     window.__previewOutcome = function () { return currentOutcome; };
+    window.__previewCharger = function () { return chargerConnected; };
 
     document.querySelectorAll('.theme-btn').forEach(function (btn) {
       btn.addEventListener('click', function () { applyTheme(btn.getAttribute('data-theme')); });
     });
     document.querySelectorAll('.outcome-btn').forEach(function (btn) {
       btn.addEventListener('click', function () { applyOutcome(btn.getAttribute('data-outcome')); });
+    });
+    document.querySelectorAll('.charger-btn').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        chargerConnected = btn.getAttribute('data-connected');
+        document.querySelectorAll('.charger-btn').forEach(function (b) {
+          b.setAttribute('aria-pressed', String(b === btn));
+        });
+        log('getChargerStatus now ' + (chargerConnected ? 'connected (' + chargerConnected + ')' : 'waiting'));
+      });
     });
     document.getElementById('reload').addEventListener('click', reload);
 

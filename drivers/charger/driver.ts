@@ -3,7 +3,9 @@
 import os from 'os';
 import Homey from 'homey';
 import { CentralSystem, DEFAULT_OCPP_PORT } from '../../lib/ocpp/CentralSystem';
-import { resolvePairList } from '../../lib/pairing';
+import {
+  NO_CHARGER_MESSAGE, PAIR_WAIT_MS, resolvePairList, SINGLE_CHARGER_MESSAGE, waitForChargePoint,
+} from '../../lib/pairing';
 
 /** Homey's own LAN IPv4 address (first non-internal interface), or null if none found. */
 function findLocalIPv4(): string | null {
@@ -77,13 +79,26 @@ module.exports = class ChargerDriver extends Homey.Driver {
       return { ip: ip ?? '<homey-ip>', port };
     });
 
-    // List charge points that have connected to the Central System this session.
+    const cs = (this.homey.app as ChargeIQApp).getCentralSystem();
+    // Ends any list_devices wait below if the user closes the pair dialog.
+    const closed = new AbortController();
+    session.setHandler('disconnect', async () => closed.abort());
+
+    // Polled by the start view so it can say whether the charger has connected yet.
+    session.setHandler('getChargerStatus', async () => ({ connected: cs.connectedIdentities() }));
+
+    // List charge points that have connected to the Central System this session,
+    // waiting for one if none has yet: saving the OCPP URL restarts a Wallbox, so
+    // the user usually presses Continue while it is still booting.
     // ChargeIQ is single-charger for now (see lib/pairing.ts / docs/MULTI_DEVICE.md):
     // refuse a second pairing rather than give uncoordinated grid/circuit limits.
     session.setHandler('list_devices', async () => {
-      const cs = (this.homey.app as ChargeIQApp).getCentralSystem();
-      const result = resolvePairList(this.getDevices().length, cs.listIdentities());
+      if (this.getDevices().length >= 1) throw new Error(SINGLE_CHARGER_MESSAGE);
+      const identities = await waitForChargePoint(cs, PAIR_WAIT_MS, closed.signal);
+      this.log(`[pair] list_devices: ${identities.length ? identities.join(', ') : 'nothing connected'}`);
+      const result = resolvePairList(this.getDevices().length, identities);
       if ('error' in result) throw new Error(result.error);
+      if (result.devices.length === 0) throw new Error(NO_CHARGER_MESSAGE);
       return result.devices;
     });
   }

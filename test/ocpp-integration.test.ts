@@ -47,6 +47,7 @@ test('OCPP 1.6J: connect, boot, transaction, MeterValues, commands', async () =>
     await sleep(80);
     assert.ok(cp, 'charge point registered');
     assert.ok(cs.listIdentities().includes(IDENTITY));
+    assert.deepEqual(cs.connectedIdentities(), [IDENTITY], 'live link reported for the pairing screen');
     assert.equal(cs.getChargePoint(IDENTITY), cp);
     assert.equal(cs.getChargePoint('NOT-CONNECTED'), undefined);
 
@@ -83,6 +84,11 @@ test('OCPP 1.6J: connect, boot, transaction, MeterValues, commands', async () =>
     const cfg = await cp!.getConfiguration(['MeterValueSampleInterval']);
     assert.ok(Array.isArray(cfg.configurationKey));
     assert.equal(await cp!.changeConfiguration('MeterValueSampleInterval', '10'), 'Accepted');
+
+    await sim.close();
+    await sleep(60);
+    assert.deepEqual(cs.connectedIdentities(), [], 'a dropped link is no longer reported as connected');
+    assert.ok(cs.listIdentities().includes(IDENTITY), 'but the identity is still known');
   } finally {
     await sim.close();
     await sleep(30);

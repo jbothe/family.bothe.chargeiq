@@ -13,6 +13,12 @@ pair handler). The app→widget→schedule glue also assumes `devices[0]`. See `
 the full gap analysis and what lifting the cap would require — don't add a second driver/device path
 without reading it.
 
+**Pairing waits for the charger.** Saving the OCPP URL restarts a Wallbox, so the user presses
+Continue while it is still booting; `list_devices` answering at once gave Homey's "No devices found"
+on every fresh install. It now awaits `waitForChargePoint()` (`lib/pairing.ts`, up to `PAIR_WAIT_MS`,
+5 min, ended early by the pair session's `disconnect`), and the start view polls `getChargerStatus`
+(`CentralSystem.connectedIdentities()`) to show "Waiting for your charger…" / "Charger connected".
+
 ## Commands
 - `npm run build` — `tsc` → `.homeybuild/` (the run/publish output).
 - `npm test` — `tsc && node --test .homeybuild/test/*.test.js` (node:test; no framework dep).
@@ -754,6 +760,11 @@ not independently verified on a real device. `test/widget-preview.html`'s "OS on
 exists to make this case previewable (clears the forced `.homey-dark-mode` override so only the
 real OS/browser `prefers-color-scheme` drives that fallback), but it can only simulate the
 disagreement, not confirm which way a real widget WKWebView actually behaves.
+
+**Pairing's wait for a restarting charger** (see the top of this file) is unit-tested and previewed
+(`test/pair-login-preview.html` has a `getChargerStatus` toggle), but not yet run through a real
+pairing. Homey documents no timeout on a `list_devices` handler; if its pair UI gives up before the
+5-minute wait does, the start view's status line still tells the user when to press Continue.
 
 ## Conventions
 - Match the surrounding style. `'use strict'` + `import` + `module.exports = class …` for

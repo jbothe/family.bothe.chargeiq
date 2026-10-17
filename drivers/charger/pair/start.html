@@ -33,6 +33,9 @@
       font-size: var(--homey-font-size-small);
       word-break: break-all;
     }
+
+    .status { margin: var(--homey-su-4) 0 0; text-align: center; font-size: var(--homey-font-size-small); color: var(--homey-color-text-light); }
+    .status.connected { color: var(--homey-color-green); }
   </style>
 </head>
 <body>
@@ -49,8 +52,11 @@
     </li>
     <li>Leave <b>Charge point identity</b> as whatever your charger already filled in (or set your own).</li>
     <li>Use OCPP <b>1.6J</b> over WebSocket.</li>
-    <li>Save and let the charger connect, then continue.</li>
+    <li>Save. The charger restarts to apply the change, which takes a minute or two.</li>
+    <li>Press Continue. ChargeIQ waits for the charger to come back and connect.</li>
   </ol>
+
+  <p class="status" id="status">Waiting for your charger to connect…</p>
 
   <script type="application/javascript">
     // No charge-point-id path segment here - the charger's own OCPP client appends its
@@ -64,6 +70,25 @@
     }).catch(function () {
       document.getElementById('url').textContent = 'ws://<homey-ip>:9000';
     });
+
+    // Live status, so the user can see when the restarted charger is back. Purely
+    // informative: Continue works either way, since list_devices waits for it too.
+    var statusEl = document.getElementById('status');
+    function pollStatus() {
+      Homey.emit('getChargerStatus', null).then(function (res) {
+        var ids = (res && res.connected) || [];
+        if (ids.length) {
+          statusEl.textContent = 'Charger connected (' + ids.join(', ') + '). Press Continue.';
+          statusEl.className = 'status connected';
+        } else {
+          statusEl.textContent = 'Waiting for your charger to connect…';
+          statusEl.className = 'status';
+        }
+      }).catch(function () {}).then(function () {
+        setTimeout(pollStatus, 2000);
+      });
+    }
+    pollStatus();
   </script>
 </body>
 </html>
