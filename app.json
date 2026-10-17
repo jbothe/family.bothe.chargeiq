@@ -2,7 +2,7 @@
   "_comment": "This file is generated. Please edit .homeycompose/app.json instead.",
   "id": "family.bothe.chargeiq",
   "version": "1.0.0",
-  "compatibility": ">=12.4.5",
+  "compatibility": ">=12.13.0",
   "sdk": 3,
   "runtime": "nodejs",
   "platforms": [
@@ -313,68 +313,6 @@
       },
       {
         "title": {
-          "en": "!{{Is|Is not}} charging"
-        },
-        "args": [
-          {
-            "type": "device",
-            "name": "device",
-            "filter": "driver_id=charger"
-          }
-        ],
-        "id": "is_charging"
-      },
-      {
-        "title": {
-          "en": "Charge mode !{{is|is not}}"
-        },
-        "titleFormatted": {
-          "en": "Charge mode !{{is|is not}} [[mode]]"
-        },
-        "args": [
-          {
-            "type": "device",
-            "name": "device",
-            "filter": "driver_id=charger"
-          },
-          {
-            "type": "dropdown",
-            "name": "mode",
-            "title": {
-              "en": "Mode"
-            },
-            "values": [
-              {
-                "id": "manual",
-                "label": {
-                  "en": "Manual"
-                }
-              },
-              {
-                "id": "scheduled",
-                "label": {
-                  "en": "Scheduled"
-                }
-              },
-              {
-                "id": "solar",
-                "label": {
-                  "en": "Solar surplus"
-                }
-              },
-              {
-                "id": "idle",
-                "label": {
-                  "en": "Idle"
-                }
-              }
-            ]
-          }
-        ],
-        "id": "mode_is"
-      },
-      {
-        "title": {
           "en": "!{{Is|Is not}} within a schedule window"
         },
         "args": [
@@ -464,22 +402,6 @@
           }
         ],
         "id": "start_charging"
-      },
-      {
-        "title": {
-          "en": "Stop charging"
-        },
-        "hint": {
-          "en": "Manual stop until the next schedule boundary"
-        },
-        "args": [
-          {
-            "type": "device",
-            "name": "device",
-            "filter": "driver_id=charger"
-          }
-        ],
-        "id": "stop_charging"
       }
     ]
   },
@@ -491,25 +413,61 @@
       "class": "evcharger",
       "capabilities": [
         "evcharger_charging",
-        "charge_current_limit",
+        "target_power",
+        "target_power_mode",
+        "evcharger_charging_state",
+        "measure_power",
         "charge_current_applied",
         "charge_current_offered",
-        "charge_mode",
-        "evcharger_charging_state",
-        "session_duration",
-        "meter_power.session",
-        "measure_solar_surplus",
-        "measure_power",
         "measure_current",
         "measure_voltage",
+        "meter_power.session",
+        "session_duration",
         "meter_power",
+        "measure_solar_surplus",
         "alarm_generic"
       ],
       "capabilitiesOptions": {
-        "charge_current_limit": {
+        "target_power": {
           "title": {
-            "en": "Manual Current"
-          }
+            "en": "Charging Power"
+          },
+          "min": 0,
+          "max": 7360,
+          "step": 230,
+          "excludeMin": 0,
+          "excludeMax": 1380
+        },
+        "target_power_mode": {
+          "title": {
+            "en": "Charge Mode"
+          },
+          "values": [
+            {
+              "id": "homey",
+              "title": {
+                "en": "Manual"
+              }
+            },
+            {
+              "id": "scheduled",
+              "title": {
+                "en": "Scheduled"
+              }
+            },
+            {
+              "id": "solar",
+              "title": {
+                "en": "Solar surplus"
+              }
+            },
+            {
+              "id": "idle",
+              "title": {
+                "en": "Idle"
+              }
+            }
+          ]
         },
         "evcharger_charging_state": {
           "title": {
@@ -529,12 +487,21 @@
         "measure_power": {
           "insights": false
         },
+        "measure_current": {
+          "title": {
+            "en": "Drawn Current"
+          }
+        },
         "meter_power.session": {
           "title": {
             "en": "Energy (session)"
           },
           "insights": false
         }
+      },
+      "energy": {
+        "evCharger": true,
+        "meterPowerImportedCapability": "meter_power"
       },
       "platforms": [
         "local"
@@ -938,10 +905,10 @@
     "charge_current_applied": {
       "type": "number",
       "title": {
-        "en": "Applied Limit"
+        "en": "Accepted Limit"
       },
       "desc": {
-        "en": "Current limit the charger last accepted. Compare with Current Limit (what ChargeIQ decided) and Current (what the car is drawing)."
+        "en": "Current limit the charger last accepted. Lower than Charging Power means ChargeIQ's decision hasn't reached the charger yet; compare with Offered Current and Drawn Current further down."
       },
       "units": {
         "en": "A"
@@ -953,33 +920,13 @@
       "uiComponent": "sensor",
       "insights": true
     },
-    "charge_current_limit": {
-      "type": "number",
-      "title": {
-        "en": "Current Limit"
-      },
-      "desc": {
-        "en": "Target charging current"
-      },
-      "units": {
-        "en": "A"
-      },
-      "icon": "/assets/capabilities/charge_current_limit.svg",
-      "min": 6,
-      "max": 32,
-      "step": 1,
-      "decimals": 0,
-      "getable": true,
-      "setable": true,
-      "uiComponent": "slider"
-    },
     "charge_current_offered": {
       "type": "number",
       "title": {
         "en": "Offered Current"
       },
       "desc": {
-        "en": "Current the charger is offering the car right now. Lower than Applied Limit means the charger is holding back; equal to it while Current is lower means the car is."
+        "en": "Current the charger is offering the car right now. Lower than Accepted Limit means the charger is holding back; equal to it while Drawn Current is lower means the car is."
       },
       "units": {
         "en": "A"
@@ -990,62 +937,6 @@
       "setable": false,
       "uiComponent": "sensor",
       "insights": true
-    },
-    "charge_mode": {
-      "type": "enum",
-      "title": {
-        "en": "Charge Mode"
-      },
-      "desc": {
-        "en": "Current mode: Manual, Scheduled, Solar, or Idle"
-      },
-      "icon": "/assets/capabilities/charge_mode.svg",
-      "getable": true,
-      "setable": false,
-      "uiComponent": "sensor",
-      "values": [
-        {
-          "id": "manual",
-          "title": {
-            "en": "Manual"
-          }
-        },
-        {
-          "id": "scheduled",
-          "title": {
-            "en": "Scheduled"
-          }
-        },
-        {
-          "id": "solar",
-          "title": {
-            "en": "Solar surplus"
-          }
-        },
-        {
-          "id": "idle",
-          "title": {
-            "en": "Idle"
-          }
-        }
-      ]
-    },
-    "evcharger_charging": {
-      "type": "boolean",
-      "title": {
-        "en": "Charging"
-      },
-      "color": "#6DD400",
-      "getable": true,
-      "setable": true,
-      "insights": true,
-      "insightsTitleTrue": {
-        "en": "Started charging"
-      },
-      "insightsTitleFalse": {
-        "en": "Stopped charging"
-      },
-      "uiComponent": "toggle"
     },
     "measure_solar_surplus": {
       "type": "number",

@@ -3,23 +3,37 @@
   "class": "evcharger",
   "capabilities": [
     "evcharger_charging",
-    "charge_current_limit",
+    "target_power",
+    "target_power_mode",
+    "evcharger_charging_state",
+    "measure_power",
     "charge_current_applied",
     "charge_current_offered",
-    "charge_mode",
-    "evcharger_charging_state",
-    "session_duration",
-    "meter_power.session",
-    "measure_solar_surplus",
-    "measure_power",
     "measure_current",
     "measure_voltage",
+    "meter_power.session",
+    "session_duration",
     "meter_power",
+    "measure_solar_surplus",
     "alarm_generic"
   ],
   "capabilitiesOptions": {
-    "charge_current_limit": {
-      "title": { "en": "Manual Current" }
+    "target_power": {
+      "title": { "en": "Charging Power" },
+      "min": 0,
+      "max": 7360,
+      "step": 230,
+      "excludeMin": 0,
+      "excludeMax": 1380
+    },
+    "target_power_mode": {
+      "title": { "en": "Charge Mode" },
+      "values": [
+        { "id": "homey", "title": { "en": "Manual" } },
+        { "id": "scheduled", "title": { "en": "Scheduled" } },
+        { "id": "solar", "title": { "en": "Solar surplus" } },
+        { "id": "idle", "title": { "en": "Idle" } }
+      ]
     },
     "evcharger_charging_state": {
       "title": { "en": "Charging State" }
@@ -33,10 +47,17 @@
     "measure_power": {
       "insights": false
     },
+    "measure_current": {
+      "title": { "en": "Drawn Current" }
+    },
     "meter_power.session": {
       "title": { "en": "Energy (session)" },
       "insights": false
     }
+  },
+  "energy": {
+    "evCharger": true,
+    "meterPowerImportedCapability": "meter_power"
   },
   "platforms": ["local"],
   "connectivity": ["lan"],

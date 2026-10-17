@@ -10,7 +10,7 @@ interface ChargerDeviceLike {
   hasCapability(id: string): boolean;
   getCapabilityValue(id: string): unknown;
   getDiagnostics?(): {
-    availableW: number; solarState: string; targetA: number | null; mode: string;
+    availableW: number; solarState: string; targetA: number | null; mode: string; limitA: number | null;
     chargerPowerW: number | null;
     solarFeed: { stale: boolean; ageMs: number | null };
     limits: { chargerMaxW: number; gridMaxW: number };
@@ -182,7 +182,7 @@ module.exports = class ChargeIQApp extends Homey.App {
         offlineSince: conn.offlineSince,
         powerW: (cap('measure_power') as number) ?? 0,
         currentA: (cap('measure_current') as number) ?? 0,
-        limitA: (cap('charge_current_limit') as number) ?? null,
+        limitA: diag?.limitA ?? null,
         // What the charger accepted; limitA is only what the controller decided.
         appliedA: (cap('charge_current_applied') as number) ?? null,
         mode: modeInfo.mode,

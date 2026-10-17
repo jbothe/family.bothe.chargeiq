@@ -3,7 +3,8 @@
 Self-contained Homey Pro app (SDK v3, TypeScript, CommonJS output) that is the **OCPP 1.6J
 Central System** for one **Wallbox Pulsar Max** (single-phase, 230 V, 6–32 A) and orchestrates
 charging across three derived modes, plus a live power-flow dashboard widget. App id
-`family.bothe.chargeiq`, compatibility `>=12.4.5`, platform `local`.
+`family.bothe.chargeiq`, compatibility `>=12.13.0` (the floor for `target_power`/`target_power_mode`),
+platform `local`.
 
 **Single-charger by design (for now).** The OCPP/control layers are per-identity and would run
 several chargers, but the shared electrical limits (household grid cap, charger-circuit cap, solar
@@ -121,7 +122,8 @@ land at nearly the same moment.
 ### Mode is a derived STATE, not user config
 Priority **Manual > Scheduled > Solar > Idle**, recomputed every tick:
 - **Manual** — a *manual latch* is set. Any hands-on action sets it: `evcharger_charging` toggle,
-  `charge_current_limit` slider, or Flow start/stop/set-current (`on`/amps → charge, `off` → off).
+  `target_power` slider, picking `Manual` (`homey`) in `target_power_mode`, Homey Energy's own *Set
+  target power* card, or Flow start/stop/set-current (`on`/amps → charge, `off` → off).
   Persisted in device store; cleared **only** when a schedule window *starts* (rising edge) or the
   charger is *unplugged→replugged* (OCPP `Available` → plugged edge, where `Available` lasted at least
   `IDLE_RECONCILE_DELAY_MS` - see the reconnect-blip bullet under Key invariants).
@@ -146,7 +148,8 @@ common). `refreshConfig()` derives the actual Watts ceiling used everywhere down
 `maxHouseholdA * voltage * householdPhases` into `ControllerConfig.maxHouseholdW` - only that
 derived field is read internally; `maxHouseholdW` is no longer itself a settings id. Applies on top
 in every mode.
-`charge_mode` is a **read-only** metric (manual/scheduled/solar/idle). `getModeInfo()` →
+The derived mode is published on Homey's `target_power_mode` (see *Homey Energy* below), with
+Manual as Homey's `homey` id and the rest as `scheduled`/`solar`/`idle`. `getModeInfo()` →
 `{mode, detail}` drives the widget's `Mode: X · detail` line.
 
 The **charger-circuit cap** (`sharedCircuitA`/`sharedCircuitBufferA` in code and store, both default
@@ -190,6 +193,47 @@ stale feed resets the loop (the tick fail-safe covers these windows as well as S
 drops the window back to its floor. `getModeInfo()` reports `boostActive` and `solarToCarActive`
 for whichever of the two actually set the target: it's the higher one, so at most one is true,
 and solar only counts when it *exceeds* the floor/boost result.
+
+### Homey Energy (EV charger contract)
+Follows https://apps.developer.homey.app/the-basics/devices/energy#ev-chargers-1. **Without the
+driver's `energy: { evCharger: true }` block the device never appears in Energy at all**, whatever
+its class - that was the original gap. `meterPowerImportedCapability` is `meter_power` (the OCPP
+cumulative register); `meter_power.session` is non-cumulative and must never be that one.
+- **Only Homey's own capability ids**, no app-level redefinitions. `evcharger_charging` used to be
+  shadowed by a custom capability of the same id, which hides it from Energy's EV charger handling and
+  its system Flow cards. Don't reintroduce a `.homeycompose/capabilities/` file named after a system
+  capability.
+- **`target_power` replaced `charge_current_limit`** (W, not A). It is still the *decided* current,
+  published by the controller (`publishLimit()`, `amps × voltage × phases`), and like the old slider
+  keeps its last positive value across a pause, which is also Homey's convention. Its options
+  (`min` 0, `max`, `step` = one amp's watts, `excludeMax` = `minAmps`'s watts) come from
+  `targetPowerOptions()` and are synced per device on init and every settings save - **before**
+  `refreshConfig()`, which republishes the value at a new voltage/phases and would otherwise be
+  rejected by the old range.
+- **Dropping a custom capability means re-pairing, not a migration.** Homey can only remove a custom
+  capability while its definition is still in the app. Confirmed on hardware: with
+  `charge_current_limit`/`charge_mode`'s definitions deleted, `removeCapability('charge_mode')` failed
+  `Invalid Capability` (404), and the stale `charge_current_limit` then failed *every*
+  `addCapability`, so the device never got `target_power`/`target_power_mode`. As the only user, the
+  owner re-paired instead, so `device.ts`'s `ensureCapabilities()` now only adds. Adding a capability
+  in place is fine; removing or replacing one needs either the old definition kept in
+  `.homeycompose/capabilities/` (out of every driver) for a removal pass, or a re-pair.
+- **`target_power_mode` replaced `charge_mode`.** `homey` *is* the manual latch. Any other value
+  picked means "hand control back to ChargeIQ", whichever it was - scheduled/solar/idle are derived,
+  so the device re-publishes the real one a second after the listener (`republishMode()`), since
+  Homey stores the picked value when the listener returns.
+- One `registerMultipleCapabilityListener` covers `target_power`, `target_power_mode` and
+  `evcharger_charging`, because Homey's *Set target power* card sets all three back to back.
+  `resolveEnergyControl()` (pure, `lib/capabilities.ts`) turns a change into resume / charge at N A /
+  off. Watts → amps is floored, as everywhere.
+- **Custom Flow cards only where the system ones fall short.** `stop_charging`, `is_charging` and
+  `mode_is` were removed as duplicates of the cards Homey generates from `evcharger_charging` (Stop
+  charging, Is charging) and `target_power_mode` (mode is). The system *Is charging* reads the
+  capability, which is the better signal anyway: the old card used `isCharging()` (a known
+  `transactionId`), which is unreliable on this charger. Kept: `start_charging` and
+  `set_current_limit` (take amps; the system cards don't, or take watts), `mode_changed` (has a
+  `mode` token; the system trigger only has a dropdown), and `resume_automatic` (clearer than
+  picking a non-Homey mode).
 
 ### OCPP connectivity (offline detection + reporting)
 The app is the OCPP *server*, so "is the charger there?" is only ever inferred — nothing polls it.
@@ -239,7 +283,7 @@ charger, and both now say so on the same line rather than reading like a success
   Finishing branch clears `transactionId`, so `eligible` is false *for as long as the charger sits
   there*. Confirmed on real hardware: a charger restart mid-schedule ended its session with
   `PowerLoss`, the Wallbox parked in `Finishing`, and the app then spent 3m14s resolving 21A → 22A →
-  23A — updating `desiredAmps` and `charge_current_limit` each time — without attempting one write,
+  23A — updating `desiredAmps` and the published limit each time — without attempting one write,
   while every log line still read `-> 23A`. Only a physical unplug/replug (`Finishing → Available →
   SuspendedEV`) cleared it, which is the documented Wallbox behaviour, not something the app can
   drive. So the app **reports** it (`needsReplug` → a device warning asking for the replug) rather
@@ -278,8 +322,8 @@ charger, and both now say so on the same line rather than reading like a success
     the test suite hanging). The next tick picks it up instead, so rejection is retried at most once
     per tick/throttle window. `test/controller.test.ts` pins it with a `{ timeout }` so a recurrence
     fails rather than hangs.
-  - `charge_current_applied` ("Applied Limit", Insights on) publishes `appliedAmps` (null when
-    unknown), next to `charge_current_limit` (decided) and `measure_current` (drawn) - graphing the
+  - `charge_current_applied` ("Accepted Limit", Insights on) publishes `appliedAmps` (null when
+    unknown), next to `target_power` (decided, in W) and `measure_current` (drawn) - graphing the
     three is the no-laptop post-mortem for any "stuck below target" report. The `[decision:…]` line
     ends `| charger still at 22A` / `| charger limit unknown` while they differ, and the widget chip
     shows `22A→32A` (see Widget).
@@ -602,7 +646,7 @@ them into the state's `limits` before `render()`. The controller's `limits` now 
 keeps `test/widget-preview.html`'s presets (no `Homey` stub) drawing their strips.
 
 **The charging chip's amps are what the charger accepted, not what was decided** (`PF.chipAmps()`).
-`limitA` (`charge_current_limit`) is only the controller's decision; `appliedA`
+`limitA` (`getDiagnostics().limitA`, the amps behind `target_power`) is only the controller's decision; `appliedA`
 (`charge_current_applied`) is what the charger took. When they differ the chip reads `22A→32A`, and an
 unknown `appliedA` marks the target pending - both in the light text colour, while the pill stays green
 because it *is* charging. A few seconds of this after any change is the write throttle; anything
@@ -767,6 +811,12 @@ not independently verified on a real device. `test/widget-preview.html`'s "OS on
 exists to make this case previewable (clears the forced `.homey-dark-mode` override so only the
 real OS/browser `prefers-color-scheme` drives that fallback), but it can only simulate the
 disagreement, not confirm which way a real widget WKWebView actually behaves.
+
+**The Homey Energy contract** (see that section above) is validated at `--level verified` and the
+listener logic is unit-tested, but not yet run on a Homey: that the charger now shows in Energy, that
+an already-paired device picks up the system `evcharger_charging` once the app's own definition is
+gone (if Energy still doesn't list it, re-pairing is the fallback), and that the 1s-deferred
+`republishMode()` actually wins over the value Homey stores from the picker.
 
 **Pairing's wait for a restarting charger** (see the top of this file) is unit-tested and previewed
 (`test/pair-login-preview.html` has a `getChargerStatus` toggle), but not yet run through a real

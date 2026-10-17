@@ -1,7 +1,0 @@
-{
-  "title": { "en": "Stop charging" },
-  "hint": { "en": "Manual stop until the next schedule boundary" },
-  "args": [
-    { "type": "device", "name": "device", "filter": "driver_id=charger" }
-  ]
-}

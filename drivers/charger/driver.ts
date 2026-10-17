@@ -25,10 +25,7 @@ interface ChargeIQApp extends Homey.App {
 /** Minimal surface this file needs from the device a flow card runs against. */
 interface FlowDevice {
   flowStart(current?: number): Promise<void>;
-  flowStop(): Promise<void>;
   flowSetCurrent(current: number): Promise<void>;
-  flowIsCharging(): boolean;
-  flowModeIs(mode: string): boolean;
   flowWithinSchedule(): boolean;
   flowIsOnline(): boolean;
   flowResumeAuto(): void;
@@ -41,17 +38,11 @@ module.exports = class ChargerDriver extends Homey.Driver {
 
     flow.getActionCard('start_charging')
       .registerRunListener((args: { device: FlowDevice; current?: number }) => args.device.flowStart(args.current));
-    flow.getActionCard('stop_charging')
-      .registerRunListener((args: { device: FlowDevice }) => args.device.flowStop());
     flow.getActionCard('set_current_limit')
       .registerRunListener((args: { device: FlowDevice; current: number }) => args.device.flowSetCurrent(args.current));
     flow.getActionCard('resume_automatic')
       .registerRunListener((args: { device: FlowDevice }) => args.device.flowResumeAuto());
 
-    flow.getConditionCard('is_charging')
-      .registerRunListener((args: { device: FlowDevice }) => args.device.flowIsCharging());
-    flow.getConditionCard('mode_is')
-      .registerRunListener((args: { device: FlowDevice; mode: string }) => args.device.flowModeIs(args.mode));
     flow.getConditionCard('within_schedule')
       .registerRunListener((args: { device: FlowDevice }) => args.device.flowWithinSchedule());
     flow.getConditionCard('charger_is_online')

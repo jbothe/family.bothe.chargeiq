@@ -4,12 +4,17 @@ import test from 'node:test';
 import assert from 'node:assert';
 import { EventEmitter } from 'events';
 import {
-  ChargeController, ControllerHost, ChargingTokens, fmtDuration, statusDetail, toChargingState,
+  ChargeController, ControllerHost, ChargingTokens, fmtDuration, statusDetail, toChargingState, toTargetPowerMode,
 } from '../lib/control/ChargeController';
 import { CentralSystem } from '../lib/ocpp/CentralSystem';
 import { ChargePoint, RpcClient } from '../lib/ocpp/ChargePoint';
 import { OcppStatus } from '../lib/ocpp/types';
 import { ScheduleWindow } from '../lib/control/Scheduler';
+
+/** target_power (W) back to amps, at the 230V single-phase the tests reading it run at. */
+function ampsOf(watts: unknown): number {
+  return (watts as number) / 230;
+}
 
 function at(day: number, hh: number, mm: number): Date {
   const d = new Date(2024, 0, 7);
@@ -35,6 +40,7 @@ const SCHED: ScheduleWindow[] = [{
 
 function makeController(schedule: ScheduleWindow[], extraSettings: Record<string, unknown> = {}): {
   c: ChargeController; caps: Record<string, unknown>; store: Record<string, unknown>; logs: string[];
+  settings: Record<string, unknown>;
 } {
   const store: Record<string, unknown> = { schedule };
   const settings: Record<string, unknown> = {
@@ -64,7 +70,7 @@ function makeController(schedule: ScheduleWindow[], extraSettings: Record<string
   const c = new ChargeController(host, cs);
   c.init();
   return {
-    c, caps, store, logs,
+    c, caps, store, logs, settings,
   };
 }
 
@@ -195,9 +201,9 @@ test('household grid cap throttles the charger in any mode', async () => {
   const { c, caps } = makeController([]);
   await c.startManual(31);
   c.onSolarSample({ gridSignedW: 11700 }, Date.now());
-  assert.equal(caps.charge_current_limit, 10, 'capped to 10A under household ceiling');
+  assert.equal(ampsOf(caps.target_power), 10, 'capped to 10A under household ceiling');
   c.onSolarSample({ gridSignedW: -2000 }, Date.now());
-  assert.equal(caps.charge_current_limit, 31, 'uncapped when grid has headroom');
+  assert.equal(ampsOf(caps.target_power), 31, 'uncapped when grid has headroom');
   assert.equal(caps.measure_solar_surplus, 2000, 'excess solar metric set');
 });
 
@@ -205,7 +211,7 @@ test('shared circuit cap is disabled by default (sharedCircuitA=0)', async () =>
   const { c, caps } = makeController([]);
   await c.startManual(31);
   c.onSolarSample({ gridSignedW: -5000, pvW: 0, batteryW: 6900 }); // battery charging hard, no cap configured
-  assert.equal(caps.charge_current_limit, 31, 'no shared-circuit restriction when sharedCircuitA is 0');
+  assert.equal(ampsOf(caps.target_power), 31, 'no shared-circuit restriction when sharedCircuitA is 0');
 });
 
 test('shared circuit cap throttles the charger in any mode (manual)', async () => {
@@ -215,7 +221,7 @@ test('shared circuit cap throttles the charger in any mode (manual)', async () =
   await c.startManual(31);
   // Battery charging at 14A (3220W), no solar -> cap = 32 - 14 - 2 = 16A.
   c.onSolarSample({ gridSignedW: 3220, pvW: 0, batteryW: 3220 });
-  assert.equal(caps.charge_current_limit, 16, 'capped to 16A by the shared-circuit formula');
+  assert.equal(ampsOf(caps.target_power), 16, 'capped to 16A by the shared-circuit formula');
 });
 
 test('shared circuit cap rises with pv production, up to the hardware max', async () => {
@@ -225,7 +231,7 @@ test('shared circuit cap rises with pv production, up to the hardware max', asyn
   await c.startManual(31);
   // +20A pv, 14A battery charge -> cap = 32 + 20 - 14 - 2 = 36, clamped to maxAmps (31).
   c.onSolarSample({ gridSignedW: -1000, pvW: 4600, batteryW: 3220 });
-  assert.equal(caps.charge_current_limit, 31, 'uncapped up to hardware max once solar covers the buffer');
+  assert.equal(ampsOf(caps.target_power), 31, 'uncapped up to hardware max once solar covers the buffer');
 });
 
 test('shared circuit cap is a no-op on stale/absent solar data (trusts the configured ceiling)', async () => {
@@ -233,7 +239,7 @@ test('shared circuit cap is a no-op on stale/absent solar data (trusts the confi
     sharedCircuitA: 32, sharedCircuitBufferA: 2, sharedCircuitIncludeSolar: true, sharedCircuitIncludeBattery: true,
   });
   await c.startManual(20); // no onSolarSample ever called -> lastSolarSampleAt stays 0 -> "stale"
-  assert.equal(caps.charge_current_limit, 20, 'no shared-circuit restriction while solar data has never arrived');
+  assert.equal(ampsOf(caps.target_power), 20, 'no shared-circuit restriction while solar data has never arrived');
 });
 
 test('shared circuit cap only counts pv when battery is excluded', async () => {
@@ -243,7 +249,7 @@ test('shared circuit cap only counts pv when battery is excluded', async () => {
   await c.startManual(31);
   // +20A pv would raise the cap, but battery charging at 14A is excluded -> cap = 32 + 20 - 2 = 50, uncapped.
   c.onSolarSample({ gridSignedW: -1000, pvW: 4600, batteryW: 3220 });
-  assert.equal(caps.charge_current_limit, 31, 'battery term ignored, only pv counted (uncapped up to hardware max)');
+  assert.equal(ampsOf(caps.target_power), 31, 'battery term ignored, only pv counted (uncapped up to hardware max)');
 });
 
 test('shared circuit cap only counts battery when solar is excluded', async () => {
@@ -253,7 +259,7 @@ test('shared circuit cap only counts battery when solar is excluded', async () =
   await c.startManual(31);
   // +20A pv would offset it, but solar is excluded -> cap = 32 - 14 - 2 = 16A, same as if pv were 0.
   c.onSolarSample({ gridSignedW: -1000, pvW: 4600, batteryW: 3220 });
-  assert.equal(caps.charge_current_limit, 16, 'pv term ignored, only battery counted');
+  assert.equal(ampsOf(caps.target_power), 16, 'pv term ignored, only battery counted');
 });
 
 test('shared circuit cap is a static number, independent of the solar feed, when neither solar nor battery is included', async () => {
@@ -263,7 +269,7 @@ test('shared circuit cap is a static number, independent of the solar feed, when
   // No onSolarSample ever called - a static cap must not depend on a solar feed reporting at all,
   // unlike the pv/battery-aware formula above (see the stale-data test).
   await c.startManual(31);
-  assert.equal(caps.charge_current_limit, 30, 'static cap (32 - 2 buffer), never gated on solar feed freshness');
+  assert.equal(ampsOf(caps.target_power), 30, 'static cap (32 - 2 buffer), never gated on solar feed freshness');
 });
 
 test('schedule boost is not blocked by battery discharge when the battery is excluded from the shared circuit', () => {
@@ -336,7 +342,7 @@ test('the shared-circuit safety cap still throttles the charger even when the sc
   });
   c.onSolarSample({ gridSignedW: 0, pvW: 0, batteryW: 4600 }); // cap = 10, below the 16A floor
   c.tick(at(1, 12, 0)); // re-resolve at a fixed in-window time (onSolarSample's own tick used real time)
-  assert.equal(caps.charge_current_limit, 10, 'final applied current is safety-capped to 10A regardless of the floor');
+  assert.equal(ampsOf(caps.target_power), 10, 'final applied current is safety-capped to 10A regardless of the floor');
 });
 
 test('schedule boost is fully suppressed while the battery is discharging', () => {
@@ -540,8 +546,76 @@ test('the 10s backstop timer reschedules on every tick instead of firing on its 
 test('mode metric + getModeInfo reflect the derived mode', () => {
   const { c, caps } = makeController(SCHED);
   c.tick(at(1, 10, 0));
-  assert.equal(caps.charge_mode, 'scheduled');
+  assert.equal(caps.target_power_mode, 'scheduled');
   assert.equal(c.getModeInfo().mode, 'scheduled');
+});
+
+test('manual is Homey in control on target_power_mode; the other modes keep their ids', () => {
+  assert.equal(toTargetPowerMode('manual'), 'homey');
+  assert.equal(toTargetPowerMode('scheduled'), 'scheduled');
+  assert.equal(toTargetPowerMode('solar'), 'solar');
+  assert.equal(toTargetPowerMode('idle'), 'idle');
+});
+
+test('a manual charge publishes target_power in watts and Homey mode, until resumed', async () => {
+  const { c, caps } = makeController([]);
+  await c.startManual(12);
+  assert.equal(caps.target_power, 2760, '12A at 230V single-phase');
+  assert.equal(caps.target_power_mode, 'homey');
+  assert.equal(c.getDiagnostics().limitA, 12);
+  c.resumeAutomatic('test');
+  assert.equal(caps.target_power_mode, 'solar');
+});
+
+test('a manual stop keeps the last target_power, for the next session', async () => {
+  // Homey's EV charger convention: stopping doesn't zero target_power.
+  const { c, caps } = makeController([]);
+  await c.startManual(10);
+  await c.stop();
+  assert.equal(caps.target_power, 2300);
+  assert.equal(caps.target_power_mode, 'homey');
+  assert.equal(c.getDiagnostics().limitA, 10);
+});
+
+test('republishMode() writes the derived mode even when it has not changed', () => {
+  // Picking "Idle" in the picker only hands control back; Solar then resolves,
+  // which updateMode() alone would never write since it was already Solar.
+  const { c, caps } = makeController([]);
+  c.tick(at(0, 12, 0));
+  assert.equal(caps.target_power_mode, 'solar');
+  caps.target_power_mode = 'idle'; // what Homey stores from the picker
+  c.resumeAutomatic('test');
+  assert.equal(caps.target_power_mode, 'idle', 'unchanged mode: updateMode() leaves it');
+  c.republishMode();
+  assert.equal(caps.target_power_mode, 'solar');
+});
+
+test('republishMode() before the first tick writes nothing', () => {
+  const { c, caps } = makeController([]);
+  delete caps.target_power_mode;
+  (c as unknown as { currentMode: null }).currentMode = null;
+  c.republishMode();
+  assert.equal(caps.target_power_mode, undefined);
+});
+
+test('a voltage or phases change re-publishes target_power at the new conversion', async () => {
+  const { c, caps, settings } = makeController([]);
+  await c.startManual(10);
+  assert.equal(caps.target_power, 2300);
+  settings.voltage = 240;
+  c.refreshConfig();
+  assert.equal(caps.target_power, 2400, 'same 10A, now at 240V');
+  settings.phases = 3;
+  c.refreshConfig();
+  assert.equal(caps.target_power, 7200);
+});
+
+test('nothing is published to target_power before a current has been decided', () => {
+  const { c, caps } = makeController([]);
+  delete caps.target_power;
+  c.refreshConfig();
+  assert.equal(caps.target_power, undefined);
+  assert.equal(c.getDiagnostics().limitA, null);
 });
 
 test('household cap nets out the charger\'s own draw once Charging, even without a known transaction id', async () => {
@@ -584,7 +658,7 @@ test('household cap nets out the charger\'s own draw once Charging, even without
 
   // baseLoadW = 10600 - 6900 = 3700; maxChargerW = 14200 - 3700 = 10500; cap = floor(10500/230) = 45A.
   c.onSolarSample({ gridSignedW: 10600, pvW: 0, batteryW: 0 });
-  assert.equal(caps.charge_current_limit, 31,
+  assert.equal(ampsOf(caps.target_power), 31,
     'the charger\'s own 6900W draw is netted out of the household cap even without a transaction id');
 });
 
@@ -672,7 +746,7 @@ test('household cap is unavailable, not a guessed-low value, while Charging with
   // If chargerW were wrongly netted as 0: baseLoadW = 11150, maxChargerW = 14200-11150 = 3050 -> 13A.
   // The fix instead leaves the cap unavailable (trusts the configured 31A ceiling).
   c.onSolarSample({ gridSignedW: 11150, pvW: 0, batteryW: 0 });
-  assert.equal(caps.charge_current_limit, 31,
+  assert.equal(ampsOf(caps.target_power), 31,
     'household cap is skipped (not guessed at 13A) until a real MeterValues reading arrives');
 
   cp.emit('meterValues', { power: 3550 });
@@ -682,7 +756,7 @@ test('household cap is unavailable, not a guessed-low value, while Charging with
   settings.maxHouseholdA = 11050 / 230;
   c.refreshConfig();
   c.onSolarSample({ gridSignedW: 11150, pvW: 0, batteryW: 0 });
-  assert.equal(caps.charge_current_limit, 15, 'the cap is live again and binding once a real reading is known');
+  assert.equal(ampsOf(caps.target_power), 15, 'the cap is live again and binding once a real reading is known');
 });
 
 test('solar surplus evaluation is skipped, not zeroed, while Charging with no MeterValues yet this connection', () => {
@@ -3739,7 +3813,7 @@ test('the applied limit is published on acceptance and cleared when the link dro
   } = makeWriteRig(0);
   await c.startManual(20);
   await waitMs();
-  assert.equal(caps.charge_current_limit, 20, 'what the controller decided');
+  assert.equal(ampsOf(caps.target_power), 20, 'what the controller decided');
   assert.equal(caps.charge_current_applied, 20, 'and what the charger accepted');
 
   cs.emit('disconnect', cp);
@@ -3793,7 +3867,7 @@ test('a charger delivering in SuspendedEV is netted from its meter and shown as 
   // counted as house load, it trimmed the car to 31A.
   await c.startManual(32);
   c.onSolarSample({ gridSignedW: 7280, pvW: 3670, batteryW: 0 });
-  assert.equal(caps.charge_current_limit, 32);
+  assert.equal(ampsOf(caps.target_power), 32);
   c.destroy();
 });
 
