@@ -189,6 +189,11 @@ const STARTUP_GRACE_MS = 120000;
 // measure outages in hours, not seconds), and a store write on every tick for
 // the lifetime of the app would be pure churn.
 const LAST_SEEN_PERSIST_MS = 5 * 60000;
+// Longest a resync pause is held back after bind() waiting for the data it
+// should be based on - see resyncHoldReason(). Long enough for the triggered
+// StatusNotification/MeterValues and a solar sample or two; short enough that
+// a genuine pause with no solar feed at all still lands within about a minute.
+const RESYNC_HOLD_MAX_MS = 60000;
 
 /** Compact human duration for logs/diagnostics: "45s", "12m", "3h", "2d". */
 export function fmtDuration(ms: number): string {
@@ -413,6 +418,19 @@ export class ChargeController {
    * rejecting is retried on the normal cadence.
    */
   private resyncPending = true;
+
+  /**
+   * When bind() last ran, and what has arrived since: a resync pause waits for
+   * these - see resyncHoldReason(). null until the first bind.
+   */
+  private boundAt: number | null = null;
+
+  private statusSinceBind = false;
+
+  private solarEvaluatedSinceBind = false;
+
+  /** The last tick's 0A came from a hard cap, not the mode - never held back. */
+  private pauseFromCap = false;
 
   /** Bumped by forgetApplied(), so a write that straddles it can't mark itself applied. */
   private appliedEpoch = 0;
@@ -794,6 +812,9 @@ export class ChargeController {
     this.adoptTransactionId(cp);
     // The charger may have rebooted, or a write may have been lost while the link was down.
     this.forgetApplied();
+    this.boundAt = Date.now();
+    this.statusSinceBind = false;
+    this.solarEvaluatedSinceBind = false;
     if (this.cp === cp) {
       // Same ChargePoint reconnected (its client was swapped) - not a fresh
       // bind, but still worth a fresh status, and a tick to resync the limit.
@@ -950,6 +971,10 @@ export class ChargeController {
 
   private onStatus(info: StatusNotificationReq): void {
     const changed = info.status !== this.prevStatus;
+    // The first status after a reconnect can repeat the pre-disconnect one, but
+    // it is still what a held resync was waiting for - see resyncHoldReason().
+    const firstSinceBind = !this.statusSinceBind;
+    this.statusSinceBind = true;
     const detail = statusDetail(info);
     // A new error or vendor code under an unchanged status is logged too: a
     // charger can stay Faulted while its reason changes.
@@ -1067,7 +1092,7 @@ export class ChargeController {
     // status (e.g. the real charger echoing back what bind() already
     // replayed from cache, after requestFreshState()'s TriggerMessage) is not
     // new information, so skip the otherwise-duplicate [decision] line.
-    if (changed) {
+    if (changed || firstSinceBind) {
       this.tick(new Date(), `status:${info.status}`);
     }
   }
@@ -1500,6 +1525,7 @@ export class ChargeController {
     });
     this.lastAvailableW = Math.max(0, res.availableW);
     this.solarTargetAmps = res.target;
+    this.solarEvaluatedSinceBind = true;
     this.host.setCapability('measure_solar_surplus', Math.round(this.lastAvailableW));
 
     // Deduped on a rounded-to-50W fingerprint: the feed reports roughly every
@@ -1924,6 +1950,7 @@ export class ChargeController {
       }
     }
 
+    this.pauseFromCap = decision.amps > 0 && amps <= 0;
     const finalDesc = amps <= 0 ? 'paused' : `${amps}A`;
     // The link state is part of every decision line: a resolved target the
     // charger can't be told about reads identically to one it accepted, which
@@ -1937,8 +1964,10 @@ export class ChargeController {
     const blocked = this.writeBlockedBecause(amps);
     // And one the charger hasn't accepted yet (normal for up to writeThrottleMs).
     const target = amps <= 0 ? 0 : this.clampAmps(amps);
+    const held = blocked ? null : this.resyncHoldReason(target, now);
     const appliedNote = !blocked && this.writeEligible() && this.appliedAmps !== target
-      ? ` | charger ${this.appliedAmps == null ? 'limit unknown' : `still at ${this.appliedAmps}A`}`
+      ? ` | charger ${this.appliedAmps == null ? 'limit unknown' : `still at ${this.appliedAmps}A`}${
+        held ? ` (pause held: ${held})` : ''}`
       : '';
     // And one it accepted but isn't passing on to the car - see offeredA.
     const offeredNote = !appliedNote && this.online !== false && this.offeredA != null
@@ -2008,6 +2037,37 @@ export class ChargeController {
   private forgetOffered(): void {
     this.offeredA = null;
     this.host.setCapability('charge_current_offered', null);
+  }
+
+  /**
+   * Why a resync to 0A should not go out yet, or null to send it. After bind()
+   * the charger's limit is unknown and the first write is urgent, but the
+   * decision may have been made with nothing to go on: no status, no reading
+   * and a SolarLoop that has never evaluated, which in Solar mode or a 0A
+   * solarToCar window resolves to a pause. Confirmed on hardware: an app
+   * restart sent exactly that 0A to a car charging at 5.8A, and the 6A that
+   * followed once real data arrived then sat behind writeThrottleMs, ~20s
+   * without charging in all. Holding the pause leaves the charger on whatever
+   * it was already doing and keeps resyncPending set, so the first write based
+   * on real data is the urgent one. Only a pause is held: a positive target
+   * (a boost floor, manual amps) is safe to send at once, and a pause from a
+   * hard cap is never held. Bounded by RESYNC_HOLD_MAX_MS so a genuine pause
+   * with no solar feed at all still lands.
+   */
+  private resyncHoldReason(target: number, now: Date = new Date(Date.now())): string | null {
+    if (target > 0 || this.appliedAmps != null || this.pauseFromCap || this.boundAt == null) return null;
+    // Date.now(), like boundAt - not the decision time, which tests set freely.
+    if (Date.now() - this.boundAt >= RESYNC_HOLD_MAX_MS) return null;
+    if (!this.statusSinceBind) return 'no status yet this connection';
+    const status = this.lastStatusValue;
+    if (status === 'Available' && this.transactionId != null) {
+      return 'Available but a transaction is still on record';
+    }
+    const live = status != null && (PLUGGED.includes(status) || status === 'Faulted');
+    const followsSolar = this.currentMode === 'solar'
+      || (this.currentMode === 'scheduled' && this.scheduler.activeSolarToCar(now));
+    if (live && followsSolar && !this.solarEvaluatedSinceBind) return 'no solar evaluation yet this connection';
+    return null;
   }
 
   /** The charger's limit is unknown again (link or session changed): resync it, urgently. */
@@ -2107,6 +2167,8 @@ export class ChargeController {
   private async writeProfile(): Promise<void> {
     if (!this.cp?.connected || this.desiredAmps == null) return;
     if (this.desiredAmps === this.appliedAmps) return; // already there (a pending write overtaken)
+    // Leaves resyncPending set, so the write that does go out is still urgent.
+    if (this.resyncHoldReason(this.desiredAmps)) return;
     const epoch = this.appliedEpoch;
     this.inFlightEpoch = epoch;
     this.resyncPending = false;

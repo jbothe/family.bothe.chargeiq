@@ -967,6 +967,11 @@ test('a pause (0A) decision reaches an already-mid-session charger, real-hardwar
   calls.length = 0;
   cp.emit('status', { connectorId: 1, errorCode: 'NoError', status: 'Available' }); // reconnect blip
   cp.emit('status', { connectorId: 1, errorCode: 'NoError', status: 'Charging' }); // already mid-session
+  assert.ok(!calls.some((k) => k.method === 'SetChargingProfile'),
+    'a solar pause is not sent to a charging car before solar has been evaluated once');
+  // The solar feed confirms there is nothing to charge from: now it is a real decision.
+  cp.emit('meterValues', { power: 1400 });
+  c.onSolarSample({ gridSignedW: 1400, pvW: 0, batteryW: 0 });
 
   const write = calls.find((c) => c.method === 'SetChargingProfile');
   assert.ok(write, 'the pending pause reaches the charger once it becomes eligible, even though the target (0A) never changed');
@@ -3640,6 +3645,10 @@ function makeWriteRig(writeThrottleMs: number): {
   c.init();
   cs.emit('connect', cp);
   cp.emit('status', { connectorId: 1, errorCode: 'NoError', status: 'Charging' });
+  // A real solar evaluation (no surplus), so the resulting 0A is a decision
+  // the resync may send rather than one it holds - see resyncHoldReason().
+  cp.emit('meterValues', { power: 0 });
+  c.onSolarSample({ gridSignedW: 0, pvW: 0, batteryW: 0 });
   return {
     c,
     cp,
@@ -3922,4 +3931,179 @@ test('the offered current is unknown once the link drops, never the last reading
   assert.equal(h.caps.charge_current_offered, 16);
   h.cs.emit('disconnect', h.cp);
   assert.equal(h.caps.charge_current_offered, null);
+});
+
+// ---------------------------------------------------------------------------
+// A resync pause waits for real data after bind() - see resyncHoldReason()
+// ---------------------------------------------------------------------------
+
+/**
+ * A controller restarting onto a charger: nothing is connected at init(), the
+ * test drives the connect, and every SetChargingProfile limit is captured.
+ */
+function makeRestartRig(
+  extraStore: Record<string, unknown>,
+  extraSettings: Record<string, unknown> = {},
+): {
+    c: ChargeController; cp: ChargePoint; cs: CentralSystem; writes: number[]; logs: string[];
+  } {
+  const writes: number[] = [];
+  const fakeClient: RpcClient = {
+    identity: 'X',
+    handle: () => {},
+    call: async (method: string, params?: unknown) => {
+      if (method === 'SetChargingProfile') {
+        writes.push((params as { csChargingProfiles: { chargingSchedule: { chargingSchedulePeriod: [{ limit: number }] } } })
+          .csChargingProfiles.chargingSchedule.chargingSchedulePeriod[0].limit);
+      }
+      return { status: 'Accepted' };
+    },
+    close: async () => {},
+    on: () => {},
+  };
+  const cp = new ChargePoint({
+    identity: 'X', authorize: () => true, nextTransactionId: () => 3, livenessTimeoutMs: 0,
+  });
+  cp.attach(fakeClient);
+  const store: Record<string, unknown> = { schedule: [], ...extraStore };
+  const settings: Record<string, unknown> = {
+    minAmps: 6, maxAmps: 32, phases: 1, voltage: 230, maxHouseholdA: 63, householdPhases: 1, writeThrottleMs: 15000, ...extraSettings,
+  };
+  const logs: string[] = [];
+  const host: ControllerHost = {
+    identity: 'X',
+    setCapability: () => {},
+    getSetting: <T>(k: string) => settings[k] as T,
+    getStore: <T>(k: string) => store[k] as T,
+    setStore: async (k, v) => {
+      store[k] = v;
+    },
+    setAvailable: () => {},
+    setUnavailable: () => {},
+    setWarning: () => {},
+    log: (...a) => {
+      logs.push(a.join(' '));
+    },
+    error: () => {},
+  };
+  const cs = new FakeCentralSystem() as unknown as CentralSystem;
+  const c = new ChargeController(host, cs);
+  c.init();
+  return {
+    c, cp, cs, writes, logs,
+  };
+}
+
+test('an app restart mid-charge does not pause the car before the decision has real data (hardware log)', async () => {
+  // 2026-10-17: restart in a 0A solarToCar window with the car charging at
+  // 5.8A. The bind resync sent 0A before any status, reading or solar
+  // evaluation, and the 6A that followed sat behind the 15s write throttle:
+  // ~20s without charging.
+  const {
+    c, cp, cs, writes, logs,
+  } = makeRestartRig({ schedule: CAR_FIRST, transactionId: 2 });
+
+  // The first solar sample beats the reconnect, and can't be evaluated.
+  c.onSolarSample({ gridSignedW: -100, pvW: 3000, batteryW: 1500 });
+  assert.ok(logs.some((l) => l.includes('[solar] charger power unknown')), logs.join('\n'));
+
+  cs.emit('connect', cp);
+  await waitMs();
+  assert.deepEqual(writes, [], 'no 0A resync with no status yet');
+  assert.ok(logs.some((l) => l.includes('pause held: no status yet this connection')), logs.join('\n'));
+
+  cp.emit('status', { connectorId: 1, errorCode: 'NoError', status: 'Available' }); // reconnect blip
+  await waitMs();
+  assert.deepEqual(writes, [], 'nor on the blip, with transaction 2 still on record');
+
+  cp.emit('status', { connectorId: 1, errorCode: 'NoError', status: 'Charging' });
+  cp.emit('meterValues', { power: 1334, current: 5.8 });
+  c.tick(new Date(), 'timer');
+  await waitMs();
+  assert.deepEqual(writes, [], 'nor before solar has been evaluated once on this connection');
+  assert.ok(logs.some((l) => l.includes('pause held: no solar evaluation yet this connection')), logs.join('\n'));
+
+  // First real evaluation: 1334W charger + 100W export + 1500W into the battery.
+  c.onSolarSample({ gridSignedW: -100, pvW: 3000, batteryW: 1500 });
+  await waitMs();
+  assert.deepEqual(writes, [12], 'the first write is the real target, sent at once');
+  c.destroy();
+});
+
+test('once real data says pause, the held resync sends 0A', async () => {
+  const {
+    c, cp, cs, writes,
+  } = makeRestartRig({ schedule: CAR_FIRST, transactionId: 2 });
+  cs.emit('connect', cp);
+  cp.emit('status', { connectorId: 1, errorCode: 'NoError', status: 'Charging' });
+  cp.emit('meterValues', { power: 1334 });
+  await waitMs();
+  assert.deepEqual(writes, []);
+  c.onSolarSample({ gridSignedW: 1334, pvW: 0, batteryW: 0 }); // nothing to charge from
+  await waitMs();
+  assert.deepEqual(writes, [0]);
+  c.destroy();
+});
+
+test('a pause that does not depend on solar only waits for the first status after a reconnect', async () => {
+  const {
+    c, cp, cs, writes,
+  } = makeRestartRig({ manualLatch: { intent: 'off' } });
+  cs.emit('connect', cp);
+  cp.emit('status', { connectorId: 1, errorCode: 'NoError', status: 'Charging' });
+  await waitMs();
+  assert.deepEqual(writes, [0], 'manual off is known without any solar data');
+
+  cs.emit('connect', cp); // same ChargePoint reconnecting
+  await waitMs();
+  assert.deepEqual(writes, [0], 'held: the status on record predates the reconnect');
+  cp.emit('status', { connectorId: 1, errorCode: 'NoError', status: 'Charging' }); // unchanged, still new data
+  await waitMs();
+  assert.deepEqual(writes, [0, 0]);
+  c.destroy();
+});
+
+test('a positive resync target is never held', async () => {
+  const {
+    c, cp, cs, writes,
+  } = makeRestartRig({ schedule: [{ ...CAR_FIRST[0], currentA: 12 }], transactionId: 2 });
+  cs.emit('connect', cp);
+  await waitMs();
+  assert.deepEqual(writes, [12], 'a 12A floor goes out before any status');
+  c.destroy();
+});
+
+test('a pause forced by a hard cap is never held', async () => {
+  // Solar was evaluated before the bind (17A from the battery's charging),
+  // but the household cap leaves room for only 4A.
+  const {
+    c, cp, cs, writes, logs,
+  } = makeRestartRig({ schedule: CAR_FIRST }, { maxHouseholdA: 2000 / 230 });
+  c.onSolarSample({ gridSignedW: 1000, pvW: 6000, batteryW: 5000 });
+  cs.emit('connect', cp);
+  // Nothing metered since the status, so the charger's draw nets as a known 0.
+  cp.emit('status', { connectorId: 1, errorCode: 'NoError', status: 'SuspendedEV' });
+  await waitMs();
+  assert.ok(logs.some((l) => l.includes('household cap') && l.includes('-> pause')), logs.join('\n'));
+  assert.deepEqual(writes, [0]);
+  c.destroy();
+});
+
+test('a held resync pause goes out anyway once the hold times out', async (t) => {
+  const {
+    c, cp, cs, writes,
+  } = makeRestartRig({ transactionId: 2 }); // Solar mode, and no solar feed at all
+  cs.emit('connect', cp);
+  cp.emit('status', { connectorId: 1, errorCode: 'NoError', status: 'Charging' });
+  await waitMs();
+  assert.deepEqual(writes, []);
+  const realNow = Date.now;
+  t.after(() => {
+    Date.now = realNow;
+  });
+  Date.now = () => realNow() + 61000;
+  c.tick(new Date(Date.now()), 'timer');
+  await waitMs();
+  assert.deepEqual(writes, [0]);
+  c.destroy();
 });
