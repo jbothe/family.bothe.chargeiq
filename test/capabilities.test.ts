@@ -2,38 +2,172 @@
 
 import test from 'node:test';
 import assert from 'node:assert';
-import { currentLimitRange, currentLimitRangeUpdate } from '../lib/capabilities';
+import {
+  resolveEnergyControl, targetPowerOptions, targetPowerOptionsUpdate, wattsToAmps,
+} from '../lib/capabilities';
 
-test('the slider range follows the configured amp limits', () => {
-  assert.deepEqual(currentLimitRange(6, 32), { min: 6, max: 32 });
-  // Below the 6A the capability manifest declares - the write Homey used to
-  // reject, leaving the slider stuck while charging carried on correctly.
-  assert.deepEqual(currentLimitRange(3, 32), { min: 3, max: 32 });
+const OPTS_6_32 = {
+  min: 0, max: 7360, step: 230, excludeMin: 0, excludeMax: 1380,
+};
+
+test('target_power options follow the configured amp limits', () => {
+  assert.deepEqual(targetPowerOptions(6, 32, 230), OPTS_6_32);
+  // Below the 6A the manifest declares - the kind of write Homey rejects,
+  // leaving the value stuck while charging carried on correctly.
+  assert.deepEqual(targetPowerOptions(3, 32, 230), { ...OPTS_6_32, excludeMax: 690 });
   // ...and above the 32A it declares, which the maxAmps setting allows up to 80.
-  assert.deepEqual(currentLimitRange(6, 80), { min: 6, max: 80 });
+  assert.deepEqual(targetPowerOptions(6, 80, 230), { ...OPTS_6_32, max: 18400 });
+});
+
+test('target_power options scale with voltage and phases', () => {
+  // A 3-phase charger: one amp is 690W, and the step has to be that or Homey
+  // asks for power levels between two amp settings.
+  assert.deepEqual(targetPowerOptions(6, 16, 690), {
+    min: 0, max: 11040, step: 690, excludeMin: 0, excludeMax: 4140,
+  });
+});
+
+test('the range always includes zero, so the charger can idle', () => {
+  // Homey's own rule: min <= 0 <= max, and the exclude range must contain 0.
+  const o = targetPowerOptions(6, 32, 230);
+  assert.ok(o.min <= 0 && o.max >= 0);
+  assert.ok(o.excludeMin <= 0 && o.excludeMax >= 0);
 });
 
 test('maxAmps below minAmps resolves to the floor, as clampAmps does', () => {
   // Not a range at all, just a misconfiguration. ChargeController.clampAmps()
   // resolves the same contradiction the same way - max(minAmps, min(maxAmps, x))
-  // yields minAmps - so the slider must not end up with min > max.
-  assert.deepEqual(currentLimitRange(20, 10), { min: 20, max: 20 });
+  // yields minAmps - so the range must not end up with max below the floor.
+  assert.equal(targetPowerOptions(20, 10, 230).max, 4600);
 });
 
-test('an update is only proposed when the bounds actually change', () => {
+test('an update is only proposed when the options actually change', () => {
   // setCapabilityOptions is documented as expensive, and this runs on every
   // settings save - most of which do not touch the amp limits.
-  assert.equal(currentLimitRangeUpdate({ min: 6, max: 32 }, 6, 32), null);
-  assert.deepEqual(currentLimitRangeUpdate({ min: 6, max: 32 }, 6, 16), { min: 6, max: 16 });
-  assert.deepEqual(currentLimitRangeUpdate({ min: 6, max: 32 }, 10, 32), { min: 10, max: 32 });
+  assert.equal(targetPowerOptionsUpdate(OPTS_6_32, 6, 32, 230), null);
+  assert.deepEqual(targetPowerOptionsUpdate(OPTS_6_32, 6, 16, 230), { ...OPTS_6_32, max: 3680 });
+  assert.deepEqual(targetPowerOptionsUpdate(OPTS_6_32, 10, 32, 230), { ...OPTS_6_32, excludeMax: 2300 });
+  // A voltage change moves every figure, including the step.
+  assert.deepEqual(targetPowerOptionsUpdate(OPTS_6_32, 6, 32, 240), {
+    min: 0, max: 7680, step: 240, excludeMin: 0, excludeMax: 1440,
+  });
 });
 
-test('a device with no options set yet, or only one bound, counts as a change', () => {
+test('a device with no options set yet, or only some, counts as a change', () => {
   // getCapabilityOptions() is untyped and may return nothing at all for a device
   // paired before options were ever written, or a partial object.
-  assert.deepEqual(currentLimitRangeUpdate(undefined, 6, 32), { min: 6, max: 32 });
-  assert.deepEqual(currentLimitRangeUpdate(null, 6, 32), { min: 6, max: 32 });
-  assert.deepEqual(currentLimitRangeUpdate({}, 6, 32), { min: 6, max: 32 });
-  assert.deepEqual(currentLimitRangeUpdate({ min: 6 }, 6, 32), { min: 6, max: 32 });
-  assert.deepEqual(currentLimitRangeUpdate({ max: 32 }, 6, 32), { min: 6, max: 32 });
+  assert.deepEqual(targetPowerOptionsUpdate(undefined, 6, 32, 230), OPTS_6_32);
+  assert.deepEqual(targetPowerOptionsUpdate(null, 6, 32, 230), OPTS_6_32);
+  assert.deepEqual(targetPowerOptionsUpdate({}, 6, 32, 230), OPTS_6_32);
+  assert.deepEqual(targetPowerOptionsUpdate({ min: 0, max: 7360 }, 6, 32, 230), OPTS_6_32);
+});
+
+test('watts convert to amps rounding down, never up', () => {
+  assert.equal(wattsToAmps(2300, 230), 10);
+  assert.equal(wattsToAmps(2529, 230), 10, 'floored: 10.99A must not become 11A');
+  assert.equal(wattsToAmps(0, 230), 0);
+  assert.equal(wattsToAmps(-1000, 230), 0, 'no discharging on this charger');
+  assert.equal(wattsToAmps(1000, 0), 0, 'no conversion factor yet means no current');
+});
+
+const NONE = { watts: null, charging: false };
+
+test("Homey's Set target power card latches manual at that power", () => {
+  // The card sets all three capabilities together.
+  assert.deepEqual(
+    resolveEnergyControl({ watts: 3450, mode: 'homey', charging: true }, NONE, 230),
+    { action: 'charge', amps: 15 },
+  );
+  assert.deepEqual(
+    resolveEnergyControl({ watts: 0, mode: 'homey', charging: false }, NONE, 230),
+    { action: 'off' },
+  );
+});
+
+test('a target_power on its own never starts a charge: it is kept for the next start', () => {
+  // Homey's EV charger contract: a lone target power while stopped waits for an
+  // explicit start. Starting here would start the car from a slider nudge.
+  assert.deepEqual(
+    resolveEnergyControl({ watts: 2300 }, { watts: 4600, charging: false }, 230),
+    { action: 'none' },
+  );
+  assert.deepEqual(
+    resolveEnergyControl({ watts: 0 }, { watts: 4600, charging: false }, 230),
+    { action: 'none' },
+    'not a stop either: there is nothing to stop, and latching manual off would override automation',
+  );
+  // ...and the next start picks up the kept value.
+  assert.deepEqual(
+    resolveEnergyControl({ charging: true }, { watts: 2300, charging: false }, 230),
+    { action: 'charge', amps: 10 },
+  );
+});
+
+test('a target_power on its own adjusts, or stops, a charge already requested', () => {
+  assert.deepEqual(
+    resolveEnergyControl({ watts: 2300 }, { watts: 4600, charging: true }, 230),
+    { action: 'charge', amps: 10 },
+  );
+  assert.deepEqual(
+    resolveEnergyControl({ watts: 0 }, { watts: 4600, charging: true }, 230),
+    { action: 'off' },
+  );
+});
+
+test('a target_power sent with an explicit start or the Homey mode switch acts on it', () => {
+  assert.deepEqual(
+    resolveEnergyControl({ watts: 2300, charging: true }, NONE, 230),
+    { action: 'charge', amps: 10 },
+  );
+  assert.deepEqual(
+    resolveEnergyControl({ watts: 2300, mode: 'homey' }, NONE, 230),
+    { action: 'charge', amps: 10 },
+  );
+  assert.deepEqual(
+    resolveEnergyControl({ watts: 0, charging: true }, NONE, 230),
+    { action: 'off' },
+    'a contradictory start at zero power stops rather than charging at a default',
+  );
+  // Explicitly stopped wins over a positive power: the power is kept for next time.
+  assert.deepEqual(
+    resolveEnergyControl({ watts: 2300, charging: false }, NONE, 230),
+    { action: 'off' },
+  );
+});
+
+test('the charging toggle uses the current target_power, or the default when there is none', () => {
+  assert.deepEqual(
+    resolveEnergyControl({ charging: true }, { watts: 2760, charging: false }, 230),
+    { action: 'charge', amps: 12 },
+  );
+  assert.deepEqual(
+    resolveEnergyControl({ charging: true }, NONE, 230),
+    { action: 'charge' },
+  );
+  assert.deepEqual(
+    resolveEnergyControl({ charging: false }, { watts: 2760, charging: true }, 230),
+    { action: 'off' },
+  );
+});
+
+test('picking Homey mode alone freezes what is happening now as manual', () => {
+  assert.deepEqual(
+    resolveEnergyControl({ mode: 'homey' }, { watts: 2300, charging: true }, 230),
+    { action: 'charge', amps: 10 },
+  );
+  assert.deepEqual(
+    resolveEnergyControl({ mode: 'homey' }, { watts: 2300, charging: false }, 230),
+    { action: 'off' },
+  );
+});
+
+test('any non-Homey mode hands control back to ChargeIQ, whichever one was picked', () => {
+  // Which of scheduled/solar/idle applies is derived, not chosen.
+  for (const mode of ['scheduled', 'solar', 'idle', 'device']) {
+    assert.deepEqual(resolveEnergyControl({ mode }, { watts: 2300, charging: true }, 230), { action: 'resume' });
+  }
+  assert.deepEqual(
+    resolveEnergyControl({ mode: 'solar', watts: 2300, charging: true }, NONE, 230),
+    { action: 'resume' },
+  );
 });

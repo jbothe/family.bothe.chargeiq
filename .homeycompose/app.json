@@ -1,7 +1,7 @@
 {
   "id": "family.bothe.chargeiq",
   "version": "1.0.0",
-  "compatibility": ">=12.4.5",
+  "compatibility": ">=12.13.0",
   "sdk": 3,
   "runtime": "nodejs",
   "platforms": [

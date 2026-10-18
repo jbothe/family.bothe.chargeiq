@@ -570,7 +570,7 @@
         if (c.chargingState === 'plugged_out') return { label: 'UNPLUGGED', cls: 'unplugged' };
         return null;
       },
-      // Commanded charge current, shown in the EV chip while charging. charge_current_limit
+      // Commanded charge current, shown in the EV chip while charging. limitA (target_power)
       // is a target the controller only rewrites on a fresh positive value (see
       // ChargeController) - it does *not* reset to 0 on pause - so paused/not-actively-
       // charging is gated here instead of trusting the raw capability value.

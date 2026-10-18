@@ -3,10 +3,10 @@
 import Homey from 'homey';
 import { CentralSystem } from '../../lib/ocpp/CentralSystem';
 import { ChargePoint } from '../../lib/ocpp/ChargePoint';
-import { ChargeController, ChargeMode, ControllerHost } from '../../lib/control/ChargeController';
+import { ChargeController, ControllerHost } from '../../lib/control/ChargeController';
 import { ScheduleWindow } from '../../lib/control/Scheduler';
 import { SolarFeed, SolarSample } from '../../lib/solar/SolarFeed';
-import { currentLimitRangeUpdate } from '../../lib/capabilities';
+import { resolveEnergyControl, TargetPowerOptions, targetPowerOptionsUpdate } from '../../lib/capabilities';
 
 interface ChargeIQApp extends Homey.App {
   getCentralSystem(): CentralSystem;
@@ -15,19 +15,17 @@ interface ChargeIQApp extends Homey.App {
 }
 
 const CAPABILITIES = [
-  'evcharger_charging', 'charge_current_limit', 'charge_current_applied', 'charge_current_offered', 'charge_mode',
-  'evcharger_charging_state',
-  'session_duration', 'meter_power.session', 'measure_solar_surplus', 'measure_power',
-  'measure_current', 'measure_voltage', 'meter_power', 'alarm_generic',
+  'evcharger_charging', 'target_power', 'target_power_mode', 'evcharger_charging_state', 'measure_power',
+  'charge_current_applied', 'charge_current_offered', 'measure_current', 'measure_voltage',
+  'meter_power.session', 'session_duration', 'meter_power', 'measure_solar_surplus', 'alarm_generic',
 ];
 
-// Capabilities from earlier versions to strip from already-paired devices.
-const REMOVED_CAPABILITIES = ['charger_status'];
-
-// Fallbacks matching the minAmps/maxAmps defaults in driver.settings.compose.json,
-// for the window before a device has settings of its own.
+// Fallbacks matching the defaults in driver.settings.compose.json, for the
+// window before a device has settings of its own.
 const DEFAULT_MIN_AMPS = 6;
 const DEFAULT_MAX_AMPS = 32;
+const DEFAULT_VOLTAGE = 230;
+const DEFAULT_PHASES = 1;
 
 module.exports = class ChargerDevice extends Homey.Device {
 
@@ -65,8 +63,8 @@ module.exports = class ChargerDevice extends Homey.Device {
 
   async onInit() {
     await this.ensureCapabilities();
-    await this.syncCurrentLimitRange();
-    await this.seedCurrentLimit();
+    await this.syncTargetPowerOptions();
+    await this.seedTargetPower();
 
     this.startedTrigger = this.homey.flow.getDeviceTriggerCard('charging_started');
     this.pausedTrigger = this.homey.flow.getDeviceTriggerCard('charging_paused');
@@ -88,19 +86,35 @@ module.exports = class ChargerDevice extends Homey.Device {
     this.onSolarSample = (s: SolarSample) => this.controller.onSolarSample(s);
     feed?.on('sample', this.onSolarSample);
 
-    this.registerCapabilityListener('evcharger_charging', async (value: boolean) => {
-      if (value) {
-        const amps = this.getCapabilityValue('charge_current_limit') as number | null;
-        await this.controller.startManual(amps ?? undefined);
-      } else {
-        await this.controller.stop();
-      }
-    });
-
-    this.registerCapabilityListener('charge_current_limit', async (value: number) => {
-      await this.controller.setCurrentLimit(value);
-    });
-    // charge_mode is now a read-only derived metric — no listener.
+    // One listener for all three: Homey's Set target power card sets them in
+    // quick succession, and this debounces that into a single manual decision
+    // instead of three. See resolveEnergyControl().
+    this.registerMultipleCapabilityListener(
+      ['target_power', 'target_power_mode', 'evcharger_charging'],
+      async (values: Record<string, unknown>) => {
+        const control = resolveEnergyControl({
+          watts: values.target_power as number | undefined,
+          mode: values.target_power_mode as string | undefined,
+          charging: values.evcharger_charging as boolean | undefined,
+        }, {
+          watts: this.getCapabilityValue('target_power') as number | null,
+          charging: this.controller.isChargeRequested(),
+        }, this.wattsPerAmp());
+        if (control.action === 'resume') {
+          this.controller.resumeAutomatic(`target power mode -> ${values.target_power_mode}`);
+          // Homey stores the picked value once this listener returns, which
+          // would leave e.g. "Idle" showing while ChargeIQ resolves Solar.
+          this.homey.setTimeout(() => this.controller?.republishMode(), 1000);
+        } else if (control.action === 'charge') {
+          await this.controller.startManual(control.amps);
+        } else if (control.action === 'off') {
+          await this.controller.stop();
+        } else {
+          this.homey.app.log(`[mode] target power ${values.target_power}W kept for the next start (not charging)`);
+        }
+      },
+      500,
+    );
 
     this.log(`ChargerDevice ${this.getData().id} initialised`);
   }
@@ -112,11 +126,13 @@ module.exports = class ChargerDevice extends Homey.Device {
   }) {
     this.pendingSettings = newSettings;
     try {
+      // Inside the pendingSettings window on purpose: this reads the amp limits,
+      // voltage and phases, and would otherwise see the previous generation,
+      // exactly as refreshConfig() would. And before refreshConfig(), which
+      // re-publishes target_power at the new conversion - a range not yet
+      // widened to admit it would reject that write.
+      await this.syncTargetPowerOptions();
       this.controller?.refreshConfig();
-      // Inside the pendingSettings window on purpose: this reads minAmps/maxAmps
-      // and would otherwise see the previous generation, exactly as
-      // refreshConfig() would.
-      await this.syncCurrentLimitRange();
     } finally {
       this.pendingSettings = null;
     }
@@ -166,20 +182,8 @@ module.exports = class ChargerDevice extends Homey.Device {
     return this.controller.startManual(current);
   }
 
-  flowStop() {
-    return this.controller.stop();
-  }
-
   flowSetCurrent(current: number) {
     return this.controller.setCurrentLimit(current);
-  }
-
-  flowIsCharging() {
-    return this.controller.isCharging();
-  }
-
-  flowModeIs(mode: ChargeMode) {
-    return this.controller.getMode() === mode;
   }
 
   flowWithinSchedule() {
@@ -203,10 +207,13 @@ module.exports = class ChargerDevice extends Homey.Device {
     return this.controller.getSchedule();
   }
 
+  /**
+   * Adds any capability this version introduced to an already-paired device.
+   * Nothing is removed: Homey can only remove a custom capability while its
+   * definition is still in the app, and a stale one it can't resolve then fails
+   * every addCapability() as well. A dropped capability means re-pairing.
+   */
   private async ensureCapabilities() {
-    for (const cap of REMOVED_CAPABILITIES) {
-      if (this.hasCapability(cap)) await this.removeCapability(cap).catch(this.error);
-    }
     for (const cap of CAPABILITIES) {
       if (!this.hasCapability(cap)) await this.addCapability(cap).catch(this.error);
     }
@@ -225,37 +232,40 @@ module.exports = class ChargerDevice extends Homey.Device {
     return this.getSetting(key) as T;
   }
 
-  /**
-   * Point the slider's bounds at this device's own configured amp limits. The
-   * capability manifest can only declare one range for every install, but the
-   * limits that actually govern charging are per-device settings - see
-   * currentLimitRange(). Only written when it actually changes, since Homey
-   * documents setCapabilityOptions as expensive and this runs on every save.
-   */
-  private async syncCurrentLimitRange() {
-    if (!this.hasCapability('charge_current_limit')) return;
-    const minAmps = this.setting<number>('minAmps') ?? DEFAULT_MIN_AMPS;
-    const maxAmps = this.setting<number>('maxAmps') ?? DEFAULT_MAX_AMPS;
-    const current = this.getCapabilityOptions('charge_current_limit') as
-      { min?: number; max?: number } | null | undefined;
-    const update = currentLimitRangeUpdate(current, minAmps, maxAmps);
-    if (!update) return;
-    this.log(`[capability] charge_current_limit range -> ${update.min}-${update.max}A`);
-    await this.setCapabilityOptions('charge_current_limit', {
-      ...(current ?? {}), min: update.min, max: update.max,
-    }).catch(this.error);
+  /** Watts per amp from this device's voltage/phases settings, as the controller converts. */
+  private wattsPerAmp(): number {
+    return (this.setting<number>('voltage') ?? DEFAULT_VOLTAGE) * (this.setting<number>('phases') ?? DEFAULT_PHASES);
   }
 
   /**
-   * Initial slider value for a freshly paired device, from the configured
-   * minimum. Runs after syncCurrentLimitRange() so the bounds already admit it.
+   * Point target_power's range, step and dead zone at this device's own
+   * configured amp limits, voltage and phases - Homey's Energy reads them to know
+   * what it can ask for. The manifest can only declare one set for every
+   * install - see targetPowerOptions(). Only written when it actually changes,
+   * since Homey documents setCapabilityOptions as expensive and this runs on
+   * every save.
+   */
+  private async syncTargetPowerOptions() {
+    if (!this.hasCapability('target_power')) return;
+    const minAmps = this.setting<number>('minAmps') ?? DEFAULT_MIN_AMPS;
+    const maxAmps = this.setting<number>('maxAmps') ?? DEFAULT_MAX_AMPS;
+    const current = this.getCapabilityOptions('target_power') as Partial<TargetPowerOptions> | null | undefined;
+    const update = targetPowerOptionsUpdate(current, minAmps, maxAmps, this.wattsPerAmp());
+    if (!update) return;
+    this.log(`[capability] target_power range -> ${update.excludeMax}-${update.max}W in ${update.step}W steps`);
+    await this.setCapabilityOptions('target_power', { ...(current ?? {}), ...update }).catch(this.error);
+  }
+
+  /**
+   * Initial target_power for a freshly paired device, from the configured
+   * minimum. Runs after syncTargetPowerOptions() so the range already admits it.
    * Only ever the initial value - every later write comes from the controller.
    */
-  private async seedCurrentLimit() {
-    if (!this.hasCapability('charge_current_limit')) return;
-    if (this.getCapabilityValue('charge_current_limit') !== null) return;
+  private async seedTargetPower() {
+    if (!this.hasCapability('target_power')) return;
+    if (this.getCapabilityValue('target_power') !== null) return;
     await this.setCapabilityValue(
-      'charge_current_limit', this.setting<number>('minAmps') ?? DEFAULT_MIN_AMPS,
+      'target_power', (this.setting<number>('minAmps') ?? DEFAULT_MIN_AMPS) * this.wattsPerAmp(),
     ).catch(this.error);
   }
 

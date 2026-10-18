@@ -261,6 +261,15 @@ interface Decision {
   amps: number;
 }
 
+/**
+ * The derived mode as Homey's `target_power_mode`. Manual is `homey` - Homey's
+ * own id for "Homey (or the user) is in charge", which its Set target power card
+ * switches to. The other modes are ChargeIQ's own logic, so they keep their ids.
+ */
+export function toTargetPowerMode(mode: ChargeMode): string {
+  return mode === 'manual' ? 'homey' : mode;
+}
+
 /** Map raw OCPP status to Homey's standard evcharger_charging_state enum. */
 export function toChargingState(status: OcppStatus): string {
   switch (status) {
@@ -395,6 +404,12 @@ export class ChargeController {
   private transactionId: number | null = null;
 
   private desiredAmps: number | null = null;
+
+  /**
+   * The last positive current published to `target_power`, kept in amps so a
+   * voltage/phases settings change can re-publish it at the new conversion.
+   */
+  private limitAmps: number | null = null;
 
   private awaitingStart = false;
 
@@ -575,6 +590,8 @@ export class ChargeController {
   }
 
   refreshConfig(): void {
+    // Unset on the constructor's first call, before there is a previous config.
+    const prevInterval = (this.cfg as ControllerConfig | undefined)?.meterSampleIntervalSec;
     const g = <T>(k: string, d: T): T => (this.host.getSetting<T>(k) ?? d);
     const voltage = g('voltage', DEFAULTS.voltage);
     const maxHouseholdA = g('maxHouseholdA', DEFAULTS.maxHouseholdA);
@@ -604,6 +621,15 @@ export class ChargeController {
       solarEnabled: g('solarEnabled', DEFAULTS.solarEnabled),
     };
     this.solarLoop?.setConfig(this.solarLoopConfig());
+    // target_power is in watts, so the same current reads differently now.
+    if (this.limitAmps != null) this.publishLimit(this.limitAmps);
+    // The charger is otherwise only configured on bind and boot, so a changed
+    // interval would wait for the next reconnect - which could be days. While
+    // offline there is nothing to send to; the next bind configures it anyway.
+    if (prevInterval !== undefined && prevInterval !== this.cfg.meterSampleIntervalSec && this.cp?.connected) {
+      this.host.log(`[config] MeterValues interval ${prevInterval}s -> ${this.cfg.meterSampleIntervalSec}s, sending to the charger`);
+      this.configureCharger().catch((e) => this.host.error('configureCharger', e));
+    }
     this.timezone = this.host.getTimezone?.();
     this.scheduler.setTimezone(this.timezone);
     // Logs the full resolved config on every refresh (boot + every settings
@@ -864,13 +890,15 @@ export class ChargeController {
       const interval = await this.cp.changeConfiguration('MeterValueSampleInterval', String(this.cfg.meterSampleIntervalSec));
       // Current.Offered is what the charger actually advertises to the car, which its
       // own max-current setting or load management can hold below a profile it accepted.
-      // Nothing parses it; the unhandled-measurand log reports it.
+      // parseMeterValues() maps it to Readings.offered -> charge_current_offered.
       const measurands = await this.cp.changeConfiguration(
         'MeterValuesSampledData',
         'Power.Active.Import,Current.Import,Voltage,Energy.Active.Import.Register,Current.Offered',
       );
       if (interval !== 'Accepted' || measurands !== 'Accepted') {
         this.host.log(`[charger] MeterValues config not accepted (interval ${interval}, measurands ${measurands})`);
+      } else {
+        this.host.log(`[charger] MeterValues config accepted (interval ${this.cfg.meterSampleIntervalSec}s)`);
       }
     } catch (err) {
       this.host.log('Charger rejected MeterValues config (continuing):', (err as Error).message);
@@ -1299,7 +1327,7 @@ export class ChargeController {
     if (on) {
       const target = this.clampAmps(amps ?? this.cfg.maxAmps);
       this.manualLatch = { intent: 'charge', amps: target };
-      this.host.setCapability('charge_current_limit', target);
+      this.publishLimit(target);
     } else {
       this.manualLatch = { intent: 'off' };
     }
@@ -1312,7 +1340,7 @@ export class ChargeController {
   async setCurrentLimit(amps: number): Promise<void> {
     const target = this.clampAmps(amps);
     this.manualLatch = { intent: 'charge', amps: target };
-    this.host.setCapability('charge_current_limit', target);
+    this.publishLimit(target);
     await this.host.setStore('manualLatch', this.manualLatch);
     this.tick(new Date(), 'manual-current');
   }
@@ -1326,9 +1354,19 @@ export class ChargeController {
   }
 
   /** Flow action: clear a manual override so the next tick resolves Scheduled/Solar/Idle. */
-  resumeAutomatic(): void {
-    this.clearManualLatch('flow: resume automatic');
+  resumeAutomatic(reason = 'flow: resume automatic'): void {
+    this.clearManualLatch(reason);
     this.tick(new Date(), 'manual-toggle');
+  }
+
+  /**
+   * Write the derived mode to target_power_mode again, even though it hasn't
+   * changed. Picking any non-Homey value in that picker only means "hand
+   * control back" (see resolveEnergyControl()), so the value picked can differ
+   * from the mode that then resolves - and updateMode() only writes on a change.
+   */
+  republishMode(): void {
+    if (this.currentMode) this.host.setCapability('target_power_mode', toTargetPowerMode(this.currentMode));
   }
 
   private clearManualLatch(reason: string): void {
@@ -1344,6 +1382,15 @@ export class ChargeController {
 
   isCharging(): boolean {
     return this.transactionId != null;
+  }
+
+  /**
+   * Whether ChargeIQ is asking the charger to charge right now (a decided current
+   * above 0), whatever the car is doing with it - see resolveEnergyControl(),
+   * which uses this so a lone target_power only adjusts a charge already asked for.
+   */
+  isChargeRequested(): boolean {
+    return (this.desiredAmps ?? 0) > 0;
   }
 
   /**
@@ -1654,6 +1701,7 @@ export class ChargeController {
 
   getDiagnostics(): {
     availableW: number; solarState: string; targetA: number | null; mode: ChargeMode;
+    limitA: number | null;
     chargerPowerW: number | null;
     solarFeed: { stale: boolean; ageMs: number | null };
     limits: { chargerMaxW: number; gridMaxW: number };
@@ -1663,6 +1711,9 @@ export class ChargeController {
       solarState: this.solarLoop?.getState() ?? 'off',
       targetA: this.solarTargetAmps,
       mode: this.getMode(),
+      // The decided current behind target_power, in amps. Like target_power it
+      // keeps its last positive value across a pause.
+      limitA: this.limitAmps,
       // Netted charger draw (see nettedChargerW()): 0 if confirmed not delivering,
       // null if genuinely unknown right now. Exposed so callers (the widget's house
       // load) can subtract the EV's own draw out of a grid-derived total instead of
@@ -1985,7 +2036,7 @@ export class ChargeController {
     if (mode === this.currentMode) return;
     const first = this.currentMode === null;
     this.currentMode = mode;
-    this.host.setCapability('charge_mode', mode);
+    this.host.setCapability('target_power_mode', toTargetPowerMode(mode));
     if (!first) {
       this.host.log(`[mode] -> ${mode}`);
       this.host.onModeChanged?.(mode);
@@ -2031,7 +2082,7 @@ export class ChargeController {
     const prevDesired = this.desiredAmps;
     if (prevDesired !== target) {
       this.desiredAmps = target;
-      if (target > 0) this.host.setCapability('charge_current_limit', target);
+      if (target > 0) this.publishLimit(target);
     }
     // Write until the charger has accepted the target, not just when the target
     // changes - otherwise a dropped or rejected write is never retried.
@@ -2068,6 +2119,21 @@ export class ChargeController {
   private clampAmps(amps: number): number {
     // Floor (never round up) so a target can't exceed the available surplus/limit.
     return Math.max(this.cfg.minAmps, Math.min(this.cfg.maxAmps, Math.floor(amps)));
+  }
+
+  /** Watts per amp at this charger's configured voltage and phases. */
+  private wattsPerAmp(): number {
+    return this.cfg.voltage * this.cfg.phases;
+  }
+
+  /**
+   * Publish a decided (positive) current as `target_power`, in watts. Only ever
+   * called with a fresh positive value, never 0 on a pause: Homey's EV charger
+   * convention keeps target_power across a stop, for the next session.
+   */
+  private publishLimit(amps: number): void {
+    this.limitAmps = amps;
+    this.host.setCapability('target_power', amps * this.wattsPerAmp());
   }
 
   private scheduleWrite(urgent = false): void {
