@@ -420,10 +420,15 @@ export class ChargeController {
   private resyncPending = true;
 
   /**
-   * When bind() last ran, and what has arrived since: a resync pause waits for
-   * these - see resyncHoldReason(). null until the first bind.
+   * When the current resync began, and what has arrived since the last bind: a
+   * resync pause waits for these - see resyncHoldReason(). resyncSince is null
+   * until the first bind and again once a write has gone out, and survives a
+   * quick reconnect (see bind()), so a flapping link can't hold a pause forever.
    */
-  private boundAt: number | null = null;
+  private resyncSince: number | null = null;
+
+  /** When the link last dropped, or null while bound - see bind(). */
+  private unboundAt: number | null = null;
 
   private statusSinceBind = false;
 
@@ -530,6 +535,7 @@ export class ChargeController {
     this.listenTo(this.cs, this.csTeardowns, 'disconnect', (cp: ChargePoint) => {
       if (cp.identity !== this.host.identity) return;
       this.cp = null;
+      this.unboundAt = Date.now();
       this.forgetApplied();
       this.forgetOffered();
       this.noteLastSeen(cp.getConnectionInfo().lastSeenAt, true);
@@ -812,7 +818,11 @@ export class ChargeController {
     this.adoptTransactionId(cp);
     // The charger may have rebooted, or a write may have been lost while the link was down.
     this.forgetApplied();
-    this.boundAt = Date.now();
+    // A link back within RESYNC_HOLD_MAX_MS continues the resync it interrupted
+    // rather than restarting its clock. (No disconnect seen = a client swap: gap 0.)
+    const gapMs = this.unboundAt == null ? 0 : Date.now() - this.unboundAt;
+    if (this.resyncSince == null || gapMs > RESYNC_HOLD_MAX_MS) this.resyncSince = Date.now();
+    this.unboundAt = null;
     this.statusSinceBind = false;
     this.solarEvaluatedSinceBind = false;
     if (this.cp === cp) {
@@ -2051,13 +2061,14 @@ export class ChargeController {
    * it was already doing and keeps resyncPending set, so the first write based
    * on real data is the urgent one. Only a pause is held: a positive target
    * (a boost floor, manual amps) is safe to send at once, and a pause from a
-   * hard cap is never held. Bounded by RESYNC_HOLD_MAX_MS so a genuine pause
-   * with no solar feed at all still lands.
+   * hard cap is never held. Bounded by RESYNC_HOLD_MAX_MS from the start of the
+   * resync, across quick reconnects, so a genuine pause with no solar feed at
+   * all still lands even on a flapping link.
    */
   private resyncHoldReason(target: number, now: Date = new Date(Date.now())): string | null {
-    if (target > 0 || this.appliedAmps != null || this.pauseFromCap || this.boundAt == null) return null;
-    // Date.now(), like boundAt - not the decision time, which tests set freely.
-    if (Date.now() - this.boundAt >= RESYNC_HOLD_MAX_MS) return null;
+    if (target > 0 || this.appliedAmps != null || this.pauseFromCap || this.resyncSince == null) return null;
+    // Date.now(), like resyncSince - not the decision time, which tests set freely.
+    if (Date.now() - this.resyncSince >= RESYNC_HOLD_MAX_MS) return null;
     if (!this.statusSinceBind) return 'no status yet this connection';
     const status = this.lastStatusValue;
     if (status === 'Available' && this.transactionId != null) {
@@ -2169,6 +2180,7 @@ export class ChargeController {
     if (this.desiredAmps === this.appliedAmps) return; // already there (a pending write overtaken)
     // Leaves resyncPending set, so the write that does go out is still urgent.
     if (this.resyncHoldReason(this.desiredAmps)) return;
+    this.resyncSince = null; // the resync is no longer waiting on anything
     const epoch = this.appliedEpoch;
     this.inFlightEpoch = epoch;
     this.resyncPending = false;

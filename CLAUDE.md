@@ -280,7 +280,9 @@ charger, and both now say so on the same line rather than reading like a success
     `resyncPending` set, so the first write based on real data is the urgent one. Never held: a
     positive target (a boost floor goes out at once), a pause forced by a hard cap
     (`pauseFromCap`), and anything after `RESYNC_HOLD_MAX_MS` (60s), so a genuine pause with no
-    solar feed at all still lands. The decision line shows it as `| charger limit unknown (pause
+    solar feed at all still lands. That deadline (`resyncSince`) runs from the start of the resync,
+    not the latest bind: a link back within 60s of dropping continues it, so a flapping link can't
+    hold a pause forever, while a longer outage starts a fresh one. It clears once a write goes out. The decision line shows it as `| charger limit unknown (pause
     held: <reason>)`. The first status after a reconnect ticks even when it repeats the old one,
     since that status is what the hold waits for.
   - One write at a time, keyed by epoch (`inFlightEpoch` vs `appliedEpoch`): a newer request while

@@ -4107,3 +4107,58 @@ test('a held resync pause goes out anyway once the hold times out', async (t) =>
   assert.deepEqual(writes, [0]);
   c.destroy();
 });
+
+test('a link reconnecting faster than the hold cannot hold a pause forever', async (t) => {
+  const {
+    c, cp, cs, writes,
+  } = makeRestartRig({ transactionId: 2 }); // Solar mode, and no solar feed at all
+  const realNow = Date.now;
+  let offset = 0;
+  t.after(() => {
+    Date.now = realNow;
+  });
+  Date.now = () => realNow() + offset;
+  const charging = () => cp.emit('status', { connectorId: 1, errorCode: 'NoError', status: 'Charging' });
+
+  cs.emit('connect', cp);
+  charging();
+  for (const at of [20000, 40000]) {
+    offset = at;
+    cs.emit('disconnect', cp);
+    cs.emit('connect', cp);
+    charging();
+  }
+  await waitMs();
+  assert.deepEqual(writes, [], 'still within 60s of the first bind');
+  offset = 61000;
+  cs.emit('disconnect', cp);
+  cs.emit('connect', cp);
+  charging();
+  await waitMs();
+  assert.deepEqual(writes, [0], 'the deadline ran from the first bind, not the latest');
+  c.destroy();
+});
+
+test('a link back after a long outage starts a fresh hold rather than inheriting an expired one', async (t) => {
+  const {
+    c, cp, cs, writes,
+  } = makeRestartRig({ transactionId: 2 });
+  const realNow = Date.now;
+  let offset = 0;
+  t.after(() => {
+    Date.now = realNow;
+  });
+  Date.now = () => realNow() + offset;
+  const charging = () => cp.emit('status', { connectorId: 1, errorCode: 'NoError', status: 'Charging' });
+
+  cs.emit('connect', cp);
+  charging();
+  offset = 10000;
+  cs.emit('disconnect', cp);
+  offset = 80000; // down for 70s: the charger may be in a different state entirely
+  cs.emit('connect', cp);
+  charging();
+  await waitMs();
+  assert.deepEqual(writes, [], 'held again, though 80s have passed since the first bind');
+  c.destroy();
+});
