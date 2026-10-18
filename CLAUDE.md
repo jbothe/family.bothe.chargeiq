@@ -317,6 +317,23 @@ charger, and both now say so on the same line rather than reading like a success
   - The first write after a reset is **urgent** (`resyncPending`), like a tightening cap: the
     charger is on whatever predates the gap. It's cleared on the *attempt*, not on acceptance, so a
     charger that keeps rejecting falls back to the throttled cadence instead of being hammered.
+  - **A resync *pause* waits for real data** (`resyncHoldReason()`). Right after `bind()` the
+    decision may rest on nothing: no status, no `MeterValues`, a `SolarLoop` that has never
+    evaluated - and in Solar mode or a 0A `solarToCar` window that resolves to 0A. Confirmed on
+    hardware 2026-10-17: an app restart sent that 0A urgently to a car charging at 5.8A, the
+    Wallbox went `SuspendedEVSE`, and the 6A from the first real solar evaluation 6s later then sat
+    behind `writeThrottleMs` - ~20s without charging. So a 0A resync (`appliedAmps` unknown) is
+    held until a status has arrived since the bind (not `Available` with a transaction still on
+    record - the reconnect blip), and, when the mode follows solar and the charger is plugged in or
+    faulted, until one solar evaluation has run on this connection. Holding it keeps
+    `resyncPending` set, so the first write based on real data is the urgent one. Never held: a
+    positive target (a boost floor goes out at once), a pause forced by a hard cap
+    (`pauseFromCap`), and anything after `RESYNC_HOLD_MAX_MS` (60s), so a genuine pause with no
+    solar feed at all still lands. That deadline (`resyncSince`) runs from the start of the resync,
+    not the latest bind: a link back within 60s of dropping continues it, so a flapping link can't
+    hold a pause forever, while a longer outage starts a fresh one. It clears once a write goes out. The decision line shows it as `| charger limit unknown (pause
+    held: <reason>)`. The first status after a reconnect ticks even when it repeats the old one,
+    since that status is what the hold waits for.
   - One write at a time, keyed by epoch (`inFlightEpoch` vs `appliedEpoch`): a newer request while
     one is outstanding is queued (`rewriteUrgent` carries urgency across), **but a call from a
     superseded epoch never blocks** - a call hanging on a dead socket may not settle until the RPC
@@ -451,7 +468,9 @@ next move.
   `desiredAmps` it computes gets recorded regardless, and if it doesn't happen to change again once
   the connection *does* come up, `ensureCharging()`'s change-triggered write never fires to correct
   it - so a stale wrong pause from before `bind()` can end up being exactly what a newly-connected,
-  already-charging session sees applied. `nettedChargerW()` treats `lastStatusValue == null` as
+  already-charging session sees applied (it did, on 2026-10-17 - the bind resync sent it urgently;
+  `resyncHoldReason()` under "Writes reconcile" now holds such a pause until real data backs it).
+  `nettedChargerW()` treats `lastStatusValue == null` as
   unknown too, but **only when a `transactionId` is already known** (persisted from store at
   `init()` - the actual signal a session may be live) - without one, a null status is trusted as "no
   session, nothing to net out" (confirmed `0`), since a charger that's simply never connected
