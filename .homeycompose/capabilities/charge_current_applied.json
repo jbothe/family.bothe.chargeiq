@@ -1,7 +1,7 @@
 {
   "type": "number",
   "title": { "en": "Accepted Limit" },
-  "desc": { "en": "Current limit the charger last accepted. Lower than Charging Power means ChargeIQ's decision hasn't reached the charger yet; compare with Offered Current and Drawn Current further down." },
+  "desc": { "en": "Current limit the charger last accepted. Lower than Target Power means ChargeIQ's decision hasn't reached the charger yet; compare with Offered Current and Drawn Current further down." },
   "units": { "en": "A" },
   "icon": "/assets/capabilities/charge_current_limit.svg",
   "decimals": 0,

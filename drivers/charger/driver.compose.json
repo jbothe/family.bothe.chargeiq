@@ -19,7 +19,7 @@
   ],
   "capabilitiesOptions": {
     "target_power": {
-      "title": { "en": "Charging Power" },
+      "title": { "en": "Target Power" },
       "min": 0,
       "max": 7360,
       "step": 230,

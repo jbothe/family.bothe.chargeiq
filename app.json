@@ -430,7 +430,7 @@
       "capabilitiesOptions": {
         "target_power": {
           "title": {
-            "en": "Charging Power"
+            "en": "Target Power"
           },
           "min": 0,
           "max": 7360,
@@ -908,7 +908,7 @@
         "en": "Accepted Limit"
       },
       "desc": {
-        "en": "Current limit the charger last accepted. Lower than Charging Power means ChargeIQ's decision hasn't reached the charger yet; compare with Offered Current and Drawn Current further down."
+        "en": "Current limit the charger last accepted. Lower than Target Power means ChargeIQ's decision hasn't reached the charger yet; compare with Offered Current and Drawn Current further down."
       },
       "units": {
         "en": "A"
