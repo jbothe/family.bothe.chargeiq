@@ -257,6 +257,22 @@ const DELIVERING_MIN_W = 100;
  */
 const SOLAR_FEED_LAG_MS = 14000;
 
+/**
+ * The lag is not fixed: up-steps measured 13.4-14.6s, but 8s after an unplug the
+ * grid figure had already dropped by the car's 7kW (confirmed on hardware). So
+ * the charger's power is checked from SOLAR_FEED_LAG_MS plus this far back, all
+ * the way up to now.
+ */
+const SOLAR_FEED_LAG_SLACK_MS = 6000;
+
+/**
+ * A charger power swing larger than this anywhere in that uncertain window
+ * makes the house's own load unknowable from one grid sample: which side of the
+ * swing the grid reading saw decides the answer, by the whole swing. Small
+ * enough that what passes adds well under OTHER_LOAD_MAX_SHIFT_W of error.
+ */
+const CHARGER_SWING_MAX_W = 500;
+
 /** How much charger power history is kept for that pairing. */
 const CHARGER_POWER_HISTORY_MS = 60000;
 
@@ -388,6 +404,9 @@ export class ChargeController {
 
   /** Last power figure written to the log, so [charger] power= only reports real movement. */
   private loggedPowerW = 0;
+
+  /** Inside a run of implausible voltage readings, so only its start is logged. */
+  private implausibleVoltageRun = false;
 
   /**
    * Measurand names already reported by onMeterValues, so each unhandled one is
@@ -892,7 +911,7 @@ export class ChargeController {
     const cachedStatus = cp.getLastStatus();
     if (cachedStatus) this.onStatus(cachedStatus);
     const cachedReadings = cp.getLastReadings();
-    if (cachedReadings) this.onMeterValues(cachedReadings);
+    if (cachedReadings) this.onMeterValues(cachedReadings, true);
 
     this.requestFreshState();
     this.configureCharger().catch((e) => this.host.error('configureCharger', e));
@@ -1051,6 +1070,9 @@ export class ChargeController {
       if (this.prevPlugged === true) {
         this.host.onVehicleDisconnected?.();
         this.endVoltageSession();
+        // Nothing is offered to an unplugged car; kept, it read as the next
+        // session's "charger offering only 28A" before that session's first reading.
+        this.forgetOffered();
       }
       this.prevPlugged = false;
       // Debounced: see IDLE_RECONCILE_DELAY_MS. Don't trust a single Available
@@ -1123,6 +1145,9 @@ export class ChargeController {
     // a confirmed 0 - see nettedChargerW()'s own doc comment.
     if (this.nettedChargerW() === 0 && this.lastPowerW !== null) {
       this.lastPowerW = null;
+      // The charger sends nothing once it stops, so its history would otherwise
+      // hold the last charging reading - see chargerPowerSwingW().
+      this.noteChargerPower(Date.now(), 0);
       this.host.setCapability('measure_power', 0);
       this.host.setCapability('measure_current', 0);
     }
@@ -1158,10 +1183,19 @@ export class ChargeController {
     this.emitChargingEvent('stopped');
   }
 
-  private onMeterValues(r: Readings): void {
+  /**
+   * replayed: the ChargePoint's cached last reading, handed over on bind(). It
+   * still fills in the capabilities and the late-binder state, but it is not a
+   * new measurement - it may predate a disconnect, or even an unplug - so it is
+   * never stamped "now" into the time-based diagnostics, and its Current.Offered
+   * (which names a figure on the decision line) is left out too. Confirmed on hardware:
+   * a reading from before an unplug, replayed at the reconnect that followed the
+   * replug, became one end of a "3.92Ω" voltage step.
+   */
+  private onMeterValues(r: Readings, replayed = false): void {
     if (r.power !== undefined) {
       this.lastPowerW = r.power;
-      this.noteChargerPower(Date.now(), r.power);
+      if (!replayed) this.noteChargerPower(Date.now(), r.power);
       this.meteredSinceStatus = true;
       this.host.setCapability('measure_power', r.power);
       // The meter corrects the charging state shown for a suspended or faulted status - see
@@ -1176,7 +1210,8 @@ export class ChargeController {
     }
     if (r.current !== undefined) this.host.setCapability('measure_current', r.current);
     if (r.voltage !== undefined) this.host.setCapability('measure_voltage', r.voltage);
-    if (r.offered !== undefined) this.noteOffered(r.offered);
+    // Not from a replay: it may be the previous session's figure (see `replayed`).
+    if (r.offered !== undefined && !replayed) this.noteOffered(r.offered);
     if (r.energyKwh !== undefined) {
       this.lastEnergyKwh = r.energyKwh;
       this.host.setCapability('meter_power', r.energyKwh);
@@ -1185,7 +1220,7 @@ export class ChargeController {
 
     // limitA is what the charger accepted, not what was decided - a drop the
     // charger was never told to make is the car's own doing.
-    const sag = r.voltage !== undefined && r.current !== undefined
+    const sag = !replayed && r.voltage !== undefined && r.current !== undefined
       ? this.voltage.add({
         at: Date.now(),
         voltage: r.voltage,
@@ -1206,7 +1241,7 @@ export class ChargeController {
       this.host.log(`[charger] power=${Math.round(r.power)}W `
         + `current=${r.current ?? '?'}A voltage=${r.voltage ?? '?'}V${sagNote}`);
     }
-    this.logVoltage(sag);
+    this.logVoltage(sag, r.voltage);
 
     // Discovery aid: OCPP 1.6 defines measurands this app maps onto nothing
     // (SoC, Temperature, vendor extensions), and parseMeterValues
@@ -1220,8 +1255,17 @@ export class ChargeController {
    * step, a new session-high sag, the alarm latching - never every reading;
    * the [charger] power= line carries the running sag on real movement.
    */
-  private logVoltage(r: SagReading | null): void {
+  private logVoltage(r: SagReading | null, voltage?: number): void {
     if (!r) return;
+    if (r.implausible !== this.implausibleVoltageRun) {
+      this.implausibleVoltageRun = r.implausible;
+      if (r.implausible) {
+        this.host.log(`[voltage] ignoring readings: ${fmtV(voltage!)} under load is above the `
+          + `${fmtV(r.referenceV!)} no-load reference - the charger's voltage reading is off`);
+      } else {
+        this.host.log('[voltage] readings plausible again');
+      }
+    }
     const { step } = r;
     if (step) {
       const ohms = step.ohms == null
@@ -1271,6 +1315,31 @@ export class ChargeController {
    * Before the oldest reading kept, a charger confirmed not delivering counts as
    * 0; anything else is unknown (null).
    */
+  /**
+   * How far the charger's metered power moved between `from` and `to`: max - min
+   * over the reading in effect at `from` and every reading after it up to `to`.
+   * 0 with no history.
+   */
+  private chargerPowerSwingW(from: number, to: number): number {
+    let lo = Infinity;
+    let hi = -Infinity;
+    let inEffect: number | null = null;
+    for (const p of this.chargerPowerHistory) {
+      if (p.at <= from) {
+        inEffect = p.w;
+        continue;
+      }
+      if (p.at > to) break;
+      lo = Math.min(lo, p.w);
+      hi = Math.max(hi, p.w);
+    }
+    if (inEffect != null) {
+      lo = Math.min(lo, inEffect);
+      hi = Math.max(hi, inEffect);
+    }
+    return hi >= lo ? hi - lo : 0;
+  }
+
   private chargerPowerAt(at: number): number | null {
     let w: number | null = null;
     for (const p of this.chargerPowerHistory) {
@@ -1285,15 +1354,23 @@ export class ChargeController {
   private endVoltageSession(): void {
     const s = this.voltage.endSession();
     if (!s) return;
+    if (s.minV == null) {
+      this.host.log(`[voltage] session: no plausible readings under load - all ${s.implausibleReadings} `
+        + 'were above the no-load reference and ignored');
+      return;
+    }
     const sag = s.maxSagV == null
       ? 'no no-load reference'
       : `max sag ${fmtV(s.maxSagV)} (${s.maxSagPct!.toFixed(1)}%) from ${fmtV(s.maxSagReferenceV!)} no-load`
         + `${s.maxSagTrusted ? '' : ' (reference not trusted - too old, or the rest of the house moved)'}`;
-    const ohms = s.medianOhms == null
-      ? 'no step estimate'
-      : `~${s.medianOhms.toFixed(2)}Ω (median of ${s.stepEstimates} steps)`;
+    let ohms = `~${s.medianOhms?.toFixed(2)}Ω (median of ${s.stepEstimates} steps)`;
+    if (s.medianOhms == null) {
+      ohms = s.stepEstimates === 0 ? 'no step estimate'
+        : `${s.stepEstimates} step${s.stepEstimates > 1 ? 's' : ''} - too few to trust`;
+    }
     this.host.log(`[voltage] session: lowest ${fmtV(s.minV)} at ${s.minVAtA}A over ${s.loadedReadings} readings, `
-      + `${sag}, impedance ${ohms}${s.uncommandedDrops ? `, car cut its own draw ${s.uncommandedDrops}x` : ''}`);
+      + `${sag}, impedance ${ohms}${s.uncommandedDrops ? `, car cut its own draw ${s.uncommandedDrops}x` : ''}`
+      + `${s.implausibleReadings ? `, ${s.implausibleReadings} implausible readings ignored` : ''}`);
   }
 
   /**
@@ -1559,9 +1636,13 @@ export class ChargeController {
     this.solarStaleWarned = false;
     const { gridSignedW } = sample;
     this.lastGridSignedW = gridSignedW;
-    // This grid reading reflects the charger as it was SOLAR_FEED_LAG_MS ago.
+    // This grid reading reflects the charger as it was about SOLAR_FEED_LAG_MS
+    // ago - unless the charger's power swung across the window the lag may
+    // really fall in, when which side the grid saw is unknown (and unknown never
+    // blocks the sag alarm, where a wrong guess can).
     const lagChargerW = this.chargerPowerAt(now - SOLAR_FEED_LAG_MS);
-    this.lastOtherLoadW = lagChargerW == null ? null : gridSignedW - lagChargerW;
+    const swingW = this.chargerPowerSwingW(now - SOLAR_FEED_LAG_MS - SOLAR_FEED_LAG_SLACK_MS, now);
+    this.lastOtherLoadW = lagChargerW == null || swingW > CHARGER_SWING_MAX_W ? null : gridSignedW - lagChargerW;
     this.lastPvW = sample.pvW ?? 0;
     this.lastBatteryW = sample.batteryW ?? 0;
     if (!this.solarLoop) return;

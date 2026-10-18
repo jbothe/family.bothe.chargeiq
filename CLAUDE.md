@@ -629,8 +629,38 @@ next move.
   share near 8V of 16V). The grid figure lags the charger's by ~14s, so `onSolarSample()` pairs it
   with the charger's power from `SOLAR_FEED_LAG_MS` earlier (`chargerPowerAt()`, a 60s history).
   Paired with the power *now*, every charger ramp reads as the house moving the other way by the
-  ramp's size, which would suppress exactly the alarms that matter. No solar feed (or a stale one)
-  means `otherLoadW` is null, and unknown never blocks the alarm.
+  ramp's size, which would suppress exactly the alarms that matter. **But the lag isn't fixed**
+  (8s after an unplug the grid had already dropped by the car's 7kW), so a charger power swing over
+  500W anywhere from `SOLAR_FEED_LAG_MS + 6s` ago up to now makes `otherLoadW` unknown
+  (`chargerPowerSwingW()`), and the confirmed-0 at a stop is recorded in the power history, since
+  the charger sends nothing once it stops. Before this, a reference paired across an unplug read the
+  house at -6.2kW, and the next session's genuine 5.9% sag was put down to the house "moving
+  +9.1kW" and not counted. No solar feed (or a stale one) means `otherLoadW` is null, and unknown
+  never blocks the alarm.
+  **The charger's own voltage is not always a measurement.** Confirmed on hardware 2026-10-18,
+  against the Tesla's meter: at 6A and 32A the Wallbox read within ~3% of the car (237 vs 231V, 225
+  vs 218V), but while the car was cutting itself to 23.7A for voltage drop it reported **254-281V**
+  against the car's 223V - always exactly `power / current`, so its `Power.Active.Import` was ~1kW
+  high too. Current stayed right. A loaded reading more than `IMPLAUSIBLE_RISE_PCT` (3%) above the
+  no-load reference is therefore dropped from sag, steps and the session stats (`[voltage] ignoring
+  readings: …` once per run, a count in the session summary - which is kept even when every loaded
+  reading was implausible, since then the count is the whole finding). Only checkable with a reference;
+  without one such a reading still counts. Separately, **the reading `bind()` replays from the
+  ChargePoint cache never reaches the voltage monitor or the charger-power history**
+  (`onMeterValues(r, replayed)`): it can predate a disconnect or even an unplug, and stamped "now" it
+  became one end of a bogus 3.92Ω step at the reconnect after a replug. The replay still fills the
+  capabilities and `lastPowerW`, which is what it exists for - except `Current.Offered`, which an
+  unplug also clears (`forgetOffered()`), since a previous session's figure otherwise read as the
+  next one's "charger offering only 28A". The session summary gives **no impedance from fewer than
+  `MIN_STEPS_FOR_MEDIAN` (3) steps** ("1 step - too few to trust"): the car cutting its current as it
+  was unplugged read as 1.50Ω, and as the session's only step it became the "median". This charger
+  sends no `MeterValues` while `Available`, so a no-load reference comes only from a 0A reading inside
+  a session: a pause, or - sometimes, not always - one reading at plug-in before the car draws
+  (239V at 0A, seen on one replug and not on the one before). A boost window with neither gets no
+  sag figures and no plausibility check.
+  Measured that day with the car's meter
+  and the Wallbox's together: ~0.50Ω at the car (231V@6A -> 218V@32A), ~0.31-0.43Ω of it upstream
+  of the Wallbox.
 - **`parseMeterValues()` reports what it drops.** Anything outside the four measurands it maps
   (`Power.Active.Import`/`Current.Import`/`Voltage`/`Energy.Active.Import.Register`) lands in
   `Readings.unhandled` as `measurand -> "value unit @phase"` - captured *before* the numeric check,
@@ -838,15 +868,18 @@ exists to make this case previewable (clears the forced `.homey-dark-mode` overr
 real OS/browser `prefers-color-scheme` drives that fallback), but it can only simulate the
 disagreement, not confirm which way a real widget WKWebView actually behaves.
 
-**The Homey Energy contract** (see that section above) is validated at `--level verified` and the
-listener logic is unit-tested, but not yet run on a Homey: that the charger now shows in Energy, that
-an already-paired device picks up the system `evcharger_charging` once the app's own definition is
-gone (if Energy still doesn't list it, re-pairing is the fallback), and that the 1s-deferred
-`republishMode()` actually wins over the value Homey stores from the picker.
+**The Homey Energy contract** (see that section above): **confirmed on hardware 2026-10-18** - after
+a re-pair, the charger shows in Homey's Energy view. (Whether an *already-paired* device would have
+picked up the system `evcharger_charging` in place was never tested: the owner re-paired instead.)
+Still unconfirmed: that the 1s-deferred `republishMode()` wins over the value Homey stores from the
+picker, and that a lone `target_power` change while not charging is kept without starting the car
+(unit-tested only).
 
 **Pairing's wait for a restarting charger** (see the top of this file) is unit-tested and previewed
-(`test/pair-login-preview.html` has a `getChargerStatus` toggle), but not yet run through a real
-pairing. Homey documents no timeout on a `list_devices` handler; if its pair UI gives up before the
+(`test/pair-login-preview.html` has a `getChargerStatus` toggle). A real pairing on 2026-10-18
+worked (charger connected 11s after the start view, `list_devices` answered 4s later), but that
+charger already had the OCPP URL, so the long wait for a *restarting* charger is still unexercised.
+Homey documents no timeout on a `list_devices` handler; if its pair UI gives up before the
 5-minute wait does, the start view's status line still tells the user when to press Continue.
 Also unconfirmed: that Homey reloads the widget after its settings are changed, which is the only
 point `onHomeyReady` re-reads them.

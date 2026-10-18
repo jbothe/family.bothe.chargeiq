@@ -3232,6 +3232,59 @@ test('sustained sag under load raises a warning and logs the evidence', () => {
   assert.ok(logs.some((l) => l.includes('warning raised')));
 });
 
+test('implausible voltage readings are logged once per run and counted in the session summary', () => {
+  // Hardware, 2026-10-18: 254-281V at 23.7A against a ~240V reference, while
+  // the car's own meter read 223V.
+  const { cp, logs } = makeBoundController();
+  cp.emit('status', status('SuspendedEV'));
+  cp.emit('meterValues', { power: 0, current: 0, voltage: 240 });
+  cp.emit('meterValues', { power: 6505, current: 23.4, voltage: 278 });
+  cp.emit('meterValues', { power: 6660, current: 23.7, voltage: 281 });
+  const ignoring = logs.filter((l) => l.startsWith('[voltage] ignoring readings'));
+  assert.deepEqual(ignoring, [
+    "[voltage] ignoring readings: 278V under load is above the 240V no-load reference - the charger's voltage reading is off",
+  ], 'once for the run, not every reading');
+  assert.ok(!logs.some((l) => l.startsWith('[voltage] step')), 'no step to or from an implausible reading');
+
+  cp.emit('meterValues', { power: 7000, current: 31.6, voltage: 222 });
+  assert.ok(logs.includes('[voltage] readings plausible again'));
+  cp.emit('status', status('Available'));
+  assert.ok(logs.some((l) => l.startsWith('[voltage] session:') && l.endsWith(', 2 implausible readings ignored')));
+});
+
+test('a session with only implausible readings still logs a summary saying so', () => {
+  const { cp, logs } = makeBoundController();
+  cp.emit('status', status('SuspendedEV'));
+  cp.emit('meterValues', { power: 0, current: 0, voltage: 240 });
+  cp.emit('meterValues', { power: 6505, current: 23.4, voltage: 278 });
+  cp.emit('meterValues', { power: 6660, current: 23.7, voltage: 281 });
+  cp.emit('status', status('Available'));
+  assert.ok(logs.includes('[voltage] session: no plausible readings under load - all 2 were above the no-load '
+    + 'reference and ignored'), logs.filter((l) => l.startsWith('[voltage]')).join('\n'));
+});
+
+test('a session with too few steps reports no impedance figure', () => {
+  const { cp, logs } = makeBoundController();
+  cp.emit('status', status('SuspendedEV'));
+  cp.emit('meterValues', { power: 7133, current: 31.7, voltage: 226 });
+  cp.emit('meterValues', { power: 6426, current: 27.7, voltage: 232 }); // the unplug transient: one step
+  cp.emit('status', status('Available'));
+  assert.ok(logs.some((l) => l.startsWith('[voltage] session:') && l.includes('impedance 1 step - too few to trust')),
+    logs.filter((l) => l.startsWith('[voltage] session:')).join('\n'));
+});
+
+test("an unplug clears the offered figure, so the next session doesn't inherit it", () => {
+  const { c, cp, caps } = makeBoundController();
+  cp.emit('status', status('SuspendedEV'));
+  cp.emit('meterValues', {
+    power: 6426, current: 27.7, voltage: 232, offered: 28,
+  });
+  assert.equal(caps.charge_current_offered, 28);
+  cp.emit('status', status('Available'));
+  assert.equal(caps.charge_current_offered, null);
+  assert.equal(c.getConnectionInfo().online, true, 'still connected: only the session ended');
+});
+
 test('a drop the charger limit never asked for is logged as the car cutting its own draw', async () => {
   const {
     c, cp, caps, logs,
@@ -3262,8 +3315,9 @@ test('a sag the rest of the house caused is logged but raises no warning (the 11
   cp.emit('meterValues', { power: 0, current: 0, voltage: 239 }); // reference, house at ~0
   t.mock.timers.tick(20000);
   cp.emit('meterValues', { power: 5300, current: 23, voltage: 231 });
-  t.mock.timers.tick(20000);
-  // A home battery charging and the house came on: grid = the car (as it was 14s ago) + 4.7kW.
+  t.mock.timers.tick(25000);
+  // A home battery charging and the house came on: grid = the car (steady well before the lag
+  // window) + 4.7kW.
   c.onSolarSample({ gridSignedW: 10000, pvW: 1800, batteryW: 3290 }, Date.now());
   for (const power of [5450, 5600, 5750]) {
     t.mock.timers.tick(5000);
@@ -3294,6 +3348,40 @@ test('a charger ramp the lagging grid reading has not caught up with is not mist
   }
   assert.ok(String(warnings[warnings.length - 1]).includes('Voltage at the charger'),
     'the house did not move, so the charger circuit is still the suspect');
+});
+
+test('a grid reading taken across the charger stopping does not invent a house-load shift', (t) => {
+  // Hardware, 2026-10-18: 8s after an unplug the grid had already dropped by the
+  // car's 7kW, but was paired with the charger's power from 14s earlier (still
+  // charging), so the reference read the house at -6.2kW. The next session's
+  // genuine 5.9% sag was then put down to the house "moving +9.1kW" and not counted.
+  t.mock.timers.enable({ apis: ['Date'], now: 1_000_000 });
+  const {
+    c, cp, warnings, logs,
+  } = makeBoundController();
+  cp.emit('status', status('SuspendedEV'));
+  cp.emit('startTransaction', 6, { idTag: 'x', meterStart: 0 });
+  for (let i = 0; i < 4; i++) {
+    cp.emit('meterValues', { power: 7155, current: 31.8, voltage: 225 });
+    t.mock.timers.tick(5000);
+  }
+  cp.emit('stopTransaction', { transactionId: 6, meterStop: 1000, timestamp: new Date().toISOString() });
+  cp.emit('status', status('Available'));
+  t.mock.timers.tick(8000);
+  c.onSolarSample({ gridSignedW: 940, pvW: 3990, batteryW: 0 }, Date.now());
+
+  t.mock.timers.tick(8000);
+  cp.emit('status', status('SuspendedEV'));
+  cp.emit('meterValues', { power: 0, current: 0, voltage: 239 }); // the no-load reference
+  t.mock.timers.tick(25000);
+  c.onSolarSample({ gridSignedW: 2890, pvW: 3990, batteryW: 0 }, Date.now());
+  for (let i = 0; i < 3; i++) {
+    t.mock.timers.tick(5000);
+    cp.emit('meterValues', { power: 7155, current: 31.8, voltage: 225 });
+  }
+  assert.ok(!logs.some((l) => l.includes('since the reference (over 1.5kW)')), logs.join('\n'));
+  assert.ok(String(warnings[warnings.length - 1]).includes('Voltage at the charger'),
+    'a 5.9% sag with nothing known to have moved in the house still raises the alarm');
 });
 
 test('the decision line says when a configured cap cannot be computed, and why', () => {
@@ -4316,5 +4404,32 @@ test('a link back after a long outage starts a fresh hold rather than inheriting
   charging();
   await waitMs();
   assert.deepEqual(writes, [], 'held again, though 80s have passed since the first bind');
+  c.destroy();
+});
+
+test('a cached reading replayed on bind is not fed to the voltage monitor as a new one', async () => {
+  // Hardware, 2026-10-18: the last reading before an unplug (23.7A, 256V) was
+  // replayed at the reconnect after the replug and became one end of a
+  // "3.92Ω" step against the first real reading at 31.6A.
+  const fakeClient: RpcClient = {
+    identity: 'X', handle: () => {}, call: async () => ({ status: 'Accepted' }), close: async () => {}, on: () => {},
+  };
+  const cp = new ChargePoint({
+    identity: 'X', authorize: () => true, nextTransactionId: () => 1, livenessTimeoutMs: 0,
+  });
+  cp.attach(fakeClient);
+  (cp as unknown as { lastReadings: unknown }).lastReadings = {
+    power: 6067, current: 23.7, voltage: 256, offered: 28,
+  };
+  const cs = new FakeCentralSystem() as unknown as CentralSystem;
+  const { c, logs } = makeWarnController({}, cs);
+  cs.emit('connect', cp);
+  await waitMs(5);
+  assert.ok(logs.some((l) => l.startsWith('[charger] power=6067W')), 'the replay still fills in what it always did');
+
+  assert.ok(!logs.some((l) => l.includes('offering 28A')), "the previous session's offered figure stays out");
+
+  cp.emit('meterValues', { power: 7110, current: 31.6, voltage: 225 });
+  assert.ok(!logs.some((l) => l.startsWith('[voltage] step')), 'no step from the replayed reading');
   c.destroy();
 });

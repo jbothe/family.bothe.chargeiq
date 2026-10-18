@@ -26,6 +26,17 @@ export const REFERENCE_MAX_AGE_MS = 30 * 60000;
  */
 export const OTHER_LOAD_MAX_SHIFT_W = 1500;
 
+/**
+ * A loaded reading this far *above* the no-load reference is not a measurement
+ * to trust. Voltage falls under load; it can sit a little above an older
+ * reference (grid drift, another load switching off), but not by this much.
+ * Confirmed on hardware: a Wallbox reported 254-281V at 23.7A against a ~240V
+ * reference, while the car's own meter read 223V - its voltage (and the power
+ * derived from it) went wrong while the car was cutting its own current for
+ * voltage drop. Such a reading is dropped from sag, steps and the session stats.
+ */
+export const IMPLAUSIBLE_RISE_PCT = 3;
+
 /** Sag at or above this share of the no-load voltage counts toward the alarm. */
 export const SAG_ALARM_PCT = 5;
 
@@ -37,6 +48,15 @@ export const STEP_MIN_A = 4;
 
 /** Readings further apart than this aren't one step: other loads have had time to move too. */
 export const STEP_MAX_GAP_MS = 30000;
+
+/**
+ * Fewer step estimates than this and the session summary gives no impedance.
+ * One step can be a transient: confirmed on hardware, the car cutting its
+ * current as it was unplugged read as 1.50Ω on a circuit whose deliberate steps
+ * that day gave 0.33-0.52Ω - and as the session's only step, it became the
+ * summary's "median".
+ */
+export const MIN_STEPS_FOR_MEDIAN = 3;
 
 /** How many step estimates the session median is taken over. */
 const STEP_HISTORY = 20;
@@ -98,6 +118,11 @@ export interface SagReading {
   step: VoltageStep | null;
   /** The alarm latched on this reading. */
   alarmRaised: boolean;
+  /**
+   * Loaded, yet more than IMPLAUSIBLE_RISE_PCT above the reference: ignored for
+   * sag, steps and the session stats (see IMPLAUSIBLE_RISE_PCT).
+   */
+  implausible: boolean;
 }
 
 /** What the alarm latched on - the reading that tipped it over. */
@@ -110,17 +135,20 @@ export interface SagAlarm {
 
 export interface VoltageSessionSummary {
   loadedReadings: number;
-  minV: number;
-  minVAtA: number;
+  /** Lowest plausible loaded voltage and its current, or null when every loaded reading was implausible. */
+  minV: number | null;
+  minVAtA: number | null;
   maxSagV: number | null;
   maxSagPct: number | null;
   maxSagReferenceV: number | null;
   /** Whether the reading behind maxSag had a trusted reference (see SagReading.referenceTrusted). */
   maxSagTrusted: boolean | null;
-  /** Median of the step estimates, or null if no step produced one. */
+  /** Median of the step estimates, or null with fewer than MIN_STEPS_FOR_MEDIAN of them. */
   medianOhms: number | null;
   stepEstimates: number;
   uncommandedDrops: number;
+  /** Loaded readings ignored as implausible (see IMPLAUSIBLE_RISE_PCT). */
+  implausibleReadings: number;
 }
 
 export function median(xs: number[]): number | null {
@@ -164,23 +192,29 @@ export class VoltageMonitor {
 
   private uncommandedDrops = 0;
 
+  private implausibleReadings = 0;
+
   /** The latched alarm, or null. Survives endSession(); only clearAlarm() drops it. */
   get alarm(): SagAlarm | null {
     return this.alarmState;
   }
 
   add(s: VoltageSample): SagReading {
-    const step = this.stepFrom(this.prev, s);
-    this.prev = s;
+    const otherLoadW = s.otherLoadW ?? null;
+    if (s.current < NO_LOAD_MAX_A) this.reference = { voltage: s.voltage, at: s.at, otherLoadW };
+    const ref = this.reference;
+    const implausible = ref != null && s.current >= LOADED_MIN_A
+      && s.voltage > ref.voltage * (1 + IMPLAUSIBLE_RISE_PCT / 100);
+
+    // An implausible reading is neither end of a step: the next one starts fresh.
+    const step = implausible ? null : this.stepFrom(this.prev, s);
+    this.prev = implausible ? null : s;
     if (step?.ohms != null) {
       this.stepOhms.push(step.ohms);
       if (this.stepOhms.length > STEP_HISTORY) this.stepOhms.shift();
     }
     if (step?.uncommanded) this.uncommandedDrops += 1;
 
-    const otherLoadW = s.otherLoadW ?? null;
-    if (s.current < NO_LOAD_MAX_A) this.reference = { voltage: s.voltage, at: s.at, otherLoadW };
-    const ref = this.reference;
     const referenceAgeMs = ref ? s.at - ref.at : null;
     const referenceFresh = referenceAgeMs != null && referenceAgeMs <= REFERENCE_MAX_AGE_MS;
     const otherLoadShiftW = ref?.otherLoadW != null && otherLoadW != null ? otherLoadW - ref.otherLoadW : null;
@@ -200,8 +234,14 @@ export class VoltageMonitor {
       newMax: false,
       step,
       alarmRaised: false,
+      implausible,
     };
 
+    if (implausible) {
+      // No information either way, so the alarm's run of readings is left as is.
+      this.implausibleReadings += 1;
+      return out;
+    }
     if (s.current < LOADED_MIN_A) {
       this.overCount = 0;
       return out;
@@ -255,22 +295,24 @@ export class VoltageMonitor {
 
   /**
    * Close out the session's statistics and return them, or null if nothing was
-   * measured under load. The no-load reference and any latched alarm are kept -
+   * measured under load. A session whose loaded readings were all implausible
+   * still gets one: that count is the finding. The no-load reference and any latched alarm are kept -
    * the reference is still just a voltage, and the alarm is a claim the user
    * hasn't necessarily seen yet.
    */
   endSession(): VoltageSessionSummary | null {
-    const summary = this.minV ? {
+    const summary = this.minV || this.implausibleReadings > 0 ? {
       loadedReadings: this.loadedReadings,
-      minV: this.minV.voltage,
-      minVAtA: this.minV.current,
+      minV: this.minV?.voltage ?? null,
+      minVAtA: this.minV?.current ?? null,
       maxSagV: this.maxSag?.sagV ?? null,
       maxSagPct: this.maxSag?.sagPct ?? null,
       maxSagReferenceV: this.maxSag?.referenceV ?? null,
       maxSagTrusted: this.maxSag?.trusted ?? null,
-      medianOhms: median(this.stepOhms),
+      medianOhms: this.stepOhms.length >= MIN_STEPS_FOR_MEDIAN ? median(this.stepOhms) : null,
       stepEstimates: this.stepOhms.length,
       uncommandedDrops: this.uncommandedDrops,
+      implausibleReadings: this.implausibleReadings,
     } : null;
     this.prev = null;
     this.overCount = 0;
@@ -279,6 +321,7 @@ export class VoltageMonitor {
     this.maxSag = null;
     this.stepOhms = [];
     this.uncommandedDrops = 0;
+    this.implausibleReadings = 0;
     return summary;
   }
 

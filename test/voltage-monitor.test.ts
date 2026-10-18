@@ -3,7 +3,8 @@
 import test from 'node:test';
 import assert from 'node:assert';
 import {
-  VoltageMonitor, VoltageSample, median, OTHER_LOAD_MAX_SHIFT_W, REFERENCE_MAX_AGE_MS, SAG_ALARM_READINGS, STEP_MAX_GAP_MS,
+  VoltageMonitor, VoltageSample, median, IMPLAUSIBLE_RISE_PCT, MIN_STEPS_FOR_MEDIAN, OTHER_LOAD_MAX_SHIFT_W,
+  REFERENCE_MAX_AGE_MS, SAG_ALARM_READINGS, STEP_MAX_GAP_MS,
 } from '../lib/control/VoltageMonitor';
 
 const S = (at: number, voltage: number, current: number, limitA: number | null = 32): VoltageSample => ({
@@ -171,7 +172,7 @@ test('endSession summarises and resets the stats, but keeps the reference and th
   assert.equal(s.maxSagV, 16);
   assert.equal(s.maxSagReferenceV, 240);
   assert.equal(s.stepEstimates, 2);
-  assert.equal(s.medianOhms, (14 / 32 + 3 / 8) / 2);
+  assert.equal(s.medianOhms, null, 'two steps are too few for a median (MIN_STEPS_FOR_MEDIAN)');
   assert.equal(s.uncommandedDrops, 1);
 
   assert.equal(m.endSession(), null, 'nothing measured since');
@@ -188,4 +189,82 @@ test('median', () => {
   assert.equal(median([]), null);
   assert.equal(median([3, 1, 2]), 2);
   assert.equal(median([4, 1, 3, 2]), 2.5);
+});
+
+// Hardware, 2026-10-18: a Wallbox reported 254-281V at 23.7A against a ~240V
+// no-load reference while the car's own meter read 223V.
+test('a loaded reading well above the no-load reference is ignored as implausible', () => {
+  const m = new VoltageMonitor();
+  m.add(S(0, 240, 0));
+  const r = m.add(S(5000, 278, 23.7));
+  assert.equal(r.implausible, true);
+  assert.equal(r.sagV, null, 'no sag figure from a reading that cannot be trusted');
+  assert.equal(r.step, null);
+  const s = m.add(S(10000, 222, 31.6));
+  assert.equal(s.implausible, false);
+  assert.equal(s.step, null, 'a step never starts from an implausible reading');
+  assert.equal(s.sagV, 18);
+  const summary = m.endSession()!;
+  assert.equal(summary.implausibleReadings, 1);
+  assert.equal(summary.loadedReadings, 1, 'only the plausible reading counts');
+  assert.equal(summary.minV, 222);
+});
+
+test('a loaded reading a little above the reference is still plausible', () => {
+  // Grid drift, or another load switching off, can lift it slightly.
+  const m = new VoltageMonitor();
+  m.add(S(0, 240, 0));
+  const edge = 240 * (1 + IMPLAUSIBLE_RISE_PCT / 100);
+  const r = m.add(S(5000, Math.floor(edge), 31.6));
+  assert.equal(r.implausible, false);
+  assert.ok(r.sagV! < 0, 'reported as it is: a small negative sag');
+  assert.equal(m.add(S(10000, Math.ceil(edge) + 1, 31.6)).implausible, true);
+});
+
+test('without a reference, or below charging current, nothing is judged implausible', () => {
+  const m = new VoltageMonitor();
+  assert.equal(m.add(S(0, 278, 23.7)).implausible, false, 'nothing to compare against');
+  m.add(S(5000, 240, 0));
+  assert.equal(m.add(S(10000, 260, 3)).implausible, false, 'not loaded');
+});
+
+test('an implausible reading leaves the alarm run where it was', () => {
+  const m = new VoltageMonitor();
+  m.add(S(0, 240, 0));
+  for (let i = 1; i < SAG_ALARM_READINGS; i++) m.add(S(i * 5000, 222, 31.6));
+  m.add(S(SAG_ALARM_READINGS * 5000, 280, 23.7));
+  const r = m.add(S((SAG_ALARM_READINGS + 1) * 5000, 222, 31.6));
+  assert.equal(r.alarmRaised, true, 'no information either way: it neither breaks nor extends the run');
+});
+
+test('the session median needs MIN_STEPS_FOR_MEDIAN steps', () => {
+  // Hardware, 2026-10-18: the car cutting its current as it was unplugged read
+  // as 1.50Ω, and as the session's only step it became the summary's "median".
+  const m = new VoltageMonitor();
+  m.add(S(0, 236, 6));
+  m.add(S(5000, 232, 15.6)); // 4V/9.6A
+  m.add(S(10000, 227, 25.6)); // 5V/10A
+  assert.equal(m.endSession()!.medianOhms, null, `${MIN_STEPS_FOR_MEDIAN - 1} steps`);
+  m.add(S(20000, 236, 6));
+  m.add(S(25000, 232, 15.6));
+  m.add(S(30000, 227, 25.6));
+  m.add(S(35000, 225, 31.6)); // 2V/6A
+  const s = m.endSession()!;
+  assert.equal(s.stepEstimates, 3);
+  assert.equal(s.medianOhms, median([4 / 9.6, 5 / 10, 2 / 6]));
+});
+
+test('a session whose loaded readings were all implausible still gets a summary', () => {
+  // The count is the finding: it says the charger's voltage was off all session.
+  const m = new VoltageMonitor();
+  m.add(S(0, 240, 0));
+  m.add(S(5000, 278, 23.7));
+  m.add(S(10000, 281, 23.7));
+  const s = m.endSession();
+  assert.ok(s, 'not dropped');
+  assert.equal(s.implausibleReadings, 2);
+  assert.equal(s.loadedReadings, 0);
+  assert.equal(s.minV, null);
+  assert.equal(s.minVAtA, null);
+  assert.equal(m.endSession(), null, 'and the count resets with the session');
 });
