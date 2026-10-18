@@ -82,7 +82,9 @@ export type EnergyControl =
   | { action: 'resume' }
   /** amps absent: the controller's own default (its configured maximum). */
   | { action: 'charge'; amps?: number }
-  | { action: 'off' };
+  | { action: 'off' }
+  /** Nothing to do: a target_power kept for the next start (Homey stores the value itself). */
+  | { action: 'none' };
 
 /**
  * What a change to `target_power` / `target_power_mode` / `evcharger_charging`
@@ -95,25 +97,36 @@ export type EnergyControl =
  * value was picked - which of scheduled/solar/idle applies is derived, not
  * chosen, so the controller writes the real one back on its next tick.
  *
- * `current` is the capabilities' values before this change, used to fill in
- * whatever wasn't part of it.
+ * A `target_power` on its own never starts a charge. Homey's EV charger
+ * contract keeps a lone target power while stopped until an explicit start, and
+ * its card sends `evcharger_charging` (or the mode) alongside whenever it means
+ * to start or stop. On its own it only adjusts, or stops, a charge already
+ * requested.
+ *
+ * `current` fills in whatever wasn't part of the change: the stored
+ * `target_power`, and whether ChargeIQ is asking the charger to charge right now
+ * (a decided current above 0). That request, not `evcharger_charging`, which
+ * drops to false whenever the car stops drawing - a full battery included,
+ * while a manual charge is still latched.
  */
 export function resolveEnergyControl(
   change: EnergyControlChange,
-  current: { watts: number | null; charging: boolean | null },
+  current: { watts: number | null; charging: boolean },
   wattsPerAmp: number,
 ): EnergyControl {
   const handBack = change.mode !== undefined && change.mode !== 'homey';
   if (handBack) return { action: 'resume' };
-  // A new target_power also says whether to charge: Homey's own card starts
-  // charging on a positive value and stops it on zero (or inside the exclude
-  // range, which Homey has already rounded to zero).
   if (change.watts !== undefined) {
     const amps = wattsToAmps(change.watts, wattsPerAmp);
-    if (change.charging === false || amps <= 0) return { action: 'off' };
-    return { action: 'charge', amps };
+    if (change.charging === false) return { action: 'off' };
+    // Sent with an explicit start, or with the switch to Homey mode (Homey's own
+    // card): zero, or inside the exclude range Homey has already rounded to
+    // zero, stops; anything else charges at that power.
+    const explicit = change.charging === true || change.mode === 'homey';
+    if (!explicit && !current.charging) return { action: 'none' };
+    return amps > 0 ? { action: 'charge', amps } : { action: 'off' };
   }
-  const charging = change.charging ?? !!current.charging;
+  const charging = change.charging ?? current.charging;
   if (!charging) return { action: 'off' };
   // Charging switched on with no power given: at the current target_power, or
   // the controller's own default when there isn't one yet.

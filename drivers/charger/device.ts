@@ -98,15 +98,20 @@ module.exports = class ChargerDevice extends Homey.Device {
           charging: values.evcharger_charging as boolean | undefined,
         }, {
           watts: this.getCapabilityValue('target_power') as number | null,
-          charging: this.getCapabilityValue('evcharger_charging') as boolean | null,
+          charging: this.controller.isChargeRequested(),
         }, this.wattsPerAmp());
         if (control.action === 'resume') {
           this.controller.resumeAutomatic(`target power mode -> ${values.target_power_mode}`);
           // Homey stores the picked value once this listener returns, which
           // would leave e.g. "Idle" showing while ChargeIQ resolves Solar.
           this.homey.setTimeout(() => this.controller?.republishMode(), 1000);
-        } else if (control.action === 'charge') await this.controller.startManual(control.amps);
-        else await this.controller.stop();
+        } else if (control.action === 'charge') {
+          await this.controller.startManual(control.amps);
+        } else if (control.action === 'off') {
+          await this.controller.stop();
+        } else {
+          this.homey.app.log(`[mode] target power ${values.target_power}W kept for the next start (not charging)`);
+        }
       },
       500,
     );

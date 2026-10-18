@@ -577,6 +577,18 @@ test('a manual stop keeps the last target_power, for the next session', async ()
   assert.equal(c.getDiagnostics().limitA, 10);
 });
 
+test('isChargeRequested() follows the decided current, not whether the car is drawing', async () => {
+  // What a lone target_power checks before adjusting: a latched manual charge
+  // still counts while the car draws nothing (e.g. a full battery).
+  const { c } = makeController([]);
+  c.tick(at(0, 12, 0));
+  assert.equal(c.isChargeRequested(), false, 'solar with no surplus: paused');
+  await c.startManual(10);
+  assert.equal(c.isChargeRequested(), true);
+  await c.stop();
+  assert.equal(c.isChargeRequested(), false);
+});
+
 test('republishMode() writes the derived mode even when it has not changed', () => {
   // Picking "Idle" in the picker only hands control back; Solar then resolves,
   // which updateMode() alone would never write since it was already Solar.

@@ -1385,6 +1385,15 @@ export class ChargeController {
   }
 
   /**
+   * Whether ChargeIQ is asking the charger to charge right now (a decided current
+   * above 0), whatever the car is doing with it - see resolveEnergyControl(),
+   * which uses this so a lone target_power only adjusts a charge already asked for.
+   */
+  isChargeRequested(): boolean {
+    return (this.desiredAmps ?? 0) > 0;
+  }
+
+  /**
    * Is the charger's own reported status telling us current is actually
    * flowing right now? Deliberately independent of `isCharging()`/
    * `transactionId` - a charge point that never hands back a `StartTransaction`

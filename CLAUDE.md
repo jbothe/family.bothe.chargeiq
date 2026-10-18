@@ -225,7 +225,12 @@ cumulative register); `meter_power.session` is non-cumulative and must never be 
 - One `registerMultipleCapabilityListener` covers `target_power`, `target_power_mode` and
   `evcharger_charging`, because Homey's *Set target power* card sets all three back to back.
   `resolveEnergyControl()` (pure, `lib/capabilities.ts`) turns a change into resume / charge at N A /
-  off. Watts → amps is floored, as everywhere.
+  off / nothing. Watts → amps is floored, as everywhere. **A lone `target_power` never starts a
+  charge** (Homey's contract: kept while stopped until an explicit start; the card sends the charging
+  flag or the mode alongside when it means to start). On its own it only adjusts or stops a charge
+  ChargeIQ is already requesting - `isChargeRequested()`, the decided current, not
+  `evcharger_charging`, which reads false whenever the car stops drawing even with a manual charge
+  latched. Flagged in review on PR #7: the first version started the car from a lone slider move.
 - **Custom Flow cards only where the system ones fall short.** `stop_charging`, `is_charging` and
   `mode_is` were removed as duplicates of the cards Homey generates from `evcharger_charging` (Stop
   charging, Is charging) and `target_power_mode` (mode is). The system *Is charging* reads the

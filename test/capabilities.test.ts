@@ -70,7 +70,7 @@ test('watts convert to amps rounding down, never up', () => {
   assert.equal(wattsToAmps(1000, 0), 0, 'no conversion factor yet means no current');
 });
 
-const NONE = { watts: null, charging: null };
+const NONE = { watts: null, charging: false };
 
 test("Homey's Set target power card latches manual at that power", () => {
   // The card sets all three capabilities together.
@@ -84,14 +84,49 @@ test("Homey's Set target power card latches manual at that power", () => {
   );
 });
 
-test('a target_power on its own also starts or stops charging', () => {
+test('a target_power on its own never starts a charge: it is kept for the next start', () => {
+  // Homey's EV charger contract: a lone target power while stopped waits for an
+  // explicit start. Starting here would start the car from a slider nudge.
   assert.deepEqual(
     resolveEnergyControl({ watts: 2300 }, { watts: 4600, charging: false }, 230),
+    { action: 'none' },
+  );
+  assert.deepEqual(
+    resolveEnergyControl({ watts: 0 }, { watts: 4600, charging: false }, 230),
+    { action: 'none' },
+    'not a stop either: there is nothing to stop, and latching manual off would override automation',
+  );
+  // ...and the next start picks up the kept value.
+  assert.deepEqual(
+    resolveEnergyControl({ charging: true }, { watts: 2300, charging: false }, 230),
+    { action: 'charge', amps: 10 },
+  );
+});
+
+test('a target_power on its own adjusts, or stops, a charge already requested', () => {
+  assert.deepEqual(
+    resolveEnergyControl({ watts: 2300 }, { watts: 4600, charging: true }, 230),
     { action: 'charge', amps: 10 },
   );
   assert.deepEqual(
     resolveEnergyControl({ watts: 0 }, { watts: 4600, charging: true }, 230),
     { action: 'off' },
+  );
+});
+
+test('a target_power sent with an explicit start or the Homey mode switch acts on it', () => {
+  assert.deepEqual(
+    resolveEnergyControl({ watts: 2300, charging: true }, NONE, 230),
+    { action: 'charge', amps: 10 },
+  );
+  assert.deepEqual(
+    resolveEnergyControl({ watts: 2300, mode: 'homey' }, NONE, 230),
+    { action: 'charge', amps: 10 },
+  );
+  assert.deepEqual(
+    resolveEnergyControl({ watts: 0, charging: true }, NONE, 230),
+    { action: 'off' },
+    'a contradictory start at zero power stops rather than charging at a default',
   );
   // Explicitly stopped wins over a positive power: the power is kept for next time.
   assert.deepEqual(
