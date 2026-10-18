@@ -253,3 +253,18 @@ test('the session median needs MIN_STEPS_FOR_MEDIAN steps', () => {
   assert.equal(s.stepEstimates, 3);
   assert.equal(s.medianOhms, median([4 / 9.6, 5 / 10, 2 / 6]));
 });
+
+test('a session whose loaded readings were all implausible still gets a summary', () => {
+  // The count is the finding: it says the charger's voltage was off all session.
+  const m = new VoltageMonitor();
+  m.add(S(0, 240, 0));
+  m.add(S(5000, 278, 23.7));
+  m.add(S(10000, 281, 23.7));
+  const s = m.endSession();
+  assert.ok(s, 'not dropped');
+  assert.equal(s.implausibleReadings, 2);
+  assert.equal(s.loadedReadings, 0);
+  assert.equal(s.minV, null);
+  assert.equal(s.minVAtA, null);
+  assert.equal(m.endSession(), null, 'and the count resets with the session');
+});

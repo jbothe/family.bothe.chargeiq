@@ -1354,6 +1354,11 @@ export class ChargeController {
   private endVoltageSession(): void {
     const s = this.voltage.endSession();
     if (!s) return;
+    if (s.minV == null) {
+      this.host.log(`[voltage] session: no plausible readings under load - all ${s.implausibleReadings} `
+        + 'were above the no-load reference and ignored');
+      return;
+    }
     const sag = s.maxSagV == null
       ? 'no no-load reference'
       : `max sag ${fmtV(s.maxSagV)} (${s.maxSagPct!.toFixed(1)}%) from ${fmtV(s.maxSagReferenceV!)} no-load`

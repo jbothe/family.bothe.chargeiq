@@ -3252,6 +3252,17 @@ test('implausible voltage readings are logged once per run and counted in the se
   assert.ok(logs.some((l) => l.startsWith('[voltage] session:') && l.endsWith(', 2 implausible readings ignored')));
 });
 
+test('a session with only implausible readings still logs a summary saying so', () => {
+  const { cp, logs } = makeBoundController();
+  cp.emit('status', status('SuspendedEV'));
+  cp.emit('meterValues', { power: 0, current: 0, voltage: 240 });
+  cp.emit('meterValues', { power: 6505, current: 23.4, voltage: 278 });
+  cp.emit('meterValues', { power: 6660, current: 23.7, voltage: 281 });
+  cp.emit('status', status('Available'));
+  assert.ok(logs.includes('[voltage] session: no plausible readings under load - all 2 were above the no-load '
+    + 'reference and ignored'), logs.filter((l) => l.startsWith('[voltage]')).join('\n'));
+});
+
 test('a session with too few steps reports no impedance figure', () => {
   const { cp, logs } = makeBoundController();
   cp.emit('status', status('SuspendedEV'));

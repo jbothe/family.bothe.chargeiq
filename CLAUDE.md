@@ -643,7 +643,8 @@ next move.
   against the car's 223V - always exactly `power / current`, so its `Power.Active.Import` was ~1kW
   high too. Current stayed right. A loaded reading more than `IMPLAUSIBLE_RISE_PCT` (3%) above the
   no-load reference is therefore dropped from sag, steps and the session stats (`[voltage] ignoring
-  readings: …` once per run, a count in the session summary). Only checkable with a reference;
+  readings: …` once per run, a count in the session summary - which is kept even when every loaded
+  reading was implausible, since then the count is the whole finding). Only checkable with a reference;
   without one such a reading still counts. Separately, **the reading `bind()` replays from the
   ChargePoint cache never reaches the voltage monitor or the charger-power history**
   (`onMeterValues(r, replayed)`): it can predate a disconnect or even an unplug, and stamped "now" it

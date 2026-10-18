@@ -135,8 +135,9 @@ export interface SagAlarm {
 
 export interface VoltageSessionSummary {
   loadedReadings: number;
-  minV: number;
-  minVAtA: number;
+  /** Lowest plausible loaded voltage and its current, or null when every loaded reading was implausible. */
+  minV: number | null;
+  minVAtA: number | null;
   maxSagV: number | null;
   maxSagPct: number | null;
   maxSagReferenceV: number | null;
@@ -294,15 +295,16 @@ export class VoltageMonitor {
 
   /**
    * Close out the session's statistics and return them, or null if nothing was
-   * measured under load. The no-load reference and any latched alarm are kept -
+   * measured under load. A session whose loaded readings were all implausible
+   * still gets one: that count is the finding. The no-load reference and any latched alarm are kept -
    * the reference is still just a voltage, and the alarm is a claim the user
    * hasn't necessarily seen yet.
    */
   endSession(): VoltageSessionSummary | null {
-    const summary = this.minV ? {
+    const summary = this.minV || this.implausibleReadings > 0 ? {
       loadedReadings: this.loadedReadings,
-      minV: this.minV.voltage,
-      minVAtA: this.minV.current,
+      minV: this.minV?.voltage ?? null,
+      minVAtA: this.minV?.current ?? null,
       maxSagV: this.maxSag?.sagV ?? null,
       maxSagPct: this.maxSag?.sagPct ?? null,
       maxSagReferenceV: this.maxSag?.referenceV ?? null,
